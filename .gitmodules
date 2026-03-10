@@ -1,0 +1,3 @@
+[submodule "ur_2025"]
+	path = UR5/examples
+	url = https://github.com/mit212/ur_2025.git
