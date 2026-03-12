@@ -270,7 +270,7 @@ if __name__ == "__main__":
         def perform_task_logic(self):
             return False
         def cleanup(self):
-            return True
+            pass
     task = ExampleTask(robot_ip="192.168.0.1")
     try:
         if not task.setup():
