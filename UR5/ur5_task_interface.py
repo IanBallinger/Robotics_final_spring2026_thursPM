@@ -24,6 +24,9 @@ class UR5TaskInterface(ABC):
     task-specific control logic.
     """
 
+    waypoints = {}
+    home_position = None
+
     def __init__(self, robot_ip, connect_immediately=False):
         """
         Initialize the task and establish robot connection.
@@ -34,8 +37,7 @@ class UR5TaskInterface(ABC):
         self.robot_ip = robot_ip
         if connect_immediately: #useful for prototyping at task layer.
             self.robot = UR5Arm(self.robot_ip, verbose=True)
-        self.home_position = None  # Define this in setup()
-        self.waypoints = {}
+
 
     @abstractmethod
     def setup(self):
