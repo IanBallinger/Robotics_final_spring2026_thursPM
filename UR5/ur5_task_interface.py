@@ -7,7 +7,7 @@ and perform_task_logic() ) for implementation.
 The example here: Move to a series of 2 waypoints, 
 then return to home position.
 """
-
+import sys
 from abc import ABC, abstractmethod
 import time
 import math
@@ -50,7 +50,7 @@ class UR5TaskInterface(ABC):
         """
         # example code:
         # Define home position (placeholder values - adjust for your robot)
-        # TODO @ian pick some sane defaults, or default to current position
+        # TODO pick some sane defaults, or default to current position
         self.home_position = [PI/2, PI/2, PI/2, PI/2, PI/2, 0.0]  # All joints at some angle
 
         # Example waypoints in p space (x, y, z, rx, ry, rz)
@@ -60,6 +60,7 @@ class UR5TaskInterface(ABC):
             "pick_location": [0.3, 0.2, 0.5, PI, 0.0, 0.0],
             "place_location": [0.5, -0.3, 0.5, PI, 0.0, 0.0],
         }
+        return True
 
     def verify_safety(self):
         """
@@ -262,6 +263,25 @@ class UR5TaskInterface(ABC):
 
 if __name__ == "__main__":
     # Example usage
+    class ExampleTask(UR5TaskInterface):
+        """small example of UR5TaskInterface usage"""
+        def setup(self):
+            return True
+        def perform_task_logic(self):
+            return False
+        def cleanup(self):
+            return True
     task = ExampleTask(robot_ip="192.168.0.1")
-    success = task.execute()
-    exit(0 if success else 1)
+    try:
+        if not task.setup():
+            raise RuntimeError("broken setup step")
+        if not task.execute():
+            raise RuntimeError("broken execute step")
+
+    except RuntimeError as error:
+        print('Caught this error: ' + repr(error))
+
+    finally:
+        task.cleanup()
+
+    sys.exit(0)
