@@ -46,10 +46,10 @@ class ExampleTaskL(UR5TaskInterface): #override these methods specifically to be
         self.waypoints = {"t-pose": [0.3, 0.2, 0.5, PI, 0.0, 0.0]}
 
     def perform_task_logic(self):
-        super.perform_task_logic()
+        pass
 
     def cleanup(self):
-        super.cleanup()
+        pass
 
 class ExampleTaskR(ExampleTaskL):
     def setup(self):
