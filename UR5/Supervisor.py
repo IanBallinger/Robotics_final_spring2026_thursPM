@@ -69,5 +69,5 @@ class Supervisor:
             ExampleTaskR(Handedness.RIGHT),
         ]
         #just a small demo, should control 2 arms with the same movements.
-        results = [ Process(target = task.execute) for task in self.subtasks ] 
+        results = [ Process(target = task.execute) for task in self.subtasks ]
         print(results)
