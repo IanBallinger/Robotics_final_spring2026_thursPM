@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import numpy as np
 from typing import Tuple, List, Optional
 import matplotlib.pyplot as plt
@@ -6,6 +8,9 @@ from matplotlib.ticker import MultipleLocator
 
 # 2D grid over the axis-aligned bbox of a closed polygon; only cells whose
 # centers fall inside the boundary are valid (cell_inside[i, j]).
+
+GridPoint = Tuple[float, float]
+Cell = Tuple[int, int]
 
 
 def _closed_polygon_vertices(
@@ -20,6 +25,51 @@ def _closed_polygon_vertices(
     if not np.allclose(v[0], v[-1]):
         v = np.vstack([v, v[0:1]])
     return v
+
+
+class Obstacle:
+    def __init__(self, points: List[Tuple[float, float]], name: str):
+        self.points = np.asarray(points, dtype=float)
+        self.boundary = _closed_polygon_vertices(self.points)
+        self.name = name
+        self._path = MplPath(self.boundary)
+
+    def contains_point(self, position: Tuple[float, float]) -> bool:
+        """True if ``position`` (meters) lies inside the obstacle polygon boundary."""
+        xy = np.asarray(position, dtype=float).reshape(1, 2)
+        return bool(self._path.contains_points(xy)[0])
+
+    def contains_cell(self, grid_map: Map, i: int, j: int) -> bool:
+        """True if the center of map cell (i, j) lies inside the obstacle."""
+        if not grid_map.is_valid_cell(i, j):
+            return False
+        return self.contains_point(grid_map.cell_center(i, j))
+
+    def covers_cell_centers(self, grid_map: Map) -> np.ndarray:
+        """Bool array (nx, ny): True where the map cell center lies inside this obstacle."""
+        inside = self._path.contains_points(grid_map._cell_centers).reshape(
+            grid_map.nx, grid_map.ny
+        )
+        return inside & grid_map.cell_inside
+
+
+class Landmark:
+    def __init__(self, point: Tuple[float, float], name: str):
+        self.point = point
+        self.name = name
+
+    def _get_delta_to_landmark(
+        self, position: Tuple[float, float]
+    ) -> Tuple[float, float]:
+        return (self.point[0] - position[0], self.point[1] - position[1])
+
+    def get_distance(self, position: Tuple[float, float]) -> Tuple[float, float]:
+        delta = self._get_delta_to_landmark(position)
+        return np.linalg.norm(delta)
+
+    def get_angle(self, position: Tuple[float, float]) -> float:
+        delta = self._get_delta_to_landmark(position)
+        return np.arctan2(delta[1], delta[0])
 
 
 class Map:
@@ -57,15 +107,39 @@ class Map:
 
         path = MplPath(self._vertices)
         inside = path.contains_points(centers).reshape(self.nx, self.ny)
+
         self.cell_inside = inside
+        self._cell_centers = centers
         self.grid = np.zeros((self.nx, self.ny))
+        self.obstacle_mask = np.zeros((self.nx, self.ny), dtype=bool)
+
+        self.centers_inside = self.get_centers_inside()
+
+        self.obstacles: List[Obstacle] = []
+        self.landmarks = []
+
+        self.current_position: GridPoint = (0, 0)
+
+    def get_centers_inside(self) -> np.ndarray:
+        xs = self._cell_centers.reshape(self.nx, self.ny, 2)[:, :, 0][self.cell_inside]
+        ys = self._cell_centers.reshape(self.nx, self.ny, 2)[:, :, 1][self.cell_inside]
+        return np.column_stack((xs, ys))
 
     def is_valid_cell(self, i: int, j: int) -> bool:
         if i < 0 or j < 0 or i >= self.nx or j >= self.ny:
             return False
         return bool(self.cell_inside[i, j])
 
-    def world_to_cell(self, position: Tuple[float, float]) -> Optional[Tuple[int, int]]:
+    def is_open_cell(self, i: int, j: int) -> bool:
+        return self.is_valid_cell(i, j) and not self.obstacle_mask[i, j]
+
+    def cell_has_obstacle(self, i: int, j: int) -> bool:
+        """True iff lattice cell (i, j) is on the map and marked occupied by an obstacle."""
+        if i < 0 or j < 0 or i >= self.nx or j >= self.ny:
+            return False
+        return bool(self.obstacle_mask[i, j])
+
+    def world_to_cell(self, position: GridPoint) -> Optional[Cell]:
         """Map a world point (m) to lattice indices, or None if outside map or invalid cell."""
         x, y = float(position[0]), float(position[1])
         i = int(np.floor((x - self._xmin) / self.resolution))
@@ -74,26 +148,28 @@ class Map:
             return None
         return (i, j)
 
-    def cell_center(self, i: int, j: int) -> Tuple[float, float]:
+    def cell_center(self, i: int, j: int) -> GridPoint:
         if not self.is_valid_cell(i, j):
             raise IndexError(f"cell ({i}, {j}) is not a valid map cell")
         x = self._xmin + (i + 0.5) * self.resolution
         y = self._ymin + (j + 0.5) * self.resolution
         return (x, y)
 
-    def query(self, position: Tuple[float, float]) -> Optional[float]:
-        """Value at the cell containing ``position``, or None if not in a valid cell."""
-        idx = self.world_to_cell(position)
-        if idx is None:
-            return None
-        i, j = idx
-        return float(self.grid[i, j])
+    def add_obstacle(self, obstacle: Obstacle) -> None:
+        self.obstacles.append(obstacle)
+        self.obstacle_mask |= obstacle.covers_cell_centers(self)
 
-    def set_obstacle(self, points: List[Tuple[float, float]], name: str):
-        pass
+    def add_landmark(self, landmark: Landmark):
+        self.landmarks.append(landmark)
 
-    def set_landmark(self, points: List[Tuple[float, float]], name: str):
-        pass
+    def set_plan(self, plan: List[GridPoint]) -> None:
+        self.plan = plan
+        for i in range(len(plan) - 1):
+            cell_i = self.world_to_cell(plan[i])
+            cell_j = self.world_to_cell(plan[i + 1])
+            if cell_i is not None and cell_j is not None:
+                self.grid[cell_i[0], cell_i[1]] = 1
+                self.grid[cell_j[0], cell_j[1]] = 1
 
     def plot(self):
         _, ax = plt.subplots()
@@ -113,11 +189,58 @@ class Map:
             color="k",
             linewidth=1.2,
         )
+
+        # # plot current position
+        # ax.plot(
+        #     self.current_position[0],
+        #     self.current_position[1],
+        #     color="green",
+        #     marker="o",
+        # )
+        # current_cell = np.array(self.world_to_cell(self.current_position))
+        # if current_cell is not None:
+        #     ax.imshow(
+        #         current_cell.T,
+        #         origin="lower",
+        #     )
+
+        # plot obstacles
+        if np.any(self.obstacle_mask):
+            obs_display = np.ma.masked_where(
+                ~self.obstacle_mask, np.ones((self.nx, self.ny))
+            )
+            ax.imshow(
+                obs_display.T,
+                origin="lower",
+                extent=(self._xmin, xmax, self._ymin, ymax),
+                aspect="equal",
+                interpolation="nearest",
+                cmap="Reds",
+                vmin=0,
+                vmax=1,
+                alpha=0.45,
+            )
+        for obstacle in self.obstacles:
+            ax.plot(
+                obstacle.boundary[:, 0],
+                obstacle.boundary[:, 1],
+                color="darkred",
+                linewidth=1.0,
+            )
+
+        # plot landmarks
+        for landmark in self.landmarks:
+            ax.plot(
+                landmark.point[0],
+                landmark.point[1],
+                color="blue",
+                marker="o",
+            )
+
         ax.xaxis.set_minor_locator(MultipleLocator(self.resolution))
         ax.yaxis.set_minor_locator(MultipleLocator(self.resolution))
         ax.xaxis.set_major_locator(MultipleLocator(self.resolution))
         ax.yaxis.set_major_locator(MultipleLocator(self.resolution))
-        # Major ticks use AutoLocator (e.g. 0.5, 1.0); grid() defaults to major off unless enabled.
         ax.grid(which="major", color="0.35", linewidth=0.55)
         ax.grid(which="minor", color="0.35", linewidth=0.35)
         ax.set_axisbelow(True)
@@ -128,4 +251,11 @@ class Map:
 
 if __name__ == "__main__":
     m = Map([(0, 0), (2, 0), (2, 0.5), (1, 0.5), (1, 1), (0, 1), (0, 0)], 0.1)
+    table = Obstacle([(1, 0.5), (1, 1), (0, 1), (0, 0.5)], "table")
+    m.add_obstacle(table)
+    shelf = Obstacle([(0.7, 0.4), (1, 0.4), (1, 0.7), (0.7, 0.7)], "shelf")
+    m.add_obstacle(shelf)
+    at1 = Landmark((0.5, 0.5), "at1")
+    m.add_landmark(at1)
+
     m.plot()
