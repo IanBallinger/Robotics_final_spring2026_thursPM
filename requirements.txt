@@ -1,3 +1,4 @@
+<<<<<<< Updated upstream
 contourpy==1.3.3
 cycler==0.12.1
 fonttools==4.62.1
@@ -15,3 +16,20 @@ python-dateutil==2.9.0.post0
 six==1.17.0
 ur_rtde==1.6.2
 pupil-apriltags
+=======
+contourpy
+cycler
+fonttools
+kiwisolver
+matplotlib
+numpy
+opencv-python
+packaging
+pillow
+pyapriltags
+pyparsing
+pyrealsense2
+python-dateutil
+six
+ur_rtde
+>>>>>>> Stashed changes
