@@ -54,26 +54,20 @@ double velocity_rb = 0;
 double controlEffort_lb = 0;
 double controlEffort_rb = 0;
 
+float w1, w2, w3, w4;
+
+//TODO: handle if we get joystick data to take over manual control
+
 bool handleWheelCommand(const String& line, DesiredWheelVel& des_wheel_spd) {
   if (!line.startsWith("WHL_CMD,")) {
     Serial.println("WRONG_START");
     return false;
   }
 
-  float w1, w2, w3, w4;
   int parsed = sscanf(line.c_str(), "WHL_CMD,%f,%f,%f,%f", &w1, &w2, &w3, &w4);
   if (parsed != 4) {
     Serial.println("WRONG_NUM_VALUES");
     return false;
-  }
-  else{
-    velocity_lb = encoder_lb.getVelocity(); 
-    velocity_rb = encoder_rb.getVelocity(); 
-    controlEffort_lb = pid.calculateParallel(velocity_lb, w1);
-    controlEffort_rb = pid.calculateParallel(velocity_rb, w2);
-
-    wheels[0].drive(controlEffort_lb);
-    wheels[1].drive(controlEffort_rb);
   }
 
   return true;
@@ -113,10 +107,14 @@ void loop() {
 
       DesiredWheelVel cmd;
       if (handleWheelCommand(rx_line, cmd)) {
-        // Apply desired wheel commands here
-        // Example:
-        // wheels[0].setVelocity(cmd.w1);
-        // wheels[1].setVelocity(cmd.w2);
+
+        velocity_lb = encoder_lb.getVelocity(); 
+        velocity_rb = encoder_rb.getVelocity(); 
+        controlEffort_lb = pid.calculateParallel(velocity_lb, w1);
+        controlEffort_rb = pid.calculateParallel(velocity_rb, w2);
+
+        wheels[0].drive(controlEffort_lb);
+        wheels[1].drive(controlEffort_rb);
 
         Serial.print("ACK,");
         Serial.print(cmd.w1); Serial.print(",");
