@@ -3,9 +3,13 @@ from __future__ import annotations
 import heapq
 import os
 import sys
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Union
 
 import numpy as np
+
+import math
+
+
 
 try:
     from ..localization.map import Map, Obstacle, Landmark
@@ -19,6 +23,7 @@ except ImportError:
 
 GridPoint = Tuple[float, float]
 Cell = Tuple[int, int]
+Command = Union[str, float]
 
 
 class AStar:
@@ -39,10 +44,11 @@ class AStar:
     def __heuristic(self, position: GridPoint, goal: GridPoint) -> float:
         return float(np.linalg.norm(np.array(position) - np.array(goal)))
 
-    def __reconstruct_path(self, current: GridPoint) -> List[GridPoint]:
+    def __reconstruct_path(self, current: GridPoint) -> List[GridPoint]:            
         path = [current]
         while current in self.came_from:
-            current = self.came_from[current]
+            prev = current
+            current = self.came_from[prev]
             path.append(current)
         path.reverse()
         return path
@@ -117,6 +123,80 @@ class AStar:
                     heapq.heappush(self.open_set, (neighbor_f, neighbor))
 
         return []
+    
+    def get_guidance_seq(
+        self,
+        start: GridPoint,
+        start_hdg: float,
+        goal: GridPoint,
+        goal_hdg: float,
+        t: float,
+        m: float,
+    ) -> List[Tuple[float, float]]:
+        """
+        Return a sequence of (forward_speed, turn_rate) commands.
+
+        Assumptions:
+        - each command is applied for exactly t seconds
+        - moving forward one grid cell of length m uses v = m / t
+        - turns are in-place with v = 0
+        - first and last turns may be arbitrary angles
+        - interior turns are determined by the 4-connected A* path
+        """
+
+        if t <= 0:
+            raise ValueError("t must be positive")
+        if m <= 0:
+            raise ValueError("m must be positive")
+
+        plan = self.generate_plan(start, goal)
+        if len(plan) < 2:
+            return []
+
+        def wrap_to_pi(angle: float) -> float:
+            return (angle + np.pi) % (2 * np.pi) - np.pi
+
+        def step_heading(p0: GridPoint, p1: GridPoint) -> float:
+            dx = p1[0] - p0[0]
+            dy = p1[1] - p0[1]
+            return float(np.arctan2(dy, dx))
+
+        v_fwd = m / t
+        vel_seq: List[Tuple[float, float]] = []
+
+        path_hdgs = [step_heading(plan[i], plan[i + 1]) for i in range(len(plan) - 1)]
+
+        # Initial heading alignment: arbitrary angle
+        delta = wrap_to_pi(path_hdgs[0] - start_hdg)
+        if not np.isclose(delta, 0.0):
+            vel_seq.append((0.0, delta / t))
+
+        # Forward motions + interior 90-deg turns
+        vel_seq.append((v_fwd, 0.0))
+        for prev_hdg, next_hdg in zip(path_hdgs[:-1], path_hdgs[1:]):
+            delta = wrap_to_pi(next_hdg - prev_hdg)
+
+            if np.isclose(delta, 0.0):
+                vel_seq.append((v_fwd, 0.0))
+            elif np.isclose(abs(delta), np.pi / 2):
+                vel_seq.append((0.0, delta / t))
+                vel_seq.append((v_fwd, 0.0))
+            elif np.isclose(abs(delta), np.pi):
+                raise ValueError(
+                    f"Path contains a 180-degree reversal between segments: "
+                    f"{prev_hdg} -> {next_hdg}"
+                )
+            else:
+                raise ValueError(
+                    f"Unexpected non-grid turn angle in path: {delta}"
+                )
+
+        # Final heading alignment: arbitrary angle
+        delta = wrap_to_pi(goal_hdg - path_hdgs[-1])
+        if not np.isclose(delta, 0.0):
+            vel_seq.append((0.0, delta / t))
+
+        return vel_seq
 
 
 if __name__ == "__main__":
@@ -129,7 +209,11 @@ if __name__ == "__main__":
     map.add_landmark(at1)
 
     astar = AStar(map)
-    plan = astar.generate_plan((0, 0), (1.5, 0.3))
+    start = (0, 0)
+    goal = (1.5, 0.3)
+    plan = astar.generate_plan(start, goal)
+    print(plan)
 
     map.set_plan(plan)
+    print(astar.get_guidance_seq(start,0.2, goal,0.0, 1,0.5))
     map.plot()

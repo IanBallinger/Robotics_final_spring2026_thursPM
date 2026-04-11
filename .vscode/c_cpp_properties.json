@@ -8,7 +8,7 @@
         {
             "name": "PlatformIO",
             "includePath": [
-                "/Users/karanmahesh/MIT:WHOI/Academics/Spring 2026/2.120/Robotics_final_spring2026_thursPM/src",
+                "/home/meche212/Robotics_final_spring2026_thursPM/mobile_robot/src/esp32/src",
                 "/Users/karanmahesh/MIT:WHOI/Academics/Spring 2026/2.120/Robotics_final_spring2026_thursPM/.pio/libdeps/robot/Bounce2/src",
                 "/Users/karanmahesh/MIT:WHOI/Academics/Spring 2026/2.120/Robotics_final_spring2026_thursPM/.pio/libdeps/robot/Adafruit FT5336",
                 "/Users/karanmahesh/MIT:WHOI/Academics/Spring 2026/2.120/Robotics_final_spring2026_thursPM/.pio/libdeps/robot/Adafruit HX8357 Library",
@@ -270,7 +270,7 @@
             "browse": {
                 "limitSymbolsToIncludedHeaders": true,
                 "path": [
-                    "/Users/karanmahesh/MIT:WHOI/Academics/Spring 2026/2.120/Robotics_final_spring2026_thursPM/src",
+                    "/home/meche212/Robotics_final_spring2026_thursPM/mobile_robot/src/esp32/src",
                     "/Users/karanmahesh/MIT:WHOI/Academics/Spring 2026/2.120/Robotics_final_spring2026_thursPM/.pio/libdeps/robot/Bounce2/src",
                     "/Users/karanmahesh/MIT:WHOI/Academics/Spring 2026/2.120/Robotics_final_spring2026_thursPM/.pio/libdeps/robot/Adafruit FT5336",
                     "/Users/karanmahesh/MIT:WHOI/Academics/Spring 2026/2.120/Robotics_final_spring2026_thursPM/.pio/libdeps/robot/Adafruit HX8357 Library",

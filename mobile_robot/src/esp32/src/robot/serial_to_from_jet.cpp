@@ -2,6 +2,9 @@
 #include "imu.h"
 #include "robot_pinout.h"
 #include "MotorDriver.h"
+#include "EncoderVelocity.h"
+#include "PID.h"
+#include "util.h"
 
 // If this type already exists elsewhere in your project, remove this struct.
 struct DesiredWheelVel {
@@ -14,6 +17,7 @@ struct DesiredWheelVel {
   DesiredWheelVel(float w1_, float w2_, float w3_, float w4_)
       : w1(w1_), w2(w2_), w3(w3_), w4(w4_) {}
 };
+
 
 // for IMU
 IMU imu(BNO08X_RESET, BNO08X_CS, BNO08X_INT);
@@ -33,6 +37,17 @@ MotorDriver elevator[1] = {
     {B_DIR1, B_PWM1, 2}
 };
 
+// PID
+#define Kp 0.25
+#define Ki 0.01
+#define Kd 0
+#define pidTau 0.1
+
+EncoderVelocity encoder_lb(ENCODER1_A_PIN, ENCODER1_B_PIN, CPR_312_RPM, 0.2);
+EncoderVelocity encoder_rb(ENCODER2_A_PIN, ENCODER2_B_PIN, CPR_312_RPM, 0.2);
+
+PID pid(Kp, Ki, Kd, 0, pidTau, false);
+
 bool handleWheelCommand(const String& line, DesiredWheelVel& des_wheel_spd) {
   if (!line.startsWith("WHL_CMD,")) {
     Serial.println("WRONG_START");
@@ -45,8 +60,15 @@ bool handleWheelCommand(const String& line, DesiredWheelVel& des_wheel_spd) {
     Serial.println("WRONG_NUM_VALUES");
     return false;
   }
+  else{
+    velocity = encoder.getVelocity(); 
+    controlEffort_lb = pid.calculateParallel(velocity, w1);
+    controlEffort_rb = pid.calculateParallel(velocity, w2);
 
-  des_wheel_spd = DesiredWheelVel(w1, w2, w3, w4);
+    wheels[0].drive(controlEffort_lb);
+    wheels[1].drive(controlEffort_rb);
+  }
+
   return true;
 }
 
