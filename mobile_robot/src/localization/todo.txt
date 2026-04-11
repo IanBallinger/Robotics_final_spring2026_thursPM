@@ -5,3 +5,9 @@
 - camera image -> occupancy grid for collision avoidance
     - should only check against the grid cells immediately adjacent (?) and should ignore known landmarks
     
+
+# 4/9/2026
+order of operations to test:
+ - run camera calibration
+ - validate april tag and realsense pose estimates
+ 

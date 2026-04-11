@@ -17,5 +17,6 @@ class MobileRobotController(PIDController):
 
 
 class ElevatorController(PIDController):
+    # TODO: add attitude control for tray
     def __init__(self, kp: float, ki: float, kd: float):
         super().__init__(kp, ki, kd)

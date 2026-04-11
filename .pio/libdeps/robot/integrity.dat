@@ -1,0 +1,12 @@
+adafruit/Adafruit HX8357 Library@^1.1.19
+SPI
+adafruit/Adafruit Unified Sensor@^1.1.14
+thomasfredericks/Bounce2@^2.72
+adafruit/Adafruit FT5336@^1.0.0
+unexpectedmaker/UMS3 Helper@^1.0.1
+adafruit/Adafruit BusIO@^1.14.5
+adafruit/Adafruit BNO08x@^1.2.5
+madhephaestus/ESP32Encoder@^0.10.2
+adafruit/Adafruit seesaw Library@^1.7.5
+adafruit/Adafruit GFX Library@^1.11.9
+Wire
