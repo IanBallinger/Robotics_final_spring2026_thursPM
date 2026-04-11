@@ -48,6 +48,12 @@ EncoderVelocity encoder_rb(ENCODER2_A_PIN, ENCODER2_B_PIN, CPR_312_RPM, 0.2);
 
 PID pid(Kp, Ki, Kd, 0, pidTau, false);
 
+// initialize values
+double velocity_lb = 0;
+double velocity_rb = 0;
+double controlEffort_lb = 0;
+double controlEffort_rb = 0;
+
 bool handleWheelCommand(const String& line, DesiredWheelVel& des_wheel_spd) {
   if (!line.startsWith("WHL_CMD,")) {
     Serial.println("WRONG_START");
@@ -61,9 +67,10 @@ bool handleWheelCommand(const String& line, DesiredWheelVel& des_wheel_spd) {
     return false;
   }
   else{
-    velocity = encoder.getVelocity(); 
-    controlEffort_lb = pid.calculateParallel(velocity, w1);
-    controlEffort_rb = pid.calculateParallel(velocity, w2);
+    velocity_lb = encoder_lb.getVelocity(); 
+    velocity_rb = encoder_rb.getVelocity(); 
+    controlEffort_lb = pid.calculateParallel(velocity_lb, w1);
+    controlEffort_rb = pid.calculateParallel(velocity_rb, w2);
 
     wheels[0].drive(controlEffort_lb);
     wheels[1].drive(controlEffort_rb);
