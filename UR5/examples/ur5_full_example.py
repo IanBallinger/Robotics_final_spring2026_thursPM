@@ -8,7 +8,7 @@ import numpy as np
 import cv2
 
 # Initialize the RTDE interfaces
-rtde_r = rtde_receive.RTDEReceiveInterface("192.168.1.102")
+rtde_r = rtde_receive.RTDEReceiveInterface("192.168.1.101")
 rtde_c = rtde_control.RTDEControlInterface("192.168.1.102")
 gripper = robotiq_gripper.RobotiqGripper()
 gripper.connect("192.168.1.102", 63352)

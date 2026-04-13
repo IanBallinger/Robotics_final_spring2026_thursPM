@@ -1,3 +1,9 @@
 [submodule "ur_2025"]
 	path = UR5/examples
 	url = https://github.com/mit212/ur_2025.git
+[submodule "lab8_2026"]
+	path = lab8_2026
+	url = https://github.com/mit212/lab8_2026.git
+[submodule "ur_2026"]
+	path = UR5/examples/ur_2026
+	url = https://github.com/mit212/ur_2026.git
