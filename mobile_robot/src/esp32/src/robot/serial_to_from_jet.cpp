@@ -23,34 +23,55 @@ IMU imu(BNO08X_RESET, BNO08X_CS, BNO08X_INT);
 
 String rx_line = "";
 
-constexpr uint8_t num_wheels = 2;
+constexpr uint8_t num_wheels = 4;
 
 // initialize two motors for wheel for now, can extend to 4 maybe
 MotorDriver wheels[num_wheels] = {
     {A_DIR1, A_PWM1, 0},
-    {A_DIR2, A_PWM2, 1}
+    {A_DIR2, A_PWM2, 1},
+    {B_DIR1, B_PWM1, 2},
+    {B_DIR2, B_PWM2, 3}
 };
 
-MotorDriver elevator[1] = {
-    {B_DIR1, B_PWM1, 2}
-};
+// TODO: define pinout for elevator (might be on a different motor driver and serial connection)
+// MotorDriver elevator[1] = {
+//     {B_DIR1, B_PWM1, 2}
+// };
 
-// PID
+//     FRONT
+// [1]-------[2]
+//  |         |
+//  |  ROBOT  |
+//  |         |
+// [3]-------[4]
+//     REAR
+
+
+// PID from wheel velocities to motor driver control efforts
 #define Kp 0.25
 #define Ki 0.01
 #define Kd 0
 #define pidTau 0.1
 
-EncoderVelocity encoder_lb(ENCODER1_A_PIN, ENCODER1_B_PIN, CPR_312_RPM, 0.2);
-EncoderVelocity encoder_rb(ENCODER2_A_PIN, ENCODER2_B_PIN, CPR_312_RPM, 0.2);
+EncoderVelocity encoder1(ENCODER1_A_PIN, ENCODER1_B_PIN, CPR_312_RPM, 0.2);
+EncoderVelocity encoder2(ENCODER2_A_PIN, ENCODER2_B_PIN, CPR_312_RPM, 0.2);
+EncoderVelocity encoder3(ENCODER3_A_PIN, ENCODER3_B_PIN, CPR_312_RPM, 0.2);
+EncoderVelocity encoder4(ENCODER4_A_PIN, ENCODER4_B_PIN, CPR_312_RPM, 0.2);
 
-PID pid(Kp, Ki, Kd, 0, pidTau, false);
+PID pid1(Kp, Ki, Kd, 0, pidTau, false);
+PID pid2(Kp, Ki, Kd, 0, pidTau, false);
+PID pid3(Kp, Ki, Kd, 0, pidTau, false);
+PID pid4(Kp, Ki, Kd, 0, pidTau, false);
 
 // initialize values
-double velocity_lb = 0;
-double velocity_rb = 0;
-double controlEffort_lb = 0;
-double controlEffort_rb = 0;
+double velocity1 = 0;
+double velocity2 = 0;
+double velocity3 = 0;
+double velocity4 = 0;
+double controlEffort1 = 0;
+double controlEffort2 = 0;
+double controlEffort3 = 0;
+double controlEffort4 = 0;
 
 //TODO: handle if we get joystick data to take over manual control
 
@@ -91,17 +112,16 @@ void sendIMU() {
 
 void setup() {
   Serial.begin(115200);
-  imu.setup();
+  // imu.setup();
 
   for (uint8_t i = 0; i < num_wheels; i++) {
     wheels[i].setup();
   }
 
-  elevator[0].setup();
 }
 
 void loop() {
-  imu.update();
+  // imu.update();
 
   while (Serial.available()) {
     char c = static_cast<char>(Serial.read());
@@ -112,14 +132,21 @@ void loop() {
       DesiredWheelVel cmd;
       if (handleWheelCommand(rx_line, cmd)) {
 
-        velocity_lb = encoder_lb.getVelocity(); 
-        velocity_rb = encoder_rb.getVelocity(); 
-        controlEffort_lb = pid.calculateParallel(velocity_lb, cmd.w1);
-        controlEffort_rb = pid.calculateParallel(velocity_rb, cmd.w2);
+        velocity1 = encoder1.getVelocity(); 
+        velocity2 = encoder2.getVelocity(); 
+        velocity3 = encoder3.getVelocity(); 
+        velocity4 = encoder4.getVelocity(); 
+        controlEffort1 = pid1.calculateParallel(velocity1, cmd.w1);
+        controlEffort2 = pid2.calculateParallel(velocity2, cmd.w2);
+        controlEffort3 = pid3.calculateParallel(velocity3, cmd.w3);
+        controlEffort4 = pid4.calculateParallel(velocity4, cmd.w4);
 
-        wheels[0].drive(controlEffort_lb);
-        wheels[1].drive(controlEffort_rb);
+        wheels[0].drive(controlEffort1);
+        wheels[1].drive(controlEffort2);
+        wheels[2].drive(controlEffort3);
+        wheels[3].drive(controlEffort4);
 
+        // For debugging
         Serial.print("ACK,");
         Serial.print(cmd.w1);
         Serial.print(",");

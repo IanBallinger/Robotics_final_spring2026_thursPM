@@ -24,7 +24,7 @@
 
 //IMU pins
 #define BNO08X_CS 12
-#define BNO08X_INT 13
-#define BNO08X_RESET 14
+#define BNO08X_INT 42
+#define BNO08X_RESET 13
 
 #endif // ROBOT_PINOUT_H
