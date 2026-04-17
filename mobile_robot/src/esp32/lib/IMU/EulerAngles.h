@@ -13,6 +13,10 @@ struct EulerAngles {
 struct GyroReadings {
     double rollRate, pitchRate, yawRate;
 };
+
+struct AccelReadings {
+    double ax, ay, az;
+};
 EulerAngles ToEulerAngles(Quaternion q);
 void printEuler(EulerAngles angles);
 void printEulerDeg(EulerAngles angles);

@@ -19,9 +19,7 @@ struct DesiredWheelVel {
 };
 
 
-// for IMU
 IMU imu(BNO08X_RESET, BNO08X_CS, BNO08X_INT);
-GyroReadings gr;
 
 String rx_line = "";
 
@@ -54,8 +52,6 @@ double velocity_rb = 0;
 double controlEffort_lb = 0;
 double controlEffort_rb = 0;
 
-float w1, w2, w3, w4;
-
 //TODO: handle if we get joystick data to take over manual control
 
 bool handleWheelCommand(const String& line, DesiredWheelVel& des_wheel_spd) {
@@ -64,7 +60,8 @@ bool handleWheelCommand(const String& line, DesiredWheelVel& des_wheel_spd) {
     return false;
   }
 
-  int parsed = sscanf(line.c_str(), "WHL_CMD,%f,%f,%f,%f", &w1, &w2, &w3, &w4);
+  int parsed = sscanf(line.c_str(), "WHL_CMD,%f,%f,%f,%f", &des_wheel_spd.w1,
+                      &des_wheel_spd.w2, &des_wheel_spd.w3, &des_wheel_spd.w4);
   if (parsed != 4) {
     Serial.println("WRONG_NUM_VALUES");
     return false;
@@ -74,22 +71,27 @@ bool handleWheelCommand(const String& line, DesiredWheelVel& des_wheel_spd) {
 }
 
 void sendIMU() {
-  // Replace these with actual IMU readings
-  float ax = 0.01f, ay = -0.03f, az = 9.81f;
-  float gx = 0.1f, gy = 0.2f, gz = 0.3f;
+  // Latest fused samples from BNO08x (imu.update() is called each loop).
+  AccelReadings a = imu.getAccelReadings();
+  GyroReadings g = imu.getGyroReadings();
 
   Serial.print("IMU,");
-  Serial.print(ax); Serial.print(",");
-  Serial.print(ay); Serial.print(",");
-  Serial.print(az); Serial.print(",");
-  Serial.print(gx); Serial.print(",");
-  Serial.print(gy); Serial.print(",");
-  Serial.println(gz);
+  Serial.print(static_cast<float>(a.ax));
+  Serial.print(",");
+  Serial.print(static_cast<float>(a.ay));
+  Serial.print(",");
+  Serial.print(static_cast<float>(a.az));
+  Serial.print(",");
+  Serial.print(static_cast<float>(g.rollRate));
+  Serial.print(",");
+  Serial.print(static_cast<float>(g.pitchRate));
+  Serial.print(",");
+  Serial.println(static_cast<float>(g.yawRate));
 }
 
 void setup() {
   Serial.begin(115200);
-  //imu.setup(); // uncomment for when actually connected to IMU
+  imu.setup();
 
   for (uint8_t i = 0; i < num_wheels; i++) {
     wheels[i].setup();
@@ -99,6 +101,8 @@ void setup() {
 }
 
 void loop() {
+  imu.update();
+
   while (Serial.available()) {
     char c = static_cast<char>(Serial.read());
 
@@ -110,16 +114,19 @@ void loop() {
 
         velocity_lb = encoder_lb.getVelocity(); 
         velocity_rb = encoder_rb.getVelocity(); 
-        controlEffort_lb = pid.calculateParallel(velocity_lb, w1);
-        controlEffort_rb = pid.calculateParallel(velocity_rb, w2);
+        controlEffort_lb = pid.calculateParallel(velocity_lb, cmd.w1);
+        controlEffort_rb = pid.calculateParallel(velocity_rb, cmd.w2);
 
         wheels[0].drive(controlEffort_lb);
         wheels[1].drive(controlEffort_rb);
 
         Serial.print("ACK,");
-        Serial.print(cmd.w1); Serial.print(",");
-        Serial.print(cmd.w2); Serial.print(",");
-        Serial.print(cmd.w3); Serial.print(",");
+        Serial.print(cmd.w1);
+        Serial.print(",");
+        Serial.print(cmd.w2);
+        Serial.print(",");
+        Serial.print(cmd.w3);
+        Serial.print(",");
         Serial.println(cmd.w4);
       }
 

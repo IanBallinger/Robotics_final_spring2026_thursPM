@@ -3,12 +3,11 @@ from __future__ import annotations
 import heapq
 import os
 import sys
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Dict, List, Tuple, Union
 
 import numpy as np
-
-import math
-
 
 
 try:
@@ -26,7 +25,54 @@ Cell = Tuple[int, int]
 Command = Union[str, float]
 
 
-class AStar:
+@dataclass(frozen=True)
+class Waypoint:
+    """A map position (``GridPoint``) with desired body heading in radians."""
+
+    xy: GridPoint
+    heading: float
+
+
+def waypoints_from_polyline(
+    path: List[GridPoint],
+    *,
+    end_heading: float | None = None,
+) -> List[Waypoint]:
+    """
+    One ``Waypoint`` per vertex: heading is the tangent toward the next vertex.
+
+    The final waypoint uses ``end_heading`` when provided; otherwise it uses the
+    last segment direction (same as the second-to-last vertex).
+    """
+    if not path:
+        return []
+    if len(path) == 1:
+        h = 0.0 if end_heading is None else end_heading
+        return [Waypoint(path[0], h)]
+
+    out: List[Waypoint] = []
+    for i in range(len(path) - 1):
+        p0, p1 = path[i], path[i + 1]
+        h = float(np.arctan2(p1[1] - p0[1], p1[0] - p0[0]))
+        out.append(Waypoint(p0, h))
+
+    p_prev, p_last = path[-2], path[-1]
+    h_last = (
+        float(end_heading)
+        if end_heading is not None
+        else float(np.arctan2(p_last[1] - p_prev[1], p_last[0] - p_prev[0]))
+    )
+    out.append(Waypoint(p_last, h_last))
+    return out
+
+
+class Planner(ABC):
+    @abstractmethod
+    def generate_plan(self, start: GridPoint, goal: GridPoint) -> List[GridPoint]:
+        pass
+
+
+class AStar(Planner):
     def __init__(self, map: Map):
         self.map = map
         self.centers_inside = {
@@ -44,7 +90,7 @@ class AStar:
     def __heuristic(self, position: GridPoint, goal: GridPoint) -> float:
         return float(np.linalg.norm(np.array(position) - np.array(goal)))
 
-    def __reconstruct_path(self, current: GridPoint) -> List[GridPoint]:            
+    def __reconstruct_path(self, current: GridPoint) -> List[GridPoint]:
         path = [current]
         while current in self.came_from:
             prev = current
@@ -123,80 +169,36 @@ class AStar:
                     heapq.heappush(self.open_set, (neighbor_f, neighbor))
 
         return []
-    
-    def get_guidance_seq(
+
+
+class WaypointSequence:
+    def __init__(
         self,
-        start: GridPoint,
-        start_hdg: float,
-        goal: GridPoint,
-        goal_hdg: float,
-        t: float,
-        m: float,
-    ) -> List[Tuple[float, float]]:
-        """
-        Return a sequence of (forward_speed, turn_rate) commands.
+        start: Waypoint,
+        goal: Waypoint,
+        planner: Planner,
+        capture_radius: float,
+    ):
+        self.start = start
+        self.goal = goal
+        self.planner = planner
+        self.capture_radius = capture_radius
+        self.plan = self.planner.generate_plan(self.start.xy, self.goal.xy)
 
-        Assumptions:
-        - each command is applied for exactly t seconds
-        - moving forward one grid cell of length m uses v = m / t
-        - turns are in-place with v = 0
-        - first and last turns may be arbitrary angles
-        - interior turns are determined by the 4-connected A* path
-        """
+    def generate_plan(self) -> List[GridPoint]:
+        pass
 
-        if t <= 0:
-            raise ValueError("t must be positive")
-        if m <= 0:
-            raise ValueError("m must be positive")
 
-        plan = self.generate_plan(start, goal)
-        if len(plan) < 2:
-            return []
-
-        def wrap_to_pi(angle: float) -> float:
-            return (angle + np.pi) % (2 * np.pi) - np.pi
-
-        def step_heading(p0: GridPoint, p1: GridPoint) -> float:
-            dx = p1[0] - p0[0]
-            dy = p1[1] - p0[1]
-            return float(np.arctan2(dy, dx))
-
-        v_fwd = m / t
-        vel_seq: List[Tuple[float, float]] = []
-
-        path_hdgs = [step_heading(plan[i], plan[i + 1]) for i in range(len(plan) - 1)]
-
-        # Initial heading alignment: arbitrary angle
-        delta = wrap_to_pi(path_hdgs[0] - start_hdg)
-        if not np.isclose(delta, 0.0):
-            vel_seq.append((0.0, delta / t))
-
-        # Forward motions + interior 90-deg turns
-        vel_seq.append((v_fwd, 0.0))
-        for prev_hdg, next_hdg in zip(path_hdgs[:-1], path_hdgs[1:]):
-            delta = wrap_to_pi(next_hdg - prev_hdg)
-
-            if np.isclose(delta, 0.0):
-                vel_seq.append((v_fwd, 0.0))
-            elif np.isclose(abs(delta), np.pi / 2):
-                vel_seq.append((0.0, delta / t))
-                vel_seq.append((v_fwd, 0.0))
-            elif np.isclose(abs(delta), np.pi):
-                raise ValueError(
-                    f"Path contains a 180-degree reversal between segments: "
-                    f"{prev_hdg} -> {next_hdg}"
-                )
-            else:
-                raise ValueError(
-                    f"Unexpected non-grid turn angle in path: {delta}"
-                )
-
-        # Final heading alignment: arbitrary angle
-        delta = wrap_to_pi(goal_hdg - path_hdgs[-1])
-        if not np.isclose(delta, 0.0):
-            vel_seq.append((0.0, delta / t))
-
-        return vel_seq
+__all__ = [
+    "AStar",
+    "Planner",
+    "Waypoint",
+    "WaypointSequence",
+    "GridPoint",
+    "Cell",
+    "Command",
+    "waypoints_from_polyline",
+]
 
 
 if __name__ == "__main__":
@@ -215,5 +217,5 @@ if __name__ == "__main__":
     print(plan)
 
     map.set_plan(plan)
-    print(astar.get_guidance_seq(start,0.2, goal,0.0, 1,0.5))
+    print(waypoints_from_polyline(plan, end_heading=0.0))
     map.plot()

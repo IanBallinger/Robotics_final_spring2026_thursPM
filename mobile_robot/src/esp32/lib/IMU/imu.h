@@ -12,6 +12,7 @@ private:
     Adafruit_BNO08x  bno08x;
     sh2_SensorValue_t sensorValue;
     GyroReadings gyroReadings;
+    AccelReadings accelReadings;
     EulerAngles eulerAngles;
     bool imuDataReady;
     int _intPin;
@@ -26,6 +27,7 @@ public:
     void readIMU();
     void update();
     GyroReadings getGyroReadings();
+    AccelReadings getAccelReadings();
     EulerAngles getEulerAngles();
 };
 

@@ -1,9 +1,15 @@
 #include "imu.h"
 
 
-IMU::IMU(int resetPin, int csPin, int intPin) 
-: bno08x(resetPin), imuDataReady(false), _resetPin(resetPin), _csPin(csPin), _intPin(intPin){
-
+IMU::IMU(int resetPin, int csPin, int intPin)
+    : bno08x(resetPin),
+      imuDataReady(false),
+      _resetPin(resetPin),
+      _csPin(csPin),
+      _intPin(intPin) {
+    gyroReadings = {0, 0, 0};
+    accelReadings = {0, 0, 0};
+    eulerAngles = {0, 0, 0};
 }
 
 void IMU::imuISR() {
@@ -27,11 +33,14 @@ void IMU::setup() {
 
 void IMU::setReports() {
     Serial.println("Setting desired reports");
-    if (! bno08x.enableReport(SH2_GAME_ROTATION_VECTOR, 1000)) {
+    if (!bno08x.enableReport(SH2_GAME_ROTATION_VECTOR, 1000)) {
         Serial.println("Could not enable game vector");
     }
     if (!bno08x.enableReport(SH2_GYROSCOPE_CALIBRATED, 1000)) {
         Serial.println("Could not enable gyroscope");
+    }
+    if (!bno08x.enableReport(SH2_ACCELEROMETER, 1000)) {
+        Serial.println("Could not enable accelerometer");
     }
 }
 
@@ -60,9 +69,15 @@ void IMU::readIMU() {
         case SH2_GYROSCOPE_CALIBRATED:
             gyroReadings.rollRate = sensorValue.un.gyroscope.x;
             gyroReadings.pitchRate = sensorValue.un.gyroscope.y;
-            gyroReadings.yawRate= sensorValue.un.gyroscope.z;
-        break;
-    }  
+            gyroReadings.yawRate = sensorValue.un.gyroscope.z;
+            break;
+
+        case SH2_ACCELEROMETER:
+            accelReadings.ax = sensorValue.un.accelerometer.x;
+            accelReadings.ay = sensorValue.un.accelerometer.y;
+            accelReadings.az = sensorValue.un.accelerometer.z;
+            break;
+    }
 }
 
 void IMU::update() {
@@ -74,6 +89,10 @@ void IMU::update() {
 
 GyroReadings IMU::getGyroReadings() {
     return gyroReadings;
+}
+
+AccelReadings IMU::getAccelReadings() {
+    return accelReadings;
 }
 
 EulerAngles IMU::getEulerAngles() {
