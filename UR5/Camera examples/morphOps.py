@@ -62,8 +62,8 @@ def main():
         rbl_hsv = np.array([  1, 180, 131])
         rbu_hsv = np.array([  3, 255, 236])
 
-        lower_bound_HSV = rbl_hsv
-        upper_bound_HSV = rbu_hsv
+        lower_bound_HSV = glb_hsv
+        upper_bound_HSV = gup_hsv
 
 
 
@@ -77,7 +77,7 @@ def main():
         # kernel for all morphological operations
         #TODO: Change size of kernel
         # Also, try changing the shape of the kernel (places 1's in certain locations). Try making a circle/line/etc.
-        kernel = np.ones((3,3),np.uint8)
+        kernel = np.ones((5,5),np.uint8)
 
         # EXAMPLE OF A VERTICAL LINE:
         # kernel = np.array([[1, 1, 1, 1],\
@@ -86,22 +86,22 @@ def main():
         #                    [1, 1, 1, 1]], dtype=np.uint8)
         
         #TODO: Change number of iterations to see the effect.
-        num_iterations = 10
+        num_iterations = 3
         ################ Erosion ####################
         # erode blobs
         erosion = cv2.erode(mask_HSV,kernel,iterations = num_iterations)
 
         # display image
-        cv2.imshow("Erosion", erosion)
-        cv2.waitKey(3)
+        # cv2.imshow("Erosion", erosion)
+        # cv2.waitKey(3)
 
         ################ Dilation ####################
         # dilate blobs
         dilation = cv2.dilate(mask_HSV,kernel,iterations = num_iterations)
 
         # display image
-        cv2.imshow("Dilation", dilation)
-        cv2.waitKey(3)
+        # cv2.imshow("Dilation", dilation)
+        # cv2.waitKey(3)
 
         ################ Opening ####################
         # good for removing noise. its an erosion (to get rid of noise) followed by a dilation (to get back the original blobs you wanted to keep)
@@ -126,13 +126,34 @@ def main():
         # 4. Find contours
         contours, _ = cv2.findContours(mask_HSV, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
+        #CM_PIXEL = 51.0 / 640
+        # CM_PIXEL = 39.0 / 480
+        # CM_PIXEL = 90.9 / (561-113)
+        CM_PIXEL = 54.0 / 275
+    
+
         # 5. Draw bounding box
         for cnt in contours:
             if cv2.contourArea(cnt) > 500: # Filter small noise
                 x, y, w, h = cv2.boundingRect(cnt)
+                x_c = x + int(w/2)
+                y_c = y + int(h/2)
                 cv2.rectangle(cv_image, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                cv2.circle(cv_image, (x_c, y_c), 4, (0, 255, 0), 2)
+                x_cm = (x_c-337.5) * CM_PIXEL
+                y_cm = (337.5-y_c) * CM_PIXEL
+
+                text = f"x: {x_cm: .2f}, y: {y_cm: .2f}"
+                cv2.putText(cv_image, text, (x_c - 10, y_c - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                
+
+        cv2.rectangle(cv_image, (335, 335), (340, 340), (255, 255, 0), 2)
+        cv2.rectangle(cv_image, (113, 205), (561,205), (255, 255, 0), 2)
 
         cv2.imshow('Bounding Box', cv_image)
+
+        
 
 
 if __name__=='__main__':
