@@ -1,163 +1,190 @@
 """
-Load ``config/tasks.json`` and step through each task: follow the A* polyline
-waypoint-by-waypoint, then finish when the elevator reaches its goal, then
-advance to the next task.
+Load ``config/tasks.yaml`` and step through each task using boolean enter and
+completion conditions.
 
-This module does not talk to hardware; call ``current_robot_waypoint``,
-``current_elevator_goal``, and ``step`` from your control loop.
+This module is intentionally planner-agnostic and hardware-agnostic. The YAML
+contains:
+- one mission-level initial pose in the global frame
+- one goal pose per task in the global frame
+- enter conditions
+- completion conditions
+
+Task start poses are inferred sequentially: the first task starts at the
+mission initial pose, and each later task starts at the previous task goal.
+
+The runner advances to the next task only when:
+1) the current task's enter conditions evaluate to ``True``
+2) the current task's completion conditions evaluate to ``True``
 """
 
 from __future__ import annotations
 
-import json
-import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Literal, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-try:
-    from ..guidance.waypoint_controller import wrap_to_pi
-    from ..planning.a_star import AStar, GridPoint, Waypoint, waypoints_from_polyline
-except ImportError:
-    from guidance.waypoint_controller import wrap_to_pi  # type: ignore[no-redef]
-    from planning.a_star import AStar, GridPoint, Waypoint, waypoints_from_polyline  # type: ignore[no-redef]
+import yaml
 
 
-Phase = Literal["robot", "elevator"]
+@dataclass(frozen=True)
+class Pose2D:
+    x: float
+    y: float
+    heading: float
 
 
 @dataclass(frozen=True)
 class Task:
     name: str
-    robot_start: GridPoint
-    robot_start_heading: float
-    robot_goal: GridPoint
-    robot_goal_heading: float
-    elevator_start: float
-    elevator_goal: float
+    start: Pose2D
+    goal: Pose2D
+    enter_conditions: List[str]
+    completion_conditions: List[str]
 
 
 def default_tasks_path() -> Path:
-    """``mobile_robot/config/tasks.json`` when this file lives in ``src/autonomy``."""
-    return Path(__file__).resolve().parent.parent.parent / "config" / "tasks.json"
+    """``mobile_robot/config/tasks.yaml`` when this file lives in ``src/autonomy``."""
+    return Path(__file__).resolve().parent.parent.parent / "config" / "tasks.yaml"
+
+
+def _load_pose(raw: Mapping[str, Any]) -> Pose2D:
+    pos = raw["position"]
+    return Pose2D(
+        x=float(pos["x"]),
+        y=float(pos["y"]),
+        heading=float(raw.get("heading", 0.0)),
+    )
 
 
 def load_tasks(path: Path | str) -> List[Task]:
-    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    initial_state_raw = raw.get("initial_state")
+    if initial_state_raw is None:
+        raise ValueError("tasks.yaml must define an 'initial_state'")
+
     out: List[Task] = []
+    current_start = _load_pose(initial_state_raw)
     for row in raw["tasks"]:
-        rs = tuple(float(x) for x in row["robot_start"])
-        rg = tuple(float(x) for x in row["robot_goal"])
+        goal = _load_pose(row["goal"])
         out.append(
             Task(
                 name=str(row["name"]),
-                robot_start=rs,
-                robot_start_heading=float(row.get("robot_start_heading", 0.0)),
-                robot_goal=rg,
-                robot_goal_heading=float(row.get("robot_goal_heading", 0.0)),
-                elevator_start=float(row.get("elevator_start", 0.0)),
-                elevator_goal=float(row.get("elevator_goal", 0.0)),
+                start=current_start,
+                goal=goal,
+                enter_conditions=[str(x) for x in row.get("enter_conditions", [])],
+                completion_conditions=[
+                    str(x) for x in row.get("completion_conditions", [])
+                ],
             )
         )
+        current_start = goal
     return out
 
 
-def _hypot(a: GridPoint, b: GridPoint) -> float:
-    return float(math.hypot(a[0] - b[0], a[1] - b[1]))
+def evaluate_condition(expression: str, context: Mapping[str, Any]) -> bool:
+    """Evaluate a boolean task condition against a context dictionary."""
+    safe_globals = {
+        "__builtins__": {},
+        "abs": abs,
+        "min": min,
+        "max": max,
+        "True": True,
+        "False": False,
+        "true": True,
+        "false": False,
+    }
+    return bool(eval(expression, safe_globals, dict(context)))
 
 
 class MissionRunner:
-    """
-    For each task: visit every robot waypoint (A* + polyline tangents), then
-    require the elevator to reach ``elevator_goal`` before the next task.
-    """
+    """Sequential mission runner over YAML-defined tasks."""
 
-    def __init__(
-        self,
-        planner: AStar,
-        tasks: Sequence[Task],
-        *,
-        xy_tol: float = 0.08,
-        heading_tol: float = 0.25,
-        elev_tol: float = 0.02,
-    ):
+    def __init__(self, tasks: Sequence[Task]):
         self._tasks = list(tasks)
-        self._xy_tol = xy_tol
-        self._heading_tol = heading_tol
-        self._elev_tol = elev_tol
-
-        self._wps: List[List[Waypoint]] = []
-        for t in self._tasks:
-            poly = planner.generate_plan(t.robot_start, t.robot_goal)
-            if len(poly) < 2:
-                raise ValueError(f"task {t.name!r}: empty or trivial plan {poly!r}")
-            self._wps.append(
-                waypoints_from_polyline(poly, end_heading=t.robot_goal_heading)
-            )
-
         self._task_i = 0
-        self._wp_i = 0
-        self._phase: Phase = "robot"
 
     @property
     def task_index(self) -> int:
         return self._task_i
 
     @property
-    def phase(self) -> Phase:
-        return self._phase
-
-    @property
     def current_task(self) -> Optional[Task]:
-        if self._task_i >= len(self._tasks):
+        if self.is_complete():
             return None
         return self._tasks[self._task_i]
 
     def is_complete(self) -> bool:
         return self._task_i >= len(self._tasks)
 
-    def current_robot_waypoint(self) -> Optional[Waypoint]:
-        """Waypoint to track in the robot phase; ``None`` in elevator phase or when done."""
-        if self.is_complete() or self._phase != "robot":
-            return None
-        wps = self._wps[self._task_i]
-        if self._wp_i >= len(wps):
-            return None
-        return wps[self._wp_i]
+    def _context_for_task(
+        self, task: Task, context: Mapping[str, Any], *, previous_task_complete: bool
+    ) -> Dict[str, Any]:
+        merged = dict(context)
+        merged.setdefault("current_task", task.name)
+        merged.setdefault("task_index", self._task_i)
+        merged.setdefault("previous_task_complete", previous_task_complete)
+        return merged
 
-    def current_elevator_goal(self) -> Optional[float]:
-        """Elevator setpoint in the elevator phase; ``None`` otherwise (hold / ignore)."""
-        if self.is_complete() or self._phase != "elevator":
-            return None
-        return self._tasks[self._task_i].elevator_goal
-
-    def _at_robot_waypoint(
-        self, x: float, y: float, heading: float, wp: Waypoint
+    def conditions_met(
+        self,
+        expressions: Sequence[str],
+        context: Mapping[str, Any],
+        *,
+        previous_task_complete: bool,
     ) -> bool:
-        if _hypot((x, y), wp.xy) > self._xy_tol:
+        task = self.current_task
+        if task is None:
             return False
-        return abs(wrap_to_pi(heading - wp.heading)) <= self._heading_tol
+        merged = self._context_for_task(
+            task, context, previous_task_complete=previous_task_complete
+        )
+        return all(evaluate_condition(expr, merged) for expr in expressions)
 
-    def step(self, *, x: float, y: float, heading: float, elevator_pos: float) -> None:
-        """Call each control tick with your estimated state; advances tasks when goals are met."""
-        if self.is_complete():
+    def can_enter(self, context: Mapping[str, Any]) -> bool:
+        task = self.current_task
+        if task is None:
+            return False
+        return self.conditions_met(
+            task.enter_conditions,
+            context,
+            previous_task_complete=(self._task_i > 0),
+        )
+
+    def task_complete(self, context: Mapping[str, Any]) -> bool:
+        task = self.current_task
+        if task is None:
+            return False
+        return self.conditions_met(
+            task.completion_conditions,
+            context,
+            previous_task_complete=(self._task_i > 0),
+        )
+
+    def current_start_pose(self) -> Optional[Pose2D]:
+        task = self.current_task
+        return None if task is None else task.start
+
+    def current_goal_pose(self) -> Optional[Pose2D]:
+        task = self.current_task
+        return None if task is None else task.goal
+
+    def step(self, context: Mapping[str, Any]) -> None:
+        """Advance to the next task when the active task is enterable and complete."""
+        task = self.current_task
+        if task is None:
             return
-
-        task = self._tasks[self._task_i]
-        if self._phase == "robot":
-            wps = self._wps[self._task_i]
-            if self._wp_i < len(wps):
-                wp = wps[self._wp_i]
-                if self._at_robot_waypoint(x, y, heading, wp):
-                    self._wp_i += 1
-            if self._wp_i >= len(wps):
-                self._phase = "elevator"
+        if not self.can_enter(context):
             return
-
-        if abs(elevator_pos - task.elevator_goal) <= self._elev_tol:
-            self._task_i += 1
-            self._wp_i = 0
-            self._phase = "robot"
+        if not self.task_complete(context):
+            return
+        self._task_i += 1
 
 
-__all__ = ["MissionRunner", "Task", "default_tasks_path", "load_tasks"]
+__all__ = [
+    "MissionRunner",
+    "Pose2D",
+    "Task",
+    "default_tasks_path",
+    "evaluate_condition",
+    "load_tasks",
+]

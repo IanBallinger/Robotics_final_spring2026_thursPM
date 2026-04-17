@@ -1,0 +1,48 @@
+# Mission task configuration
+#
+# All poses are expressed in the global frame.
+# Condition entries are boolean expressions intended to be evaluated by the
+# mission/task manager against the current system state / blackboard.
+
+frame: global
+initial_state:
+  position:
+    x: 0.15
+    y: 0.15
+  heading: 0.0
+tasks:
+  - name: drive_to_tray
+    goal:
+      position:
+        x: 0.75
+        y: 0.20
+      heading: 0.0
+    enter_conditions:
+      - current_task == "drive_to_tray"
+    completion_conditions:
+      - distance_to_goal <= 0.05
+      - abs(heading_error) <= 0.10
+
+  - name: drive_to_zone
+    goal:
+      position:
+        x: 1.80
+        y: 0.60
+      heading: 1.57
+    enter_conditions:
+      - current_task == "drive_to_zone"
+    completion_conditions:
+      - distance_to_goal <= 0.08
+      - abs(heading_error) <= 0.12
+
+  - name: drive_to_elevator
+    goal:
+      position:
+        x: 2.00
+        y: 0.95
+      heading: 1.57
+    enter_conditions:
+      - current_task == "drive_to_elevator"
+    completion_conditions:
+      - distance_to_goal <= 0.05
+      - abs(heading_error) <= 0.10
