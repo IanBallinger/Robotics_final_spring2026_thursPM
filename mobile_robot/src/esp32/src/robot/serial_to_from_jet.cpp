@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <cstddef>
 #include "imu.h"
 #include "robot_pinout.h"
 #include "MotorDriver.h"
@@ -22,6 +23,32 @@ struct DesiredWheelVel {
 IMU imu(BNO08X_RESET, BNO08X_CS, BNO08X_INT);
 
 String rx_line = "";
+
+// FIFO of incoming wheel commands; drained on each IMU print interval.
+static constexpr size_t kWheelCmdQCap = 32;
+static DesiredWheelVel wheel_cmd_q[kWheelCmdQCap];
+static size_t wheel_q_head = 0;
+static size_t wheel_q_count = 0;
+
+static bool wheel_cmd_enqueue(const DesiredWheelVel& v) {
+  if (wheel_q_count >= kWheelCmdQCap) {
+    return false;
+  }
+  const size_t idx = (wheel_q_head + wheel_q_count) % kWheelCmdQCap;
+  wheel_cmd_q[idx] = v;
+  wheel_q_count++;
+  return true;
+}
+
+static bool wheel_cmd_dequeue(DesiredWheelVel& out) {
+  if (wheel_q_count == 0) {
+    return false;
+  }
+  out = wheel_cmd_q[wheel_q_head];
+  wheel_q_head = (wheel_q_head + 1) % kWheelCmdQCap;
+  wheel_q_count--;
+  return true;
+}
 
 constexpr uint8_t num_wheels = 4;
 
@@ -91,6 +118,33 @@ bool handleWheelCommand(const String& line, DesiredWheelVel& des_wheel_spd) {
   return true;
 }
 
+static void applyWheelCommand(const DesiredWheelVel& cmd) {
+  velocity1 = encoder1.getVelocity();
+  velocity2 = encoder2.getVelocity();
+  velocity3 = encoder3.getVelocity();
+  velocity4 = encoder4.getVelocity();
+  controlEffort1 = pid1.calculateParallel(velocity1, cmd.w1);
+  controlEffort2 = pid2.calculateParallel(velocity2, cmd.w2);
+  controlEffort3 = pid3.calculateParallel(velocity3, cmd.w3);
+  controlEffort4 = pid4.calculateParallel(velocity4, cmd.w4);
+
+  wheels[0].drive(controlEffort1);
+  wheels[1].drive(controlEffort2);
+  wheels[2].drive(controlEffort3);
+  wheels[3].drive(controlEffort4);
+}
+
+static void printWheelAck(const DesiredWheelVel& cmd) {
+  Serial.print("ACK,");
+  Serial.print(cmd.w1);
+  Serial.print(",");
+  Serial.print(cmd.w2);
+  Serial.print(",");
+  Serial.print(cmd.w3);
+  Serial.print(",");
+  Serial.println(cmd.w4);
+}
+
 void sendIMU() {
   // Latest fused samples from BNO08x (imu.update() is called each loop).
   AccelReadings a = imu.getAccelReadings();
@@ -131,30 +185,9 @@ void loop() {
 
       DesiredWheelVel cmd;
       if (handleWheelCommand(rx_line, cmd)) {
-
-        velocity1 = encoder1.getVelocity(); 
-        velocity2 = encoder2.getVelocity(); 
-        velocity3 = encoder3.getVelocity(); 
-        velocity4 = encoder4.getVelocity(); 
-        controlEffort1 = pid1.calculateParallel(velocity1, cmd.w1);
-        controlEffort2 = pid2.calculateParallel(velocity2, cmd.w2);
-        controlEffort3 = pid3.calculateParallel(velocity3, cmd.w3);
-        controlEffort4 = pid4.calculateParallel(velocity4, cmd.w4);
-
-        wheels[0].drive(controlEffort1);
-        wheels[1].drive(controlEffort2);
-        wheels[2].drive(controlEffort3);
-        wheels[3].drive(controlEffort4);
-
-        // For debugging
-        Serial.print("ACK,");
-        Serial.print(cmd.w1);
-        Serial.print(",");
-        Serial.print(cmd.w2);
-        Serial.print(",");
-        Serial.print(cmd.w3);
-        Serial.print(",");
-        Serial.println(cmd.w4);
+        if (!wheel_cmd_enqueue(cmd)) {
+          Serial.println("WHL_Q_OVERFLOW");
+        }
       }
 
       rx_line = "";
@@ -166,6 +199,11 @@ void loop() {
   static unsigned long last_imu_ms = 0;
   if (millis() - last_imu_ms >= 50) {
     sendIMU();
+    DesiredWheelVel cmd;
+    while (wheel_cmd_dequeue(cmd)) {
+      applyWheelCommand(cmd);
+      printWheelAck(cmd);
+    }
     last_imu_ms = millis();
   }
 }

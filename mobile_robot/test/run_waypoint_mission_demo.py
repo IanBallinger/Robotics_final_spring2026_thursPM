@@ -31,7 +31,7 @@ from guidance.waypoint_controller import (  # noqa: E402
 from localization.map import Landmark, Map, Obstacle  # noqa: E402
 from planning.a_star import AStar, waypoints_from_polyline  # noqa: E402
 from sim_position_control import integrate_step  # noqa: E402
-from serial.serial_con import SerialConnect  # noqa: E402
+from serial_connection.serial_con import SerialConnect  # noqa: E402
 
 
 @dataclass
@@ -282,8 +282,6 @@ def simulate_active_task(
     dt: float,
     sim_time_per_tick: float,
     capture_radius: float,
-    v_des: float,
-    omega_des: float,
     tau_v: float,
     tau_w: float,
 ) -> tuple[float, float, float, float, float, float]:
@@ -308,9 +306,7 @@ def simulate_active_task(
         )
         cmd = controller.compute(
             state,
-            goal_wp,
-            v_des,
-            omega_des,
+            goal_wp
         )
         x, y, psi, vx_body, vy_body, omega = integrate_step(
             x,
@@ -382,7 +378,7 @@ def main():
     args = p.parse_args()
 
     # setup serial connection to mobile robot
-    serial_con = SerialConnect()
+    serial_con = SerialConnect(port='/dev/ttyESP_WHL')
 
     tasks = load_tasks(default_tasks_path())
     task_lookup = {task.name: task for task in tasks}
@@ -414,6 +410,12 @@ def main():
     tree.setup(timeout=2.0)
 
     controller = CascadedWaypointController()
+    controller.kv_inner = 0.1
+    controller.ky_inner = 0.1
+    controller.komega_inner = 10
+    controller.k_rho = 10
+    controller.k_alpha = 10
+    controller.k_heading = 10
     x = float(tasks[0].start.x)
     y = float(tasks[0].start.y)
     psi = float(tasks[0].start.heading)
@@ -451,6 +453,7 @@ def main():
             break
 
         planned = planned_lookup[previous_task]
+        serial_con.read_parsed()
         x, y, psi, vx_body, vy_body, omega, wheel_rates = simulate_active_task(
             planned,
             controller,
@@ -463,8 +466,6 @@ def main():
             dt=args.dt,
             sim_time_per_tick=args.sim_time_per_tick,
             capture_radius=args.capture,
-            v_des=args.v_des,
-            omega_des=args.omega_des,
             tau_v=args.tau_v,
             tau_w=args.tau_w,
         )

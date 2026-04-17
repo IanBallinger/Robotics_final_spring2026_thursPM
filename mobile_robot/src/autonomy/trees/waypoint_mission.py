@@ -17,8 +17,8 @@ from typing import Any, Mapping, Sequence
 
 import py_trees
 
-from autonomy.behaviors.tick_counter import TickCounter
-from autonomy.mission_runner import Task, default_tasks_path, evaluate_condition, load_tasks
+from ..behaviors import TickCounter
+from ..mission_runner import Task, default_tasks_path, evaluate_condition, load_tasks
 
 
 MISSION_DONE = "DONE"

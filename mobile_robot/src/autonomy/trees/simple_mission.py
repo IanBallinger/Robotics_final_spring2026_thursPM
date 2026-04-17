@@ -15,7 +15,7 @@ import operator
 
 import py_trees
 
-from autonomy.behaviors.tick_counter import TickCounter
+from ..behaviors import TickCounter
 
 
 PHASE_LOAD = "LOAD_TRAY"

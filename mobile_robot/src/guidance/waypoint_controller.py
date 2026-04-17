@@ -5,10 +5,7 @@ from typing import Tuple
 
 import numpy as np
 
-try:
-    from ..planning.a_star import Waypoint
-except ImportError:
-    from planning.a_star import Waypoint  # type: ignore[no-redef]
+from planning.a_star import Waypoint
 
 
 def wrap_to_pi(angle: float) -> float:
@@ -135,8 +132,6 @@ class CascadedWaypointController:
         self,
         state: MapPoseVelocity,
         goal: Waypoint,
-        v_des: float,
-        omega_des: float,
     ) -> MecanumCommand:
         """
         Return a Mecanum body-twist + wheel-rate command.
@@ -147,10 +142,6 @@ class CascadedWaypointController:
             Current world-frame pose/velocity estimate.
         goal:
             Desired map position and heading.
-        v_des:
-            Cap on translational speed magnitude.
-        omega_des:
-            Yaw-rate feedforward.
         """
         gx, gy = float(goal.xy[0]), float(goal.xy[1])
         dx_w, dy_w = gx - state.x, gy - state.y
@@ -163,10 +154,8 @@ class CascadedWaypointController:
         alpha = wrap_to_pi(float(np.arctan2(ey_body, ex_body))) if rho > 1e-9 else 0.0
         e_psi = wrap_to_pi(goal.heading - state.heading)
 
-        v_cap = min(max(0.0, float(v_des)), self.v_max)
         vx_ref = self.k_rho * ex_body
         vy_ref = self.k_rho * ey_body
-        # vx_ref, vy_ref = self._scale_planar_speed(vx_ref, vy_ref, v_cap)
 
         if rho < 1e-9:
             vx_ref = 0.0

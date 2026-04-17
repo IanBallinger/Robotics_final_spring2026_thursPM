@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import time
 from typing import List, Optional, Union
+import random
 
 import serial
 
@@ -55,6 +56,7 @@ class SerialConnect:
     ) -> None:
         """Send ``WHL_CMD,<w1>,<w2>,<w3>,<w4>`` (matches MCU ``sscanf`` format)."""
         data_str = serialize_wheel_cmd(w1, w2, w3, w4)
+        print(f"Sending wheel command: {data_str}")
         self.ser.write(data_str.encode("ascii"))
         self.ser.flush()
 
@@ -98,10 +100,15 @@ class SerialConnect:
 
 
 if __name__ == "__main__":
-    con = SerialConnect()
+    port = "/dev/ttyESP_WHL"
+    con = SerialConnect(port=port)
     try:
         while True:
-            con.send_wheel_cmd(0.0, 0.0, 0.0, 0.0)
+            w1 = random.uniform(-1.0, 1.0)
+            w2 = random.uniform(-1.0, 1.0)
+            w3 = random.uniform(-1.0, 1.0)
+            w4 = random.uniform(-1.0, 1.0)
+            con.send_wheel_cmd(w1, w2, w3, w4)
             for msg in con.read_parsed(max_lines=8):
                 print(msg)
             time.sleep(0.5)

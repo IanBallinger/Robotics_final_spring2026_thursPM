@@ -1,23 +1,13 @@
 from __future__ import annotations
 
 import heapq
-import os
-import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Union
 
 import numpy as np
 
-
-try:
-    from ..localization.map import Map, Obstacle, Landmark
-except ImportError:
-    # Allow direct execution: `python mobile_robot/src/planning/a_star.py`
-    SRC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    if SRC_DIR not in sys.path:
-        sys.path.insert(0, SRC_DIR)
-    from localization.map import Map, Obstacle, Landmark
+from localization.map import Landmark, Map, Obstacle
 
 
 GridPoint = Tuple[float, float]
