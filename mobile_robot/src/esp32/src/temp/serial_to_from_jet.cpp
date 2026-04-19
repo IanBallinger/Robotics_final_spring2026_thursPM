@@ -4,6 +4,7 @@
 #include "MotorDriver.h"
 #include "EncoderVelocity.h"
 #include "PID.h"
+#include "joystick.h"
 #include "util.h"
 
 struct DesiredWheelVel {
@@ -22,11 +23,29 @@ String rx_line = "";
 
 constexpr uint8_t num_wheels = 4;
 
+#ifndef MANUAL_JOYSTICK_X_PIN
+#define MANUAL_JOYSTICK_X_PIN A0
+#endif
+
+#ifndef MANUAL_JOYSTICK_Y_PIN
+#define MANUAL_JOYSTICK_Y_PIN A1
+#endif
+
+#ifndef AUTONOMY_TOGGLE_BUTTON_PIN
+#define AUTONOMY_TOGGLE_BUTTON_PIN 14
+#endif
+
+constexpr float JOYSTICK_DEADBAND = 0.1f;
+constexpr float JOYSTICK_MAX_FORWARD = 6.0f;
+constexpr float JOYSTICK_MAX_TURN = 3.0f;
+
 // User-defined serial/control rates.
-constexpr unsigned long CMD_APPLY_PERIOD_MS = 50;  // latest buffered wheel cmd -> motors
+constexpr unsigned long CMD_APPLY_PERIOD_MS = 50;   // latest buffered wheel cmd -> motors
 constexpr unsigned long ACK_PUBLISH_PERIOD_MS = 50; // latest applied wheel cmd -> host
 constexpr unsigned long IMU_PUBLISH_PERIOD_MS = 50; // latest IMU sample -> host
 constexpr unsigned long CMD_TIMEOUT_MS = 250;       // stop motors if host goes silent
+constexpr unsigned long JOYSTICK_APPLY_PERIOD_MS = 50;
+constexpr unsigned long BUTTON_DEBOUNCE_MS = 50;
 constexpr bool SERIAL_DEBUG_TIMING = true;
 
 MotorDriver wheels[num_wheels] = {
@@ -65,6 +84,12 @@ DesiredWheelVel latest_rx_cmd;
 DesiredWheelVel latest_applied_cmd;
 bool has_pending_cmd = false;
 bool ack_dirty = false;
+
+Joystick manual_joystick(MANUAL_JOYSTICK_X_PIN, MANUAL_JOYSTICK_Y_PIN);
+bool autonomy_enabled = true;
+bool last_button_level = HIGH;
+unsigned long last_button_change_ms = 0;
+unsigned long last_joystick_apply_ms = 0;
 
 unsigned long last_cmd_rx_ms = 0;
 unsigned long last_cmd_apply_ms = 0;
@@ -140,6 +165,41 @@ static void applyWheelCommand(const DesiredWheelVel& cmd) {
   wheels[3].drive(controlEffort4);
 }
 
+static DesiredWheelVel joystickToWheelCommand(const JoystickReading& reading) {
+  const float forward = fabs(reading.y) < JOYSTICK_DEADBAND
+                            ? 0.0f
+                            : static_cast<float>(mapDouble(reading.y, -1.0, 1.0,
+                                                           -JOYSTICK_MAX_FORWARD,
+                                                           JOYSTICK_MAX_FORWARD));
+  const float turn = fabs(reading.x) < JOYSTICK_DEADBAND
+                         ? 0.0f
+                         : static_cast<float>(mapDouble(reading.x, -1.0, 1.0,
+                                                        -JOYSTICK_MAX_TURN,
+                                                        JOYSTICK_MAX_TURN));
+
+  const float left = forward + turn;
+  const float right = forward - turn;
+  return DesiredWheelVel(left, right, left, right);
+}
+
+static void updateAutonomyToggle() {
+  const unsigned long now = millis();
+  const bool button_level = digitalRead(AUTONOMY_TOGGLE_BUTTON_PIN);
+
+  if (button_level != last_button_level &&
+      now - last_button_change_ms >= BUTTON_DEBOUNCE_MS) {
+    last_button_change_ms = now;
+    last_button_level = button_level;
+
+    if (button_level == LOW) {
+      autonomy_enabled = !autonomy_enabled;
+      stopMotors();
+      Serial.print("MODE,");
+      Serial.println(autonomy_enabled ? "AUTONOMY" : "JOYSTICK");
+    }
+  }
+}
+
 static void printWheelAck(const DesiredWheelVel& cmd) {
   printDebugTiming("ACK", last_ack_debug_ms);
   Serial.print("ACK,");
@@ -180,15 +240,22 @@ void setup() {
     wheels[i].setup();
   }
 
+  manual_joystick.setup();
+  pinMode(AUTONOMY_TOGGLE_BUTTON_PIN, INPUT_PULLUP);
+
   const unsigned long now = millis();
   last_cmd_rx_ms = now;
   last_cmd_apply_ms = now;
   last_ack_publish_ms = now;
   last_imu_publish_ms = now;
+  last_button_change_ms = now;
+  last_joystick_apply_ms = now;
 }
 
 void loop() {
   // imu.update();
+
+  updateAutonomyToggle();
 
   while (Serial.available()) {
     char c = static_cast<char>(Serial.read());
@@ -211,16 +278,23 @@ void loop() {
 
   const unsigned long now = millis();
 
-  if (now - last_cmd_rx_ms > CMD_TIMEOUT_MS) {
-    stopMotors();
-  }
+  if (autonomy_enabled) {
+    if (now - last_cmd_rx_ms > CMD_TIMEOUT_MS) {
+      stopMotors();
+    }
 
-  if (has_pending_cmd && (now - last_cmd_apply_ms >= CMD_APPLY_PERIOD_MS)) {
-    latest_applied_cmd = latest_rx_cmd;
+    if (has_pending_cmd && (now - last_cmd_apply_ms >= CMD_APPLY_PERIOD_MS)) {
+      latest_applied_cmd = latest_rx_cmd;
+      applyWheelCommand(latest_applied_cmd);
+      ack_dirty = true;
+      has_pending_cmd = false;
+      last_cmd_apply_ms = now;
+    }
+  } else if (now - last_joystick_apply_ms >= JOYSTICK_APPLY_PERIOD_MS) {
+    latest_applied_cmd = joystickToWheelCommand(manual_joystick.read());
     applyWheelCommand(latest_applied_cmd);
     ack_dirty = true;
-    has_pending_cmd = false;
-    last_cmd_apply_ms = now;
+    last_joystick_apply_ms = now;
   }
 
   if (ack_dirty && (now - last_ack_publish_ms >= ACK_PUBLISH_PERIOD_MS)) {

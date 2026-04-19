@@ -4,7 +4,67 @@
 # Condition entries are boolean expressions intended to be evaluated by the
 # mission/task manager against the current system state / blackboard.
 
+
 frame: global
+map:
+  resolution: 0.1
+  boundary:
+    - x: 0.0
+      y: 0.0
+    - x: 2.0
+      y: 0.0
+    - x: 2.0
+      y: 2.0
+    - x: 0.0
+      y: 2.0
+  landmarks:
+    - name: start
+      position:
+        x: 0.15
+        y: 0.15
+    - name: tray
+      position:
+        x: 0.75
+        y: 0.20
+    - name: zone
+      position:
+        x: 1.80
+        y: 0.60
+    - name: elevator
+      position:
+        x: 2.00
+        y: 0.95
+  obstacles:
+    - name: table
+      boundary:
+        - x: 1.0
+          y: 0.5
+        - x: 1.0
+          y: 1.0
+        - x: 0.0
+          y: 1.0
+        - x: 0.0
+          y: 0.5
+    - name: shelf
+      boundary:
+        - x: 0.7
+          y: 0.4
+        - x: 1.0
+          y: 0.4
+        - x: 1.0
+          y: 0.7
+        - x: 0.7
+          y: 0.7
+    - name: rack
+      boundary:
+        - x: 1.1
+          y: 1.1
+        - x: 1.7
+          y: 1.1
+        - x: 1.7
+          y: 1.7
+        - x: 1.1
+          y: 1.7
 initial_state:
   position:
     x: 0.15
@@ -15,7 +75,7 @@ tasks:
     goal:
       position:
         x: 0.75
-        y: 0.20
+        y: 0.15
       heading: 0.0
     enter_conditions:
       - current_task == "drive_to_tray"
@@ -26,8 +86,8 @@ tasks:
   - name: drive_to_zone
     goal:
       position:
-        x: 1.80
-        y: 0.60
+        x: 1.55
+        y: 0.55
       heading: 1.57
     enter_conditions:
       - current_task == "drive_to_zone"
@@ -38,8 +98,8 @@ tasks:
   - name: drive_to_elevator
     goal:
       position:
-        x: 2.00
-        y: 0.95
+        x: 0.7
+        y: 1.4
       heading: 1.57
     enter_conditions:
       - current_task == "drive_to_elevator"

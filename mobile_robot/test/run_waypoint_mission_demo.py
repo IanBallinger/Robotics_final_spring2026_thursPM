@@ -12,12 +12,19 @@ from dataclasses import dataclass
 import numpy as np
 import py_trees
 
+import pdb
+
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 SRC_DIR = os.path.join(REPO_ROOT, "mobile_robot", "src")
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from autonomy.mission_runner import Task, default_tasks_path, load_tasks  # noqa: E402
+from autonomy.mission_runner import (  # noqa: E402
+    Task,
+    default_tasks_path,
+    load_map,
+    load_tasks,
+)
 from autonomy.trees.waypoint_mission import (
     MISSION_DONE,
     create_tree,
@@ -28,7 +35,7 @@ from guidance.waypoint_controller import (  # noqa: E402
     MapPoseVelocity,
     wrap_to_pi,
 )
-from localization.map import Landmark, Map, Obstacle  # noqa: E402
+from localization.map import Map  # noqa: E402
 from planning.a_star import AStar, waypoints_from_polyline  # noqa: E402
 from sim_position_control import integrate_step  # noqa: E402
 from serial_connection.serial_con import SerialConnect  # noqa: E402
@@ -51,19 +58,6 @@ def tick_and_print(
         return
     print(f"\n--- Tick {tick_index} ---")
     print(py_trees.display.unicode_tree(tree.root, show_status=True))
-
-
-def make_mission_demo_map(resolution: float = 0.05) -> Map:
-    """Simple rectangular map with a central rack obstacle for visible rerouting."""
-    m = Map([(0, 0), (2.2, 0), (2.2, 1.2), (0, 1.2), (0, 0)], resolution)
-    m.add_obstacle(
-        Obstacle([(0.95, 0.25), (1.25, 0.25), (1.25, 0.85), (0.95, 0.85)], "rack")
-    )
-    m.add_landmark(Landmark((0.15, 0.15), "start"))
-    m.add_landmark(Landmark((0.75, 0.20), "tray"))
-    m.add_landmark(Landmark((1.80, 0.60), "zone"))
-    m.add_landmark(Landmark((2.00, 0.95), "elevator"))
-    return m
 
 
 def plan_tasks(map_: Map, tasks: list[Task]) -> list[PlannedTask]:
@@ -121,6 +115,24 @@ def draw_map_background(ax, map_: Map) -> None:
             obstacle.boundary[:, 1],
             color="darkred",
             linewidth=1.2,
+        )
+    for landmark in map_.landmarks:
+        ax.scatter(
+            landmark.point[0],
+            landmark.point[1],
+            s=45,
+            c="tab:purple",
+            marker="o",
+            edgecolors="black",
+            linewidths=0.5,
+            zorder=3,
+        )
+        ax.text(
+            landmark.point[0] + 0.02,
+            landmark.point[1] + 0.02,
+            landmark.name,
+            fontsize=8,
+            color="tab:purple",
         )
 
 
@@ -304,10 +316,7 @@ def simulate_active_task(
             vy=float(vy_world),
             heading_rate=omega,
         )
-        cmd = controller.compute(
-            state,
-            goal_wp
-        )
+        cmd = controller.compute(state, goal_wp)
         x, y, psi, vx_body, vy_body, omega = integrate_step(
             x,
             y,
@@ -378,11 +387,13 @@ def main():
     args = p.parse_args()
 
     # setup serial connection to mobile robot
-    serial_con = SerialConnect(port='/dev/ttyESP_WHL')
+    # serial_con = SerialConnect(port="/dev/ttyESP_WHL")
 
-    tasks = load_tasks(default_tasks_path())
+    tasks_path = default_tasks_path()
+    tasks = load_tasks(tasks_path)
     task_lookup = {task.name: task for task in tasks}
-    map_ = make_mission_demo_map()
+    map_ = load_map(tasks_path)
+    map_.plot()
     planned_tasks = plan_tasks(map_, tasks)
     planned_lookup = {planned.task.name: planned for planned in planned_tasks}
 
@@ -410,12 +421,12 @@ def main():
     tree.setup(timeout=2.0)
 
     controller = CascadedWaypointController()
-    controller.kv_inner = 0.1
-    controller.ky_inner = 0.1
+    controller.kv_inner = 10
+    controller.ky_inner = 10
     controller.komega_inner = 10
-    controller.k_rho = 10
-    controller.k_alpha = 10
-    controller.k_heading = 10
+    controller.k_rho = 1
+    controller.k_alpha = 1
+    controller.k_heading = 1
     x = float(tasks[0].start.x)
     y = float(tasks[0].start.y)
     psi = float(tasks[0].start.heading)
@@ -453,7 +464,7 @@ def main():
             break
 
         planned = planned_lookup[previous_task]
-        serial_con.read_parsed()
+        # serial_con.read_parsed()
         x, y, psi, vx_body, vy_body, omega, wheel_rates = simulate_active_task(
             planned,
             controller,
@@ -469,9 +480,9 @@ def main():
             tau_v=args.tau_v,
             tau_w=args.tau_w,
         )
-        serial_con.send_wheel_cmd(
-            wheel_rates[0], wheel_rates[1], wheel_rates[2], wheel_rates[3]
-        )
+        # serial_con.send_wheel_cmd(
+        #     wheel_rates[0], wheel_rates[1], wheel_rates[2], wheel_rates[3]
+        # )
         trajectory_x.append(x)
         trajectory_y.append(y)
 

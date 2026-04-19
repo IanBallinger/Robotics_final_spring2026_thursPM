@@ -25,6 +25,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import yaml
 
+from localization.map import Landmark, Map, Obstacle
+
 
 @dataclass(frozen=True)
 class Pose2D:
@@ -54,6 +56,44 @@ def _load_pose(raw: Mapping[str, Any]) -> Pose2D:
         y=float(pos["y"]),
         heading=float(raw.get("heading", 0.0)),
     )
+
+
+def _load_point(raw: Mapping[str, Any]) -> tuple[float, float]:
+    return (float(raw["x"]), float(raw["y"]))
+
+
+def load_map(path: Path | str) -> Map:
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    map_raw = raw.get("map")
+    if map_raw is None:
+        raise ValueError("tasks.yaml must define a 'map'")
+
+    boundary_raw = map_raw.get("boundary")
+    if boundary_raw is None:
+        raise ValueError("tasks.yaml map must define a 'boundary'")
+
+    resolution = float(map_raw.get("resolution", 0.05))
+    map_ = Map([_load_point(point) for point in boundary_raw], resolution)
+
+    for landmark_raw in map_raw.get("landmarks", []):
+        map_.add_landmark(
+            Landmark(_load_point(landmark_raw["position"]), str(landmark_raw["name"]))
+        )
+
+    for obstacle_raw in map_raw.get("obstacles", []):
+        obstacle_boundary = obstacle_raw.get("boundary")
+        if obstacle_boundary is None:
+            raise ValueError(
+                f"map obstacle '{obstacle_raw.get('name', '<unnamed>')}' must define a 'boundary'"
+            )
+        map_.add_obstacle(
+            Obstacle(
+                [_load_point(point) for point in obstacle_boundary],
+                str(obstacle_raw["name"]),
+            )
+        )
+
+    return map_
 
 
 def load_tasks(path: Path | str) -> List[Task]:
@@ -186,5 +226,6 @@ __all__ = [
     "Task",
     "default_tasks_path",
     "evaluate_condition",
+    "load_map",
     "load_tasks",
 ]
