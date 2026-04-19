@@ -1,5 +1,4 @@
 #include <Arduino.h>
-#include <cstddef>
 #include "imu.h"
 #include "robot_pinout.h"
 #include "MotorDriver.h"
@@ -7,7 +6,6 @@
 #include "PID.h"
 #include "util.h"
 
-// If this type already exists elsewhere in your project, remove this struct.
 struct DesiredWheelVel {
   float w1;
   float w2;
@@ -19,60 +17,24 @@ struct DesiredWheelVel {
       : w1(w1_), w2(w2_), w3(w3_), w4(w4_) {}
 };
 
-
 IMU imu(BNO08X_RESET, BNO08X_CS, BNO08X_INT);
-
 String rx_line = "";
-
-// FIFO of incoming wheel commands; drained on each IMU print interval.
-static constexpr size_t kWheelCmdQCap = 32;
-static DesiredWheelVel wheel_cmd_q[kWheelCmdQCap];
-static size_t wheel_q_head = 0;
-static size_t wheel_q_count = 0;
-
-static bool wheel_cmd_enqueue(const DesiredWheelVel& v) {
-  if (wheel_q_count >= kWheelCmdQCap) {
-    return false;
-  }
-  const size_t idx = (wheel_q_head + wheel_q_count) % kWheelCmdQCap;
-  wheel_cmd_q[idx] = v;
-  wheel_q_count++;
-  return true;
-}
-
-static bool wheel_cmd_dequeue(DesiredWheelVel& out) {
-  if (wheel_q_count == 0) {
-    return false;
-  }
-  out = wheel_cmd_q[wheel_q_head];
-  wheel_q_head = (wheel_q_head + 1) % kWheelCmdQCap;
-  wheel_q_count--;
-  return true;
-}
 
 constexpr uint8_t num_wheels = 4;
 
-// initialize two motors for wheel for now, can extend to 4 maybe
+// User-defined serial/control rates.
+constexpr unsigned long CMD_APPLY_PERIOD_MS = 50;  // latest buffered wheel cmd -> motors
+constexpr unsigned long ACK_PUBLISH_PERIOD_MS = 50; // latest applied wheel cmd -> host
+constexpr unsigned long IMU_PUBLISH_PERIOD_MS = 50; // latest IMU sample -> host
+constexpr unsigned long CMD_TIMEOUT_MS = 250;       // stop motors if host goes silent
+constexpr bool SERIAL_DEBUG_TIMING = true;
+
 MotorDriver wheels[num_wheels] = {
     {A_DIR1, A_PWM1, 0},
     {A_DIR2, A_PWM2, 1},
     {B_DIR1, B_PWM1, 2},
     {B_DIR2, B_PWM2, 3}
 };
-
-// TODO: define pinout for elevator (might be on a different motor driver and serial connection)
-// MotorDriver elevator[1] = {
-//     {B_DIR1, B_PWM1, 2}
-// };
-
-//     FRONT
-// [1]-------[2]
-//  |         |
-//  |  ROBOT  |
-//  |         |
-// [3]-------[4]
-//     REAR
-
 
 // PID from wheel velocities to motor driver control efforts
 #define Kp 0.25
@@ -90,7 +52,6 @@ PID pid2(Kp, Ki, Kd, 0, pidTau, false);
 PID pid3(Kp, Ki, Kd, 0, pidTau, false);
 PID pid4(Kp, Ki, Kd, 0, pidTau, false);
 
-// initialize values
 double velocity1 = 0;
 double velocity2 = 0;
 double velocity3 = 0;
@@ -100,7 +61,18 @@ double controlEffort2 = 0;
 double controlEffort3 = 0;
 double controlEffort4 = 0;
 
-//TODO: handle if we get joystick data to take over manual control
+DesiredWheelVel latest_rx_cmd;
+DesiredWheelVel latest_applied_cmd;
+bool has_pending_cmd = false;
+bool ack_dirty = false;
+
+unsigned long last_cmd_rx_ms = 0;
+unsigned long last_cmd_apply_ms = 0;
+unsigned long last_ack_publish_ms = 0;
+unsigned long last_imu_publish_ms = 0;
+
+unsigned long last_ack_debug_ms = 0;
+unsigned long last_imu_debug_ms = 0;
 
 bool handleWheelCommand(const String& line, DesiredWheelVel& des_wheel_spd) {
   if (!line.startsWith("WHL_CMD,")) {
@@ -116,6 +88,40 @@ bool handleWheelCommand(const String& line, DesiredWheelVel& des_wheel_spd) {
   }
 
   return true;
+}
+
+static void printDebugTiming(const char* tag, unsigned long& last_ms) {
+  if (!SERIAL_DEBUG_TIMING) {
+    return;
+  }
+
+  const unsigned long now = millis();
+  Serial.print("DBG,");
+  Serial.print(tag);
+  Serial.print(",dt_ms,");
+  if (last_ms == 0) {
+    Serial.println("FIRST");
+  } else {
+    Serial.println(now - last_ms);
+  }
+  last_ms = now;
+}
+
+static void stopMotors() {
+  latest_rx_cmd = DesiredWheelVel();
+  latest_applied_cmd = DesiredWheelVel();
+  has_pending_cmd = false;
+  ack_dirty = false;
+
+  controlEffort1 = 0;
+  controlEffort2 = 0;
+  controlEffort3 = 0;
+  controlEffort4 = 0;
+
+  wheels[0].drive(0.0);
+  wheels[1].drive(0.0);
+  wheels[2].drive(0.0);
+  wheels[3].drive(0.0);
 }
 
 static void applyWheelCommand(const DesiredWheelVel& cmd) {
@@ -135,6 +141,7 @@ static void applyWheelCommand(const DesiredWheelVel& cmd) {
 }
 
 static void printWheelAck(const DesiredWheelVel& cmd) {
+  printDebugTiming("ACK", last_ack_debug_ms);
   Serial.print("ACK,");
   Serial.print(cmd.w1);
   Serial.print(",");
@@ -150,6 +157,7 @@ void sendIMU() {
   AccelReadings a = imu.getAccelReadings();
   GyroReadings g = imu.getGyroReadings();
 
+  printDebugTiming("IMU", last_imu_debug_ms);
   Serial.print("IMU,");
   Serial.print(static_cast<float>(a.ax));
   Serial.print(",");
@@ -172,6 +180,11 @@ void setup() {
     wheels[i].setup();
   }
 
+  const unsigned long now = millis();
+  last_cmd_rx_ms = now;
+  last_cmd_apply_ms = now;
+  last_ack_publish_ms = now;
+  last_imu_publish_ms = now;
 }
 
 void loop() {
@@ -184,10 +197,10 @@ void loop() {
       rx_line.trim();
 
       DesiredWheelVel cmd;
-      if (handleWheelCommand(rx_line, cmd)) {
-        if (!wheel_cmd_enqueue(cmd)) {
-          Serial.println("WHL_Q_OVERFLOW");
-        }
+      if (rx_line.length() > 0 && handleWheelCommand(rx_line, cmd)) {
+        latest_rx_cmd = cmd;
+        has_pending_cmd = true;
+        last_cmd_rx_ms = millis();
       }
 
       rx_line = "";
@@ -196,14 +209,28 @@ void loop() {
     }
   }
 
-  static unsigned long last_imu_ms = 0;
-  if (millis() - last_imu_ms >= 50) {
+  const unsigned long now = millis();
+
+  if (now - last_cmd_rx_ms > CMD_TIMEOUT_MS) {
+    stopMotors();
+  }
+
+  if (has_pending_cmd && (now - last_cmd_apply_ms >= CMD_APPLY_PERIOD_MS)) {
+    latest_applied_cmd = latest_rx_cmd;
+    applyWheelCommand(latest_applied_cmd);
+    ack_dirty = true;
+    has_pending_cmd = false;
+    last_cmd_apply_ms = now;
+  }
+
+  if (ack_dirty && (now - last_ack_publish_ms >= ACK_PUBLISH_PERIOD_MS)) {
+    printWheelAck(latest_applied_cmd);
+    ack_dirty = false;
+    last_ack_publish_ms = now;
+  }
+
+  if (now - last_imu_publish_ms >= IMU_PUBLISH_PERIOD_MS) {
     sendIMU();
-    DesiredWheelVel cmd;
-    while (wheel_cmd_dequeue(cmd)) {
-      applyWheelCommand(cmd);
-      printWheelAck(cmd);
-    }
-    last_imu_ms = millis();
+    last_imu_publish_ms = now;
   }
 }
