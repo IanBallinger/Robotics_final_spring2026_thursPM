@@ -6,14 +6,14 @@ import serial
 from matplotlib.animation import FuncAnimation
 
 
-PORT = "/dev/tty.usbmodem101"
+PORT = "/dev/tty.usbmodem2101"
 BAUD = 115200
 CMD_DT = 0.05
 WINDOW_SEC = 10.0
 MAX_SAMPLES = 5000
 NUM_WHEELS = 4
-CMD = [1.0, 1.0, 1.0, 1.0]
-PLOT = False
+CMD = [6.0, -6.0, 6.0, -6.0]
+PLOT = True
 
 
 class WheelPIDPlotter:
@@ -68,6 +68,7 @@ class WheelPIDPlotter:
                 for i in range(NUM_WHEELS):
                     self.ack_hist[i].append(vals[i])
             elif tag == "ENC" and len(parts) == 5:
+                print(line)
                 vals = list(map(float, parts[1:5]))
                 self.t_enc.append(t)
                 for i in range(NUM_WHEELS):

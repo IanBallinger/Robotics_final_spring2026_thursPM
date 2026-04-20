@@ -42,8 +42,8 @@ EncoderVelocity encoders[NUM_WHEELS] = {
     {ENCODER4_A_PIN, ENCODER4_B_PIN, CPR_312_RPM, 0.2},
 };
 
-float kp[NUM_WHEELS] = {0.4f, 0.4f, 0.0f, 0.0f};
-float ki[NUM_WHEELS] = {0.5f, 0.5f, 0.0f, 0.0f};
+float kp[NUM_WHEELS] = {0.4f, 0.38f, 0.4f, 0.4f};
+float ki[NUM_WHEELS] = {0.5f, 0.7f, 0.7f, 0.5f};
 float kd[NUM_WHEELS] = {0.0f, 0.0f, 0.0f, 0.0f}; // haven't tuned this yet
 
 PID pid1 = {kp[0], ki[0], kd[0], 0.0, PID_TAU, false};
@@ -52,7 +52,9 @@ PID pid3 = {kp[2], ki[2], kd[2], 0.0, PID_TAU, false};
 PID pid4 = {kp[3], ki[3], kd[3], 0.0, PID_TAU, false};
 PID pids[NUM_WHEELS] = {pid1, pid2, pid3, pid4};
 
-double integral_min = 1e-6;
+// Keep integral anti-windup symmetric so negative setpoints can build
+// the same integral action as positive setpoints.
+double integral_min = -1e6;
 double integral_max = 1e6;
 
 WheelCommand desired_cmd;
@@ -105,16 +107,15 @@ static void stopMotors() {
 
 static bool handleWheelCommand(const String& line) {
   float w1 = 0.0f, w2 = 0.0f, w3 = 0.0f, w4 = 0.0f;
-  // if (sscanf(line.c_str(), "WHL_CMD,%f,%f,%f,%f", &w1, &w2, &w3, &w4) != 4) {
-  //   return false;
-  // }
+  if (sscanf(line.c_str(), "WHL_CMD,%f,%f,%f,%f", &w1, &w2, &w3, &w4) != 4) {
+    return false;
+  }
+
+  // switch directions for w2 and w3
+  w2 = w2 * (-1.0);
+  w3 = w3 * (-1.0);
 
   desired_cmd = WheelCommand(w1, w2, w3, w4);
-  // override the desired command to 1.0 for all wheels
-  desired_cmd.w1 = 6.0f;
-  desired_cmd.w2 = 6.0f;
-  desired_cmd.w3 = 0.0f;
-  desired_cmd.w4 = 0.0f;
   last_cmd_ms = millis();
   return true;
 }
@@ -189,6 +190,6 @@ void loop() {
   if (now - last_telemetry_ms >= TELEMETRY_PERIOD_MS) {
     last_telemetry_ms += TELEMETRY_PERIOD_MS;
     sendEncoderTelemetry();
-    sendEffortTelemetry();
+    // sendEffortTelemetry();
   }
 }
