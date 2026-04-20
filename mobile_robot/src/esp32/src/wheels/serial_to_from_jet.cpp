@@ -1,4 +1,6 @@
 #include <Arduino.h>
+#include <esp_now.h>
+#include <WiFi.h>
 #include "imu.h"
 #include "robot_pinout.h"
 #include "MotorDriver.h"
@@ -6,6 +8,7 @@
 #include "PID.h"
 #include "joystick.h"
 #include "util.h"
+#include "wireless.h"
 
 struct DesiredWheelVel {
   float w1;
@@ -46,6 +49,7 @@ constexpr unsigned long IMU_PUBLISH_PERIOD_MS = 50; // latest IMU sample -> host
 constexpr unsigned long CMD_TIMEOUT_MS = 250;       // stop motors if host goes silent
 constexpr unsigned long JOYSTICK_APPLY_PERIOD_MS = 50;
 constexpr unsigned long BUTTON_DEBOUNCE_MS = 50;
+constexpr unsigned long CONTROLLER_TIMEOUT_MS = 250;
 constexpr bool SERIAL_DEBUG_TIMING = true;
 
 MotorDriver wheels[num_wheels] = {
@@ -90,6 +94,7 @@ bool autonomy_enabled = true;
 bool last_button_level = HIGH;
 unsigned long last_button_change_ms = 0;
 unsigned long last_joystick_apply_ms = 0;
+unsigned long last_controller_rx_ms = 0;
 
 unsigned long last_cmd_rx_ms = 0;
 unsigned long last_cmd_apply_ms = 0;
@@ -98,6 +103,40 @@ unsigned long last_imu_publish_ms = 0;
 
 unsigned long last_ack_debug_ms = 0;
 unsigned long last_imu_debug_ms = 0;
+
+const uint8_t* peerAddr = controllerAddr;
+esp_now_peer_info_t peerInfo;
+
+bool freshWirelessData = false;
+ControllerMessage controllerMessage;
+RobotMessage robotMessage;
+
+void onSendData(const uint8_t* mac_addr, esp_now_send_status_t status) {
+  if (Serial) {
+    Serial.print("ESP_NOW_SEND,");
+    Serial.println(status == ESP_NOW_SEND_SUCCESS ? "OK" : "FAIL");
+  }
+}
+
+void onRecvData(const uint8_t* mac, const uint8_t* incomingData, int len) {
+  if (len != sizeof(ControllerMessage)) {
+    if (Serial) {
+      Serial.print("ESP_NOW_RX_BAD_LEN,");
+      Serial.println(len);
+    }
+    return;
+  }
+
+  memcpy(&controllerMessage, incomingData, sizeof(controllerMessage));
+  freshWirelessData = true;
+  last_controller_rx_ms = millis();
+}
+
+bool sendRobotData() {
+  esp_err_t result = esp_now_send(controllerAddr, (uint8_t*)&robotMessage,
+                                  sizeof(robotMessage));
+  return result == ESP_OK;
+}
 
 bool handleWheelCommand(const String& line, DesiredWheelVel& des_wheel_spd) {
   if (!line.startsWith("WHL_CMD,")) {
@@ -177,6 +216,11 @@ static DesiredWheelVel joystickToWheelCommand(const JoystickReading& reading) {
                                                         -JOYSTICK_MAX_TURN,
                                                         JOYSTICK_MAX_TURN));
 
+  Serial.print("JOY_CMD,forward,");
+  Serial.print(forward);
+  Serial.print(",turn,");
+  Serial.println(turn);
+
   const float left = forward + turn;
   const float right = forward - turn;
   return DesiredWheelVel(left, right, left, right);
@@ -242,6 +286,7 @@ void setup() {
 
   manual_joystick.setup();
   pinMode(AUTONOMY_TOGGLE_BUTTON_PIN, INPUT_PULLUP);
+  setupWireless();
 
   const unsigned long now = millis();
   last_cmd_rx_ms = now;
@@ -250,6 +295,7 @@ void setup() {
   last_imu_publish_ms = now;
   last_button_change_ms = now;
   last_joystick_apply_ms = now;
+  last_controller_rx_ms = now;
 }
 
 void loop() {
@@ -291,9 +337,16 @@ void loop() {
       last_cmd_apply_ms = now;
     }
   } else if (now - last_joystick_apply_ms >= JOYSTICK_APPLY_PERIOD_MS) {
-    latest_applied_cmd = joystickToWheelCommand(manual_joystick.read());
-    applyWheelCommand(latest_applied_cmd);
-    ack_dirty = true;
+    if (now - last_controller_rx_ms > CONTROLLER_TIMEOUT_MS) {
+      stopMotors();
+      Serial.println("ERR,CONTROLLER_TIMEOUT");
+    } else {
+      JoystickReading wireless_reading = controllerMessage.joystick1;
+      wireless_reading.x = controllerMessage.joystick2.x;
+      latest_applied_cmd = joystickToWheelCommand(wireless_reading);
+      applyWheelCommand(latest_applied_cmd);
+      ack_dirty = true;
+    }
     last_joystick_apply_ms = now;
   }
 
