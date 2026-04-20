@@ -6,16 +6,24 @@
 #include "util.h"
 
 #define Kp 0.25
-#define Ki 0.01
+#define Ki 0.25
 #define Kd 0
-#define pidTau 0.1
+#define pidTau 0.001
 
 MotorDriver motor(A_DIR1, A_PWM1, 0);
-EncoderVelocity encoder(ENCODER1_A_PIN, ENCODER1_B_PIN, CPR_312_RPM, 0.2);
+EncoderVelocity encoder(ENCODER2_A_PIN, ENCODER2_B_PIN, CPR_312_RPM, 0.2);
 PID pid(Kp, Ki, Kd, 0, pidTau, false);
 
+double integral_min = -1e6;
+double integral_max = 1e6;
+
+
 double setpoint = 0;
+double integral = 0;
+double curr_time = 0;
+double prev_time = 0;
 double velocity = 0;
+double prev_velocity = 0;
 double controlEffort = 0;
 
 void setup() {
@@ -23,6 +31,11 @@ void setup() {
     Serial.begin();
 
     motor.setup();
+    curr_time = micros();
+    prev_time = curr_time;
+
+    pid.setParallelTunings(Kp, Ki, Kd, pidTau, integral_min, integral_max);
+
 }
 
 void loop() {
@@ -32,15 +45,23 @@ void loop() {
         setpoint = 2;
     }
 
-    //update PID at 200Hz
+    // update hand-written PI controller at 200Hz
     EVERY_N_MILLIS(5) {
-        velocity = encoder.getVelocity(); 
-        controlEffort = pid.calculateParallel(velocity, setpoint);
+        curr_time = micros();
+        double dt = (curr_time - prev_time) / 1000000.0;
+        prev_time = curr_time;
+
+        velocity = encoder.getVelocity();
+        double error = setpoint - velocity;
+        integral += error * dt;
+        integral = constrain(integral, integral_min, integral_max);
+
+        controlEffort = Kp * error + Ki * integral;
         motor.drive(controlEffort);
     }
 
     // Print values at 20Hz
     EVERY_N_MILLIS(50) {
-        Serial.printf("SP: %.2f   VEL: %.2f   CE: %.2f\n", setpoint, velocity, controlEffort);
+        Serial.printf("SP: %.2f   VEL: %.2f   CE: %.2f   INT: %.2f\n", setpoint, velocity, controlEffort, integral);
     }
 }
