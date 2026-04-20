@@ -90,7 +90,7 @@ bool has_pending_cmd = false;
 bool ack_dirty = false;
 
 Joystick manual_joystick(MANUAL_JOYSTICK_X_PIN, MANUAL_JOYSTICK_Y_PIN);
-bool autonomy_enabled = true;
+bool autonomy_enabled = false;
 bool last_button_level = HIGH;
 unsigned long last_button_change_ms = 0;
 unsigned long last_joystick_apply_ms = 0;
