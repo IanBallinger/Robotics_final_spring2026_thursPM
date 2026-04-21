@@ -60,20 +60,20 @@ MotorDriver wheels[num_wheels] = {
 };
 
 // PID from wheel velocities to motor driver control efforts
-#define Kp 0.2
-#define Ki 0
-#define Kd 0
+#define Kp 0.5
+#define Ki 0.3
+#define Kd 0.01
 #define pidTau 0.1
 
-EncoderVelocity encoder1(ENCODER1_A_PIN, ENCODER1_B_PIN, CPR_312_RPM, 0.2);
-EncoderVelocity encoder2(ENCODER2_A_PIN, ENCODER2_B_PIN, CPR_312_RPM, 0.2);
+EncoderVelocity encoder1(ENCODER2_A_PIN, ENCODER2_B_PIN, CPR_312_RPM, 0.2);
+EncoderVelocity encoder2(ENCODER1_A_PIN, ENCODER1_B_PIN, CPR_312_RPM, 0.2);
 EncoderVelocity encoder3(ENCODER3_A_PIN, ENCODER3_B_PIN, CPR_312_RPM, 0.2);
 EncoderVelocity encoder4(ENCODER4_A_PIN, ENCODER4_B_PIN, CPR_312_RPM, 0.2);
 
-PID pid1(0.5, 0.0, 0.0, 0, pidTau, false);
-PID pid2(0.0, 0.0, 0.0, 0, pidTau, false);
-PID pid3(0.0, 0.0, 0.0, 0, pidTau, false);
-PID pid4(0.0, 0.0, 0.0, 0, pidTau, false);
+PID pid1(Kp, Ki, Kd, 0, pidTau, false);
+PID pid2(Kp, Ki, Kd, 0, pidTau, false);
+PID pid3(Kp, Ki, Kd, 0, pidTau, false);
+PID pid4(Kp, Ki, Kd, 0, pidTau, false);
 
 double velocity1 = 0;
 double velocity2 = 0;
@@ -194,9 +194,9 @@ static void applyWheelCommand(const DesiredWheelVel& cmd) {
   velocity3 = encoder3.getVelocity();
   velocity4 = encoder4.getVelocity();
   controlEffort1 = pid1.calculateParallel(velocity1, cmd.w1);
-  controlEffort2 = pid2.calculateParallel(velocity2, -1.0*cmd.w2);
+  controlEffort2 = pid2.calculateParallel(-1.0*velocity2, -1.0*cmd.w2);
   controlEffort3 = pid3.calculateParallel(velocity3, -1.0*cmd.w3);
-  controlEffort4 = pid4.calculateParallel(velocity4, cmd.w4);
+  controlEffort4 = pid4.calculateParallel(-1.0*velocity4, -1.0*cmd.w4);
 
   wheels[0].drive(controlEffort1);
   wheels[1].drive(controlEffort2);
