@@ -194,8 +194,8 @@ static void applyWheelCommand(const DesiredWheelVel& cmd) {
   velocity3 = encoder3.getVelocity();
   velocity4 = encoder4.getVelocity();
   controlEffort1 = pid1.calculateParallel(velocity1, cmd.w1);
-  controlEffort2 = pid2.calculateParallel(velocity2, cmd.w2);
-  controlEffort3 = pid3.calculateParallel(velocity3, cmd.w3);
+  controlEffort2 = pid2.calculateParallel(velocity2, -1.0*cmd.w2);
+  controlEffort3 = pid3.calculateParallel(velocity3, -1.0*cmd.w3);
   controlEffort4 = pid4.calculateParallel(velocity4, cmd.w4);
 
   wheels[0].drive(controlEffort1);
