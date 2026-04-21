@@ -268,14 +268,30 @@ static void updateAutonomyToggle() {
 
 static void printWheelAck(const DesiredWheelVel& cmd) {
   printDebugTiming("ACK", last_ack_debug_ms);
-  Serial.print("ACK,");
+  Serial.print("ACK,cmd,");
   Serial.print(cmd.w1);
   Serial.print(",");
   Serial.print(cmd.w2);
   Serial.print(",");
   Serial.print(cmd.w3);
   Serial.print(",");
-  Serial.println(cmd.w4);
+  Serial.print(cmd.w4);
+  Serial.print(",enc,");
+  Serial.print(velocity1);
+  Serial.print(",");
+  Serial.print(velocity2);
+  Serial.print(",");
+  Serial.print(velocity3);
+  Serial.print(",");
+  Serial.print(velocity4);
+  Serial.print(",eff,");
+  Serial.print(controlEffort1);
+  Serial.print(",");
+  Serial.print(controlEffort2);
+  Serial.print(",");
+  Serial.print(controlEffort3);
+  Serial.print(",");
+  Serial.println(controlEffort4);
 }
 
 void sendIMU() {
