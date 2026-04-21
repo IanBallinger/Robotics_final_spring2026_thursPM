@@ -204,15 +204,21 @@ static void applyWheelCommand(const DesiredWheelVel& cmd) {
   wheels[3].drive(controlEffort4);
 }
 
-static DesiredWheelVel joystickToWheelCommand(const JoystickReading& reading) {
-  const float forward = fabs(reading.y) < JOYSTICK_DEADBAND
+static bool joystickToWheelCommand(const ControllerMessage& controller_msg,
+                                  DesiredWheelVel& des_wheel_spd) {
+  const float forward_input = controller_msg.joystick1.y;
+  const float turn_input = fabs(controller_msg.joystick2.x) >= JOYSTICK_DEADBAND
+                               ? controller_msg.joystick2.x
+                               : controller_msg.joystick1.x;
+
+  const float forward = fabs(forward_input) < JOYSTICK_DEADBAND
                             ? 0.0f
-                            : static_cast<float>(mapDouble(reading.y, -1.0, 1.0,
+                            : static_cast<float>(mapDouble(forward_input, -1.0, 1.0,
                                                            -JOYSTICK_MAX_FORWARD,
                                                            JOYSTICK_MAX_FORWARD));
-  const float turn = fabs(reading.x) < JOYSTICK_DEADBAND
+  const float turn = fabs(turn_input) < JOYSTICK_DEADBAND
                          ? 0.0f
-                         : static_cast<float>(mapDouble(reading.x, -1.0, 1.0,
+                         : static_cast<float>(mapDouble(turn_input, -1.0, 1.0,
                                                         -JOYSTICK_MAX_TURN,
                                                         JOYSTICK_MAX_TURN));
 
@@ -223,7 +229,17 @@ static DesiredWheelVel joystickToWheelCommand(const JoystickReading& reading) {
 
   const float left = forward + turn;
   const float right = forward - turn;
-  return DesiredWheelVel(left, right, left, right);
+
+  String wheel_cmd_line = "WHL_CMD,";
+  wheel_cmd_line += String(left, 4);
+  wheel_cmd_line += ",";
+  wheel_cmd_line += String(right, 4);
+  wheel_cmd_line += ",";
+  wheel_cmd_line += String(left, 4);
+  wheel_cmd_line += ",";
+  wheel_cmd_line += String(right, 4);
+
+  return handleWheelCommand(wheel_cmd_line, des_wheel_spd);
 }
 
 static void updateAutonomyToggle() {
@@ -341,11 +357,15 @@ void loop() {
       stopMotors();
       Serial.println("ERR,CONTROLLER_TIMEOUT");
     } else {
-      JoystickReading wireless_reading = controllerMessage.joystick1;
-      wireless_reading.x = controllerMessage.joystick2.x;
-      latest_applied_cmd = joystickToWheelCommand(wireless_reading);
-      applyWheelCommand(latest_applied_cmd);
-      ack_dirty = true;
+      DesiredWheelVel joystick_cmd;
+      if (joystickToWheelCommand(controllerMessage, joystick_cmd)) {
+        latest_rx_cmd = joystick_cmd;
+        latest_applied_cmd = latest_rx_cmd;
+        applyWheelCommand(latest_applied_cmd);
+        ack_dirty = true;
+      } else {
+        Serial.println("ERR,BAD_JOYSTICK_CMD");
+      }
     }
     last_joystick_apply_ms = now;
   }
