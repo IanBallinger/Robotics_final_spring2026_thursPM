@@ -50,6 +50,7 @@ constexpr unsigned long CMD_TIMEOUT_MS = 250;       // stop motors if host goes 
 constexpr unsigned long JOYSTICK_APPLY_PERIOD_MS = 50;
 constexpr unsigned long BUTTON_DEBOUNCE_MS = 50;
 constexpr unsigned long CONTROLLER_TIMEOUT_MS = 250;
+constexpr float WHEEL_CMD_FILTER_TAU_S = 0.03f;
 constexpr bool SERIAL_DEBUG_TIMING = true;
 
 MotorDriver wheels[num_wheels] = {
@@ -86,6 +87,7 @@ double controlEffort4 = 0;
 
 DesiredWheelVel latest_rx_cmd;
 DesiredWheelVel latest_applied_cmd;
+unsigned long last_wheel_cmd_filter_ms = 0;
 bool has_pending_cmd = false;
 bool ack_dirty = false;
 
@@ -174,6 +176,7 @@ static void printDebugTiming(const char* tag, unsigned long& last_ms) {
 static void stopMotors() {
   latest_rx_cmd = DesiredWheelVel();
   latest_applied_cmd = DesiredWheelVel();
+  last_wheel_cmd_filter_ms = 0;
   has_pending_cmd = false;
   ack_dirty = false;
 
@@ -186,6 +189,26 @@ static void stopMotors() {
   wheels[1].drive(0.0);
   wheels[2].drive(0.0);
   wheels[3].drive(0.0);
+}
+
+static DesiredWheelVel lowPassWheelCommand(const DesiredWheelVel& target,
+                                           unsigned long now_ms) {
+  if (last_wheel_cmd_filter_ms == 0) {
+    last_wheel_cmd_filter_ms = now_ms;
+    latest_applied_cmd = target;
+    return latest_applied_cmd;
+  }
+
+  const float dt = (now_ms - last_wheel_cmd_filter_ms) / 1000.0f;
+  const float alpha = dt / (WHEEL_CMD_FILTER_TAU_S + dt);
+
+  latest_applied_cmd.w1 += alpha * (target.w1 - latest_applied_cmd.w1);
+  latest_applied_cmd.w2 += alpha * (target.w2 - latest_applied_cmd.w2);
+  latest_applied_cmd.w3 += alpha * (target.w3 - latest_applied_cmd.w3);
+  latest_applied_cmd.w4 += alpha * (target.w4 - latest_applied_cmd.w4);
+
+  last_wheel_cmd_filter_ms = now_ms;
+  return latest_applied_cmd;
 }
 
 static void applyWheelCommand(const DesiredWheelVel& cmd) {
@@ -221,6 +244,11 @@ static bool joystickToWheelCommand(const ControllerMessage& controller_msg,
                          : static_cast<float>(mapDouble(turn_input, -1.0, 1.0,
                                                         -JOYSTICK_MAX_TURN,
                                                         JOYSTICK_MAX_TURN));
+
+  Serial.print("JOY_CMD,forward,");
+  Serial.print(forward);
+  Serial.print(",turn,");
+  Serial.println(turn);
 
   // Standard mecanum/differential forward+turn mixing with no strafe command
   // from the current joystick app.
@@ -337,6 +365,7 @@ void setup() {
   last_button_change_ms = now;
   last_joystick_apply_ms = now;
   last_controller_rx_ms = now;
+  last_wheel_cmd_filter_ms = now;
 }
 
 void loop() {
@@ -370,9 +399,8 @@ void loop() {
       stopMotors();
     }
 
-    if (has_pending_cmd && (now - last_cmd_apply_ms >= CMD_APPLY_PERIOD_MS)) {
-      latest_applied_cmd = latest_rx_cmd;
-      applyWheelCommand(latest_applied_cmd);
+    if (now - last_cmd_apply_ms >= CMD_APPLY_PERIOD_MS) {
+      applyWheelCommand(lowPassWheelCommand(latest_rx_cmd, now));
       ack_dirty = true;
       has_pending_cmd = false;
       last_cmd_apply_ms = now;
@@ -385,8 +413,7 @@ void loop() {
       DesiredWheelVel joystick_cmd;
       if (joystickToWheelCommand(controllerMessage, joystick_cmd)) {
         latest_rx_cmd = joystick_cmd;
-        latest_applied_cmd = latest_rx_cmd;
-        applyWheelCommand(latest_applied_cmd);
+        applyWheelCommand(lowPassWheelCommand(latest_rx_cmd, now));
         ack_dirty = true;
       } else {
         Serial.println("ERR,BAD_JOYSTICK_CMD");
