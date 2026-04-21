@@ -70,10 +70,10 @@ EncoderVelocity encoder2(ENCODER2_A_PIN, ENCODER2_B_PIN, CPR_312_RPM, 0.2);
 EncoderVelocity encoder3(ENCODER3_A_PIN, ENCODER3_B_PIN, CPR_312_RPM, 0.2);
 EncoderVelocity encoder4(ENCODER4_A_PIN, ENCODER4_B_PIN, CPR_312_RPM, 0.2);
 
-PID pid1(Kp, Ki, Kd, 0, pidTau, false);
-PID pid2(Kp, Ki, Kd, 0, pidTau, false);
-PID pid3(Kp, Ki, Kd, 0, pidTau, false);
-PID pid4(Kp, Ki, Kd, 0, pidTau, false);
+PID pid1(0.5, 0.0, 0.0, 0, pidTau, false);
+PID pid2(0.0, 0.0, 0.0, 0, pidTau, false);
+PID pid3(0.0, 0.0, 0.0, 0, pidTau, false);
+PID pid4(0.0, 0.0, 0.0, 0, pidTau, false);
 
 double velocity1 = 0;
 double velocity2 = 0;
