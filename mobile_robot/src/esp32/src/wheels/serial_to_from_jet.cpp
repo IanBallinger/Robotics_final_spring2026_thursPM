@@ -60,8 +60,8 @@ MotorDriver wheels[num_wheels] = {
 };
 
 // PID from wheel velocities to motor driver control efforts
-#define Kp 0.25
-#define Ki 0.01
+#define Kp 0.5
+#define Ki 0.3
 #define Kd 0
 #define pidTau 0.1
 
@@ -222,22 +222,28 @@ static bool joystickToWheelCommand(const ControllerMessage& controller_msg,
                                                         -JOYSTICK_MAX_TURN,
                                                         JOYSTICK_MAX_TURN));
 
-  Serial.print("JOY_CMD,forward,");
-  Serial.print(forward);
-  Serial.print(",turn,");
-  Serial.println(turn);
-
-  const float left = forward + turn;
-  const float right = forward - turn;
+  // Standard mecanum/differential forward+turn mixing with no strafe command
+  // from the current joystick app.
+  // Wheel command order here is:
+  //   w1 = front_left
+  //   w2 = back_left
+  //   w3 = front_right
+  //   w4 = back_right
+  const float front_left = forward + turn;
+  const float back_left = forward + turn;
+  const float front_right = forward - turn;
+  const float back_right = forward - turn;
 
   String wheel_cmd_line = "WHL_CMD,";
-  wheel_cmd_line += String(left, 4);
+  wheel_cmd_line += String(front_left, 4);
   wheel_cmd_line += ",";
-  wheel_cmd_line += String(right, 4);
+  wheel_cmd_line += String(back_left, 4);
   wheel_cmd_line += ",";
-  wheel_cmd_line += String(left, 4);
+  wheel_cmd_line += String(front_right, 4);
   wheel_cmd_line += ",";
-  wheel_cmd_line += String(right, 4);
+  wheel_cmd_line += String(back_right, 4);
+
+  Serial.println(wheel_cmd_line);
 
   return handleWheelCommand(wheel_cmd_line, des_wheel_spd);
 }
