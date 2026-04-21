@@ -60,8 +60,8 @@ MotorDriver wheels[num_wheels] = {
 };
 
 // PID from wheel velocities to motor driver control efforts
-#define Kp 0.5
-#define Ki 0.3
+#define Kp 0.2
+#define Ki 0
 #define Kd 0
 #define pidTau 0.1
 
@@ -268,23 +268,26 @@ static void updateAutonomyToggle() {
 
 static void printWheelAck(const DesiredWheelVel& cmd) {
   printDebugTiming("ACK", last_ack_debug_ms);
-  Serial.print("ACK,cmd,");
+
+  Serial.print("CMD,");
   Serial.print(cmd.w1);
   Serial.print(",");
   Serial.print(cmd.w2);
   Serial.print(",");
   Serial.print(cmd.w3);
   Serial.print(",");
-  Serial.print(cmd.w4);
-  Serial.print(",enc,");
+  Serial.println(cmd.w4);
+
+  Serial.print("ENC,");
   Serial.print(velocity1);
   Serial.print(",");
   Serial.print(velocity2);
   Serial.print(",");
   Serial.print(velocity3);
   Serial.print(",");
-  Serial.print(velocity4);
-  Serial.print(",eff,");
+  Serial.println(velocity4);
+
+  Serial.print("EFF,");
   Serial.print(controlEffort1);
   Serial.print(",");
   Serial.print(controlEffort2);
