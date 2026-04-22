@@ -42,6 +42,7 @@ constexpr float ENCODER_SIGN[num_wheels] = {1.0f, -1.0f, 1.0f, -1.0f};
 
 constexpr float JOYSTICK_DEADBAND = 0.1f;
 constexpr float JOYSTICK_MAX_FORWARD = 6.0f;
+constexpr float JOYSTICK_MAX_STRAFE = 6.0f;
 constexpr float JOYSTICK_MAX_TURN = 3.0f;
 
 // User-defined serial/control rates.
@@ -223,8 +224,9 @@ static void applyWheelCommand(const DesiredWheelVel& cmd) {
 static bool joystickToWheelCommand(const ControllerMessage& controller_msg,
                                   DesiredWheelVel& des_wheel_spd) {
   const float forward_input = controller_msg.joystick1.y;
-  const float turn_input = fabs(controller_msg.joystick2.x) >= JOYSTICK_DEADBAND
-                               ? controller_msg.joystick2.x
+  const float strafe_input = controller_msg.joystick2.x;
+  const float turn_input = fabs(controller_msg.joystick2.y) >= JOYSTICK_DEADBAND
+                               ? controller_msg.joystick2.y
                                : controller_msg.joystick1.x;
 
   const float forward = fabs(forward_input) < JOYSTICK_DEADBAND
@@ -232,6 +234,11 @@ static bool joystickToWheelCommand(const ControllerMessage& controller_msg,
                             : static_cast<float>(mapDouble(forward_input, -1.0, 1.0,
                                                            -JOYSTICK_MAX_FORWARD,
                                                            JOYSTICK_MAX_FORWARD));
+  const float strafe = fabs(strafe_input) < JOYSTICK_DEADBAND
+                           ? 0.0f
+                           : static_cast<float>(mapDouble(strafe_input, -1.0, 1.0,
+                                                          -JOYSTICK_MAX_STRAFE,
+                                                          JOYSTICK_MAX_STRAFE));
   const float turn = fabs(turn_input) < JOYSTICK_DEADBAND
                          ? 0.0f
                          : static_cast<float>(mapDouble(turn_input, -1.0, 1.0,
@@ -240,20 +247,24 @@ static bool joystickToWheelCommand(const ControllerMessage& controller_msg,
 
   Serial.print("JOY_CMD,forward,");
   Serial.print(forward);
+  Serial.print(",strafe,");
+  Serial.print(strafe);
   Serial.print(",turn,");
   Serial.println(turn);
 
-  // Standard mecanum/differential forward+turn mixing with no strafe command
-  // from the current joystick app.
+  // Mecanum mixing:
+  //   joystick1.y -> forward/back
+  //   joystick2.x -> left/right translation (strafe)
+  //   joystick2.y -> turn in place
   // Wheel command order here is:
   //   w1 = front_left
   //   w2 = back_left
   //   w3 = front_right
   //   w4 = back_right
-  const float front_left = forward + turn;
-  const float back_left = forward + turn;
-  const float front_right = forward - turn;
-  const float back_right = forward - turn;
+  const float front_left = forward + strafe + turn;
+  const float back_left = forward - strafe + turn;
+  const float front_right = forward - strafe - turn;
+  const float back_right = forward + strafe - turn;
 
   String wheel_cmd_line = "WHL_CMD,";
   wheel_cmd_line += String(front_left, 4);
