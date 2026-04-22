@@ -9,8 +9,14 @@
 #define CONTROLLER_READ_PERIOD_MS 50
 #define DEBUG_PRINT_PERIOD_MS 100
 #define POT_DEADBAND 0.08f
+#define COMMAND_FILTER_TAU_S 0.1f
+
+static unsigned long last_command_filter_ms = 0;
 
 ControllerMessage prevControllerMessage;
+
+static JoystickReading filteredLeftCommand = {0.0f, 0.0f};
+static JoystickReading filteredRightCommand = {0.0f, 0.0f};
 
 // Use the original joystick abstraction/setup.
 Joystick joystick1(34, 6);
@@ -34,6 +40,18 @@ static int joystickRangeToAnalog(float value) {
         JOYSTICK_READING_MAX,
         JOYSTICK_ANALOG_MIN,
         JOYSTICK_ANALOG_MAX);
+}
+
+static float lowPassValue(float currentValue, float targetValue, float alpha) {
+    return currentValue + alpha * (targetValue - currentValue);
+}
+
+static JoystickReading lowPassReading(JoystickReading current,
+                                      const JoystickReading& target,
+                                      float alpha) {
+    current.x = lowPassValue(current.x, target.x, alpha);
+    current.y = lowPassValue(current.y, target.y, alpha);
+    return current;
 }
 
 static void printDebug(const JoystickReading& leftStick, const JoystickReading& rightStick) {
@@ -62,19 +80,28 @@ void setup() {
 
 void loop() {
     EVERY_N_MILLIS(CONTROLLER_READ_PERIOD_MS) {
+        const unsigned long now = millis();
+        const float dt = (last_command_filter_ms == 0)
+                             ? (CONTROLLER_READ_PERIOD_MS / 1000.0f)
+                             : ((now - last_command_filter_ms) / 1000.0f);
+        const float alpha = dt / (COMMAND_FILTER_TAU_S + dt);
+        last_command_filter_ms = now;
+
         const JoystickReading leftStick = applyDeadband(joystick1.read());
         const JoystickReading rightStick = applyDeadband(joystick2.read());
+        filteredLeftCommand = lowPassReading(filteredLeftCommand, leftStick, alpha);
+        filteredRightCommand = lowPassReading(filteredRightCommand, rightStick, alpha);
 
-        controllerMessage.millis = millis();
+        controllerMessage.millis = now;
 
         // left Y axis for forward/back motion
-        controllerMessage.joystick1.y = leftStick.y;
+        controllerMessage.joystick1.y = filteredLeftCommand.y;
 
         // right X axis for left/right turning
-        controllerMessage.joystick2.x = rightStick.x;
+        controllerMessage.joystick2.x = filteredRightCommand.x;
 
         // mirror turn onto joystick1.x for older single-stick code paths
-        controllerMessage.joystick1.x = rightStick.x;
+        controllerMessage.joystick1.x = filteredRightCommand.x;
         controllerMessage.joystick2.y = 0.0f;
 
         if (!(prevControllerMessage == controllerMessage)) {
@@ -84,6 +111,6 @@ void loop() {
     }
 
     EVERY_N_MILLIS(DEBUG_PRINT_PERIOD_MS) {
-        printDebug(controllerMessage.joystick1, controllerMessage.joystick2);
+        printDebug(filteredLeftCommand, filteredRightCommand);
     }
 }

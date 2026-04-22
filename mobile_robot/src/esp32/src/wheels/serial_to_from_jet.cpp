@@ -25,6 +25,8 @@ IMU imu(BNO08X_RESET, BNO08X_CS, BNO08X_INT);
 String rx_line = "";
 
 constexpr uint8_t num_wheels = 4;
+constexpr float PID_TAU = 0.1f;
+constexpr float ENCODER_SIGN[num_wheels] = {1.0f, -1.0f, 1.0f, -1.0f};
 
 #ifndef MANUAL_JOYSTICK_X_PIN
 #define MANUAL_JOYSTICK_X_PIN A0
@@ -60,30 +62,28 @@ MotorDriver wheels[num_wheels] = {
     {B_DIR2, B_PWM2, 3}
 };
 
-// PID from wheel velocities to motor driver control efforts
-#define Kp 0.5
-#define Ki 0.3
-#define Kd 0.01
-#define pidTau 0.1
+float kp[num_wheels] = {0.4f, 0.38f, 0.4f, 0.4f};
+float ki[num_wheels] = {0.5f, 0.7f, 0.7f, 0.5f};
+float kd[num_wheels] = {0.0f, 0.0f, 0.0f, 0.0f};
 
-EncoderVelocity encoder1(ENCODER2_A_PIN, ENCODER2_B_PIN, CPR_312_RPM, 0.2);
-EncoderVelocity encoder2(ENCODER1_A_PIN, ENCODER1_B_PIN, CPR_312_RPM, 0.2);
-EncoderVelocity encoder3(ENCODER3_A_PIN, ENCODER3_B_PIN, CPR_312_RPM, 0.2);
-EncoderVelocity encoder4(ENCODER4_A_PIN, ENCODER4_B_PIN, CPR_312_RPM, 0.2);
+EncoderVelocity encoders[num_wheels] = {
+    {ENCODER2_A_PIN, ENCODER2_B_PIN, CPR_312_RPM, 0.2},
+    {ENCODER1_A_PIN, ENCODER1_B_PIN, CPR_312_RPM, 0.2},
+    {ENCODER3_A_PIN, ENCODER3_B_PIN, CPR_312_RPM, 0.2},
+    {ENCODER4_A_PIN, ENCODER4_B_PIN, CPR_312_RPM, 0.2},
+};
 
-PID pid1(Kp, Ki, Kd, 0, pidTau, false);
-PID pid2(Kp, Ki, Kd, 0, pidTau, false);
-PID pid3(Kp, Ki, Kd, 0, pidTau, false);
-PID pid4(Kp, Ki, Kd, 0, pidTau, false);
+PID pid1 = {kp[0], ki[0], kd[0], 0.0, PID_TAU, false};
+PID pid2 = {kp[1], ki[1], kd[1], 0.0, PID_TAU, false};
+PID pid3 = {kp[2], ki[2], kd[2], 0.0, PID_TAU, false};
+PID pid4 = {kp[3], ki[3], kd[3], 0.0, PID_TAU, false};
+PID pids[num_wheels] = {pid1, pid2, pid3, pid4};
 
-double velocity1 = 0;
-double velocity2 = 0;
-double velocity3 = 0;
-double velocity4 = 0;
-double controlEffort1 = 0;
-double controlEffort2 = 0;
-double controlEffort3 = 0;
-double controlEffort4 = 0;
+double integral_min = -1e6;
+double integral_max = 1e6;
+
+double measured_vel[num_wheels] = {0.0, 0.0, 0.0, 0.0};
+double control_effort[num_wheels] = {0.0, 0.0, 0.0, 0.0};
 
 DesiredWheelVel latest_rx_cmd;
 DesiredWheelVel latest_applied_cmd;
@@ -153,6 +153,10 @@ bool handleWheelCommand(const String& line, DesiredWheelVel& des_wheel_spd) {
     return false;
   }
 
+  // Match wheel_pid_tuner.cpp command polarity.
+  des_wheel_spd.w2 *= -1.0f;
+  des_wheel_spd.w3 *= -1.0f;
+
   return true;
 }
 
@@ -180,15 +184,10 @@ static void stopMotors() {
   has_pending_cmd = false;
   ack_dirty = false;
 
-  controlEffort1 = 0;
-  controlEffort2 = 0;
-  controlEffort3 = 0;
-  controlEffort4 = 0;
-
-  wheels[0].drive(0.0);
-  wheels[1].drive(0.0);
-  wheels[2].drive(0.0);
-  wheels[3].drive(0.0);
+  for (uint8_t i = 0; i < num_wheels; ++i) {
+    control_effort[i] = 0.0;
+    wheels[i].drive(0.0);
+  }
 }
 
 static DesiredWheelVel lowPassWheelCommand(const DesiredWheelVel& target,
@@ -212,19 +211,13 @@ static DesiredWheelVel lowPassWheelCommand(const DesiredWheelVel& target,
 }
 
 static void applyWheelCommand(const DesiredWheelVel& cmd) {
-  velocity1 = encoder1.getVelocity();
-  velocity2 = encoder2.getVelocity();
-  velocity3 = encoder3.getVelocity();
-  velocity4 = encoder4.getVelocity();
-  controlEffort1 = pid1.calculateParallel(velocity1, cmd.w1);
-  controlEffort2 = pid2.calculateParallel(-1.0*velocity2, -1.0*cmd.w2);
-  controlEffort3 = pid3.calculateParallel(velocity3, -1.0*cmd.w3);
-  controlEffort4 = pid4.calculateParallel(-1.0*velocity4, -1.0*cmd.w4);
+  const float setpoints[num_wheels] = {cmd.w1, cmd.w2, cmd.w3, cmd.w4};
 
-  wheels[0].drive(controlEffort1);
-  wheels[1].drive(controlEffort2);
-  wheels[2].drive(controlEffort3);
-  wheels[3].drive(controlEffort4);
+  for (uint8_t i = 0; i < num_wheels; ++i) {
+    measured_vel[i] = ENCODER_SIGN[i] * encoders[i].getVelocity();
+    control_effort[i] = pids[i].calculateParallel(measured_vel[i], setpoints[i]);
+    wheels[i].drive(control_effort[i]);
+  }
 }
 
 static bool joystickToWheelCommand(const ControllerMessage& controller_msg,
@@ -307,22 +300,22 @@ static void printWheelAck(const DesiredWheelVel& cmd) {
   Serial.println(cmd.w4);
 
   Serial.print("ENC,");
-  Serial.print(velocity1);
+  Serial.print(measured_vel[0]);
   Serial.print(",");
-  Serial.print(velocity2);
+  Serial.print(measured_vel[1]);
   Serial.print(",");
-  Serial.print(velocity3);
+  Serial.print(measured_vel[2]);
   Serial.print(",");
-  Serial.println(velocity4);
+  Serial.println(measured_vel[3]);
 
   Serial.print("EFF,");
-  Serial.print(controlEffort1);
+  Serial.print(control_effort[0]);
   Serial.print(",");
-  Serial.print(controlEffort2);
+  Serial.print(control_effort[1]);
   Serial.print(",");
-  Serial.print(controlEffort3);
+  Serial.print(control_effort[2]);
   Serial.print(",");
-  Serial.println(controlEffort4);
+  Serial.println(control_effort[3]);
 }
 
 void sendIMU() {
@@ -351,6 +344,8 @@ void setup() {
 
   for (uint8_t i = 0; i < num_wheels; i++) {
     wheels[i].setup();
+    pids[i].setParallelTunings(kp[i], ki[i], kd[i], PID_TAU, integral_min,
+                               integral_max);
   }
 
   manual_joystick.setup();
