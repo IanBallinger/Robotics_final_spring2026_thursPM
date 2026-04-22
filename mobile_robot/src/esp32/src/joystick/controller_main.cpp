@@ -58,10 +58,10 @@ static void printDebug(const JoystickReading& leftStick, const JoystickReading& 
     Serial.printf(
         "POTS raw_fb=%d raw_strafe=%d raw_turn=%d mapped_fb=%.3f mapped_strafe=%.3f mapped_turn=%.3f joy1(x,y)=(%.3f, %.3f) joy2(x,y)=(%.3f, %.3f)\n",
         joystickRangeToAnalog(leftStick.y),
-        joystickRangeToAnalog(rightStick.x),
+        joystickRangeToAnalog(leftStick.x),
         joystickRangeToAnalog(rightStick.y),
         leftStick.y,
-        rightStick.x,
+        leftStick.x,
         rightStick.y,
         controllerMessage.joystick1.x,
         controllerMessage.joystick1.y,
@@ -96,17 +96,13 @@ void loop() {
 
         controllerMessage.millis = now;
 
-        // left Y axis for forward/back motion
+        // left stick handles all translational motion
+        controllerMessage.joystick1.x = filteredLeftCommand.x;
         controllerMessage.joystick1.y = filteredLeftCommand.y;
 
-        // right X axis for left/right translation (mecanum strafe)
-        controllerMessage.joystick2.x = filteredRightCommand.x;
-
-        // right Y axis for in-place turning as an additional mode of motion
+        // right stick handles turning
+        controllerMessage.joystick2.x = 0.0f;
         controllerMessage.joystick2.y = filteredRightCommand.y;
-
-        // Keep joystick1.x available for legacy single-stick turn consumers.
-        controllerMessage.joystick1.x = filteredRightCommand.y;
 
         if (!(prevControllerMessage == controllerMessage)) {
             sendControllerData();
