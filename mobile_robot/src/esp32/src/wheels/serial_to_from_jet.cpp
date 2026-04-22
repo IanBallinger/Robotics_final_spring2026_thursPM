@@ -225,7 +225,7 @@ static bool joystickToWheelCommand(const ControllerMessage& controller_msg,
                                   DesiredWheelVel& des_wheel_spd) {
   const float forward_input = controller_msg.joystick1.y;
   const float strafe_input = controller_msg.joystick1.x;
-  const float turn_input = controller_msg.joystick2.y;
+  const float turn_input = controller_msg.joystick2.x;
 
   const float forward = fabs(forward_input) < JOYSTICK_DEADBAND
                             ? 0.0f
@@ -253,7 +253,7 @@ static bool joystickToWheelCommand(const ControllerMessage& controller_msg,
   // Mecanum mixing:
   //   joystick1.y -> forward/back
   //   joystick1.x -> left/right translation (strafe)
-  //   joystick2.y -> turn in place
+  //   joystick2.x -> turn in place
   // Wheel command order here is:
   //   w1 = front_left
   //   w2 = back_left
