@@ -19,7 +19,7 @@ static JoystickReading filteredLeftCommand = {0.0f, 0.0f};
 static JoystickReading filteredRightCommand = {0.0f, 0.0f};
 
 // Use the original joystick abstraction/setup.
-Joystick joystick1(34, 6);
+Joystick joystick1(9, 6);
 Joystick joystick2(1, 5);
 
 static float applyDeadband(float value, float deadband) {
@@ -58,11 +58,11 @@ static void printDebug(const JoystickReading& leftStick, const JoystickReading& 
     Serial.printf(
         "POTS raw_fb=%d raw_strafe=%d raw_turn=%d mapped_fb=%.3f mapped_strafe=%.3f mapped_turn=%.3f joy1(x,y)=(%.3f, %.3f) joy2(x,y)=(%.3f, %.3f)\n",
         joystickRangeToAnalog(leftStick.y),
-        joystickRangeToAnalog(leftStick.x),
         joystickRangeToAnalog(rightStick.y),
+        joystickRangeToAnalog(leftStick.x),
         leftStick.y,
-        leftStick.x,
         rightStick.y,
+        leftStick.x,
         controllerMessage.joystick1.x,
         controllerMessage.joystick1.y,
         controllerMessage.joystick2.x,
@@ -96,13 +96,16 @@ void loop() {
 
         controllerMessage.millis = now;
 
-        // left stick handles all translational motion
-        controllerMessage.joystick1.x = filteredLeftCommand.x;
+        // Based on the observed controller wiring:
+        // - left-stick forward/back comes from joystick1.y
+        // - left/right translation comes from joystick2.y
+        // - turn-in-place comes from joystick1.x
+        controllerMessage.joystick1.x = filteredRightCommand.y;
         controllerMessage.joystick1.y = filteredLeftCommand.y;
 
         // right stick handles turning
         controllerMessage.joystick2.x = 0.0f;
-        controllerMessage.joystick2.y = filteredRightCommand.y;
+        controllerMessage.joystick2.y = filteredLeftCommand.x;
 
         if (!(prevControllerMessage == controllerMessage)) {
             sendControllerData();
