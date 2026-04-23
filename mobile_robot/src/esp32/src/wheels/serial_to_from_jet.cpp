@@ -21,6 +21,9 @@ struct DesiredWheelVel {
       : w1(w1_), w2(w2_), w3(w3_), w4(w4_) {}
 };
 
+#define BNO08X_RESET 14
+#define BNO08X_CS 12
+#define BNO08X_INT 3
 IMU imu(BNO08X_RESET, BNO08X_CS, BNO08X_INT);
 String rx_line = "";
 
@@ -48,12 +51,13 @@ constexpr float JOYSTICK_MAX_TURN = 3.0f;
 // User-defined serial/control rates.
 constexpr unsigned long CMD_APPLY_PERIOD_MS = 50;   // latest buffered wheel cmd -> motors
 constexpr unsigned long ACK_PUBLISH_PERIOD_MS = 50; // latest applied wheel cmd -> host
-constexpr unsigned long IMU_PUBLISH_PERIOD_MS = 50; // latest IMU sample -> host
+constexpr unsigned long IMU_PUBLISH_PERIOD_MS = 25; // latest IMU sample -> host
 constexpr unsigned long CMD_TIMEOUT_MS = 250;       // stop motors if host goes silent
 constexpr unsigned long JOYSTICK_APPLY_PERIOD_MS = 50;
 constexpr unsigned long BUTTON_DEBOUNCE_MS = 50;
 constexpr unsigned long CONTROLLER_TIMEOUT_MS = 250;
 constexpr float WHEEL_CMD_FILTER_TAU_S = 0.03f;
+constexpr float IMU_ACCEL_FILTER_TAU_S = 0.5f;
 constexpr bool SERIAL_DEBUG_TIMING = true;
 
 MotorDriver wheels[num_wheels] = {
@@ -106,6 +110,11 @@ unsigned long last_imu_publish_ms = 0;
 
 unsigned long last_ack_debug_ms = 0;
 unsigned long last_imu_debug_ms = 0;
+unsigned long last_accel_filter_ms = 0;
+
+float filtered_ax = 0.0f;
+float filtered_ay = 0.0f;
+float filtered_az = 0.0f;
 
 const uint8_t* peerAddr = controllerAddr;
 esp_now_peer_info_t peerInfo;
@@ -332,13 +341,28 @@ void sendIMU() {
   AccelReadings a = imu.getAccelReadings();
   GyroReadings g = imu.getGyroReadings();
 
+  const unsigned long now = millis();
+  float dt = 0.0f;
+  if (last_accel_filter_ms == 0) {
+    filtered_ax = static_cast<float>(a.ax);
+    filtered_ay = static_cast<float>(a.ay);
+    filtered_az = static_cast<float>(a.az);
+  } else {
+    dt = (now - last_accel_filter_ms) / 1000.0f;
+    const float alpha = dt / (IMU_ACCEL_FILTER_TAU_S + dt);
+    filtered_ax += alpha * (static_cast<float>(a.ax) - filtered_ax);
+    filtered_ay += alpha * (static_cast<float>(a.ay) - filtered_ay);
+    filtered_az += alpha * (static_cast<float>(a.az) - filtered_az);
+  }
+  last_accel_filter_ms = now;
+
   printDebugTiming("IMU", last_imu_debug_ms);
   Serial.print("IMU,");
-  Serial.print(static_cast<float>(a.ax));
+  Serial.print(filtered_ax);
   Serial.print(",");
-  Serial.print(static_cast<float>(a.ay));
+  Serial.print(filtered_ay);
   Serial.print(",");
-  Serial.print(static_cast<float>(a.az));
+  Serial.print(filtered_az);
   Serial.print(",");
   Serial.print(static_cast<float>(g.rollRate));
   Serial.print(",");
@@ -349,7 +373,7 @@ void sendIMU() {
 
 void setup() {
   Serial.begin(115200);
-  // imu.setup();
+  imu.setup();
 
   for (uint8_t i = 0; i < num_wheels; i++) {
     wheels[i].setup();
@@ -373,7 +397,7 @@ void setup() {
 }
 
 void loop() {
-  // imu.update();
+  imu.update();
 
   updateAutonomyToggle();
 
