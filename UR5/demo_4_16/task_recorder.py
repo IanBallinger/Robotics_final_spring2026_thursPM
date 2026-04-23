@@ -3,9 +3,21 @@ import time
 import numpy as np
 from scipy.spatial.transform import Rotation
 from rtde_control import RTDEControlInterface
+from rtde_receive import RTDEReceiveInterface
 from robotiq_gripper_control import RobotiqGripper
+# from arm import UR5Arm
 
-gripperstate = True # open initially
+left_arm_ip = "192.168.1.101"
+right_arm_ip = "192.168.1.102"
+
+# LEFTARM = UR5Arm(left_arm_ip, verbose=False)
+# RIGHTARM = UR5Arm(right_arm_ip, verbose=False)
+
+gripperstateL = True # open initially
+gripperstateR = True # open initially
+compliant_mode = False
+moveL = True
+moveR = True
 
 directions = {
     "w": False,
@@ -15,11 +27,19 @@ directions = {
     "q": False,
     "e": False,
     "g": False,
+    "f": False,
+    "c": False,
+    "z": False,
+    "x": False,
     "halt": False
 }
 
 def pressed(key):
-    global gripperstate
+    global gripperstateL
+    global gripperstateR
+    global compliant_mode
+    global moveL
+    global moveR
     if key == Key.delete:
         # Stop listener
         directions["halt"] = True
@@ -29,7 +49,33 @@ def pressed(key):
         directions[key.char] = True
         print(f"{key.char} pressed")
         if key.char == "g":
-            gripperstate = not gripperstate
+            if moveL:
+                gripperstateL = not gripperstateL
+            if moveR:
+                gripperstateR = not gripperstateR
+        if key.char == "z":
+            moveL = not moveL
+        if key.char == "x":
+            moveR = not moveR
+        if key.char == "c":
+            compliant_mode = not compliant_mode
+        if key.char == "f":
+            print("joint angles (l, r)")
+            print(rtde_r_L.getActualQ())
+            print(rtde_r_R.getActualQ())
+            print("end effector pos (l, r)")
+            print(rtde_r_L.getActualTCPPose())
+            print(rtde_r_R.getActualTCPPose())
+            print("joint torques (l, r)")
+            print(rtde_r_L.getJointTorques())
+            print(rtde_r_R.getJointTorques())
+            print("fwd. kin. (l, r)")
+            print(rtde_c_L.getForwardKinematics())
+            print(rtde_c_R.getForwardKinematics())
+            print("inv. kin. (l, r)")
+            print(rtde_c_L.getInverseKinematics())
+            print(rtde_c_R.getInverseKinematics())
+
 
 def released(key):
     if key.char in directions.keys():
@@ -41,8 +87,11 @@ with Listener(on_press = pressed, on_release = released) as listener:
     #### SETUP ####
     # Establish connections to both robot arms. "Left" and "right" are defined from
     # the robot's perspective, not the viewer's perspective.
-    rtde_c_L = RTDEControlInterface("192.168.1.101")
-    rtde_c_R = RTDEControlInterface("192.168.1.102")
+    rtde_c_L = RTDEControlInterface(left_arm_ip)
+    rtde_c_R = RTDEControlInterface(right_arm_ip)
+
+    rtde_r_L = RTDEReceiveInterface(left_arm_ip)
+    rtde_r_R = RTDEReceiveInterface(right_arm_ip)
 
     connection_tries = 0
     if not rtde_c_L.isConnected():
@@ -136,6 +185,10 @@ with Listener(on_press = pressed, on_release = released) as listener:
     wrench_neg_z = [0, 0, -10, 0, 0, 0]
     wrench_pos_z = [0, 0, 10, 0, 0, 0]
 
+    selection_vector_linear = [1, 1, 1, 0, 0, 0]
+    selection_vector_torque = [0, 0, 0, 1, 1, 1]
+    selection_vector_full = [1, 1, 1, 1, 1, 1]
+
     force_type = 2
     limits = [2, 2, 2, 1, 1, 1]
 
@@ -171,7 +224,7 @@ with Listener(on_press = pressed, on_release = released) as listener:
 
     gripper_L = RobotiqGripper(rtde_c_L)
     gripper_L.activate()
-    gripper_L.set_force(50)
+    gripper_L.set_force(100)
     gripper_L.set_speed(100)
     gripper_L.open()
 
@@ -181,60 +234,65 @@ with Listener(on_press = pressed, on_release = released) as listener:
     gripper_R.set_speed(100)
     gripper_R.open()
 
-    # gripper_R = RobotiqGripper(rtde_c_R)
-    # gripper_R.activate()
-    # gripper_R.set_force(50)
-    # gripper_R.set_speed(100)
-    # gripper_R.open()
-
     # FORCE CONTROL
     # Move along x axis of the task frame with force control, alternating between +x and -x every 2 seconds
     # Execute 500Hz control loop for 4 seconds, each cycle is 2ms
 
-    prevstate = True
+    prevstateL = True
+    prevstateR = True
     while not directions["halt"]:
         # Begin timer for realtime control loop; this will ensure that each loop 
         # iteration takes 2ms regardless of how long the computations take
-        t_start = rtde_c_L.initPeriod()
-        
+        t_startL = rtde_c_L.initPeriod()
+        t_startR = rtde_c_R.initPeriod()
+
         if True not in directions.values():
-            rtde_c_L.forceModeStop()
-            rtde_c_R.forceModeStop()
-        if directions["a"]:
-            rtde_c_L.forceMode(task_frame_L, selection_vector_x, wrench_pos_x, force_type, limits)
-            rtde_c_R.forceMode(task_frame_R, selection_vector_x, wrench_pos_x, force_type, limits)
-        if directions["d"]:
-            rtde_c_L.forceMode(task_frame_L, selection_vector_x, wrench_neg_x, force_type, limits)
-            rtde_c_R.forceMode(task_frame_R, selection_vector_x, wrench_neg_x, force_type, limits)
-        if directions["w"]:
-            rtde_c_L.forceMode(task_frame_L, selection_vector_y, wrench_pos_y, force_type, limits)
-            rtde_c_R.forceMode(task_frame_R, selection_vector_y, wrench_pos_y, force_type, limits)
-        if directions["s"]:
-            rtde_c_L.forceMode(task_frame_L, selection_vector_y, wrench_neg_y, force_type, limits)
-            rtde_c_R.forceMode(task_frame_R, selection_vector_y, wrench_neg_y, force_type, limits)
-        if directions["q"]:
-            rtde_c_L.forceMode(task_frame_L, selection_vector_z, wrench_pos_z, force_type, limits)
-            rtde_c_R.forceMode(task_frame_R, selection_vector_z, wrench_pos_z, force_type, limits)
-        if directions["e"]:
-            rtde_c_L.forceMode(task_frame_L, selection_vector_z, wrench_neg_z, force_type, limits)
-            rtde_c_R.forceMode(task_frame_R, selection_vector_z, wrench_neg_z, force_type, limits)
-        
-        if gripperstate != prevstate:
-            if gripperstate:
-                gripper_L.open()
-                gripper_R.open()
+            if compliant_mode:
+                selection = selection_vector_full
+                direction = [0, 0, 0, 0, 0, 0] #apply 0 force in all directions
+                rtde_c_L.forceMode(task_frame_L, selection, direction, force_type, limits)
+                rtde_c_R.forceMode(task_frame_R, selection, direction, force_type, limits)
             else:
-                gripper_L.close()
-                gripper_R.close()
+                rtde_c_L.forceModeStop() #otherwise, fix the robot in place.
+                rtde_c_R.forceModeStop()
+
+        selection = selection_vector_full
+        direction = direction = np.array([0, 0, 0, 0, 0, 0])
         
-        prevstate = gripperstate
+        if directions["a"]:
+            direction += np.array(wrench_pos_x)
+        if directions["d"]:
+            direction += np.array(wrench_neg_x)
+        if directions["w"]:
+            direction += np.array(wrench_pos_y)
+        if directions["s"]:
+            direction += np.array(wrench_neg_y)
+        if directions["q"]:
+            direction += np.array(wrench_pos_z)
+        if directions["e"]:
+            direction += np.array(wrench_neg_z)
+        
+        if moveL:
+            rtde_c_L.forceMode(task_frame_L, selection, direction, force_type, limits)
+            if gripperstateL != prevstateL:
+                if gripperstateL:
+                    gripper_L.open()
+                else:
+                    gripper_L.close()
+        if moveR:
+            rtde_c_R.forceMode(task_frame_R, selection, direction, force_type, limits)
+            if gripperstateR != prevstateR:
+                if gripperstateR:
+                    gripper_R.open()
+                else:
+                    gripper_R.close()
+        
+        prevstateL = gripperstateL
+        prevstateR = gripperstateR
         # Wait until the next 2ms control cycle begins
-        rtde_c_L.waitPeriod(t_start)
-        
+        rtde_c_L.waitPeriod(t_startL)
+        rtde_c_R.waitPeriod(t_startR)
 
     # Stop the program
     rtde_c_L.forceModeStop()
     listener.join()
-
-
-
