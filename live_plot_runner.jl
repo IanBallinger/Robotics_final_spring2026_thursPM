@@ -56,6 +56,7 @@ end
 function main()
     host = arg_host("127.0.0.1")
     port = arg_int("--port", 9999)
+    port_vision = 9998  # Camera vision port
     max_points = arg_int("--max-points", 4000)
     refresh_every = arg_int("--refresh-every", 5)
 
@@ -67,109 +68,194 @@ function main()
         xlabel = "X [m]",
         ylabel = "Y [m]",
         zlabel = "Z [m]",
-        title = "Live TCP Position (XYZ), color from orientation (Rx,Ry,Rz)"
+        title = "Live TCP Position (XYZ) & Camera Vision Poses"
     )
 
-    # Single observable holding (points, colors) because both come from the same underlying 6-dof data
-    data_obs = Observable((Point3f[], RGBf[]))
-    scatter!(ax, @lift($data_obs[1]); color = @lift($data_obs[2]), markersize = 5)
+    # Two observables: one for TCP poses (small), one for camera vision (large, different color)
+    tcp_data_obs = Observable((Point3f[], RGBf[]))
+    vision_data_obs = Observable((Point3f[], RGBf[]))
+    
+    # TCP poses: small markers, colors from orientation
+    scatter!(ax, @lift($tcp_data_obs[1]); color = @lift($tcp_data_obs[2]), markersize = 5, label = "TCP Pose")
+    
+    # Camera vision poses: larger markers, colors based on position magnitude
+    scatter!(ax, @lift($vision_data_obs[1]); color = @lift($vision_data_obs[2]), markersize = 8, marker = :rect, label = "Vision Pose")
+    
+    axislegend(ax, position = :rt)
 
     screen = GLMakie.Screen(start_renderloop = true)
     display(screen, fig)
 
-    sock = UDPSocket()
-    bind(sock, host, port)
-    println("Listening for UDP packets on ", host, ":", port)
+    # Bind both sockets (UDP sockets will use non-blocking readavailable() in main loop)
+    sock_tcp = UDPSocket()
+    sock_vision = UDPSocket()
+    bind(sock_tcp, host, port)
+    bind(sock_vision, host, port_vision)
+    println("Listening for TCP poses on ", host, ":", port)
+    println("Listening for vision poses on ", host, ":", port_vision)
     println("Close the plot window or press Ctrl+C to stop.")
 
-    xs = Float32[]
-    ys = Float32[]
-    zs = Float32[]
-    cols = RGBf[]
+    # TCP data
+    tcp_xs = Float32[]
+    tcp_ys = Float32[]
+    tcp_zs = Float32[]
+    tcp_cols = RGBf[]
 
-    rx_min = Inf
-    rx_max = -Inf
-    ry_min = Inf
-    ry_max = -Inf
-    rz_min = Inf
-    rz_max = -Inf
+    tcp_rx_min = Inf
+    tcp_rx_max = -Inf
+    tcp_ry_min = Inf
+    tcp_ry_max = -Inf
+    tcp_rz_min = Inf
+    tcp_rz_max = -Inf
 
-    packet_count = 0
-    first_packet_logged = false
+    # Vision data
+    vision_xs = Float32[]
+    vision_ys = Float32[]
+    vision_zs = Float32[]
+    vision_cols = RGBf[]
 
-    # Pure single-thread loop: blocking recv() yields cooperatively to other
-    # tasks (including GLMakie's renderloop) while waiting for UDP input.
+    vision_mag_min = Inf
+    vision_mag_max = -Inf
+
+    first_tcp_logged = false
+    first_vision_logged = false
+
+    # === PURE SINGLE-THREAD EVENT LOOP ===
+    # Based on learnings from docs/explorations/makie.md:
+    # - Single Julia thread enforced (julia --threads 1)
+    # - Non-blocking readavailable() for UDP sockets prevents blocking the renderloop
+    # - Explicit yield() ensures GLMakie's internal renderloop gets CPU cycles
+    # - No @async/@spawn/@Task to avoid fragile async+renderloop interactions
+    # - All data updates atomic via tuple observables (prevents sync races)
+    
     Base.exit_on_sigint(false)
     try
         while isopen(screen)
-            msg = String(recv(sock))
-            msg == "__STOP__" && continue
-
-            pkt = try
-                JSON3.read(msg)
-            catch
-                nothing
+            # Try to receive from TCP socket (non-blocking)
+            try
+                data = readavailable(sock_tcp)
+                if !isempty(data)
+                    msg = String(data)
+                    pkt = try JSON3.read(msg) catch nothing end
+                    
+                    if pkt !== nothing && haskey(pkt, :actual_TCP_pose)
+                        pose = pkt.actual_TCP_pose
+                        length(pose) >= 6 && begin
+                            x = Float32(pose[1])
+                            y = Float32(pose[2])
+                            z = Float32(pose[3])
+                            rx = Float64(pose[4])
+                            ry = Float64(pose[5])
+                            rz = Float64(pose[6])
+                            
+                            if isfinite(x) && isfinite(y) && isfinite(z) && isfinite(rx) && isfinite(ry) && isfinite(rz)
+                                push!(tcp_xs, x)
+                                push!(tcp_ys, y)
+                                push!(tcp_zs, z)
+                                
+                                tcp_rx_min = min(tcp_rx_min, rx)
+                                tcp_rx_max = max(tcp_rx_max, rx)
+                                tcp_ry_min = min(tcp_ry_min, ry)
+                                tcp_ry_max = max(tcp_ry_max, ry)
+                                tcp_rz_min = min(tcp_rz_min, rz)
+                                tcp_rz_max = max(tcp_rz_max, rz)
+                                
+                                push!(tcp_cols, RGBf(
+                                    norm01(rx, tcp_rx_min, tcp_rx_max),
+                                    norm01(ry, tcp_ry_min, tcp_ry_max),
+                                    norm01(rz, tcp_rz_min, tcp_rz_max)
+                                ))
+                                
+                                if length(tcp_xs) > max_points
+                                    popfirst!(tcp_xs)
+                                    popfirst!(tcp_ys)
+                                    popfirst!(tcp_zs)
+                                    popfirst!(tcp_cols)
+                                end
+                                
+                                tcp_packet_count += 1
+                                
+                                # Log TCP data as sanity check
+                                println("[TCP #$tcp_packet_count] Position: ($x, $y, $z) m | Rotation: ($rx, $ry, $rz) rad")
+                                
+                                if !first_tcp_logged
+                                    println("First TCP pose received; live plot updating.")
+                                    first_tcp_logged = true
+                                    tcp_data_obs[] = (Point3f.(tcp_xs, tcp_ys, tcp_zs), copy(tcp_cols))
+                                    autolimits!(ax)
+                                elseif tcp_packet_count % refresh_every == 0
+                                    tcp_data_obs[] = (Point3f.(tcp_xs, tcp_ys, tcp_zs), copy(tcp_cols))
+                                    autolimits!(ax)
+                                end
+                            end
+                        end
+                    end
+                end
+            catch e
+                e isa EOFError && nothing  # Expected when no data available
             end
-
-            if pkt === nothing || !haskey(pkt, :actual_TCP_pose)
-                continue
+            
+            # Try to receive from Vision socket (non-blocking)
+            try
+                data = readavailable(sock_vision)
+                if !isempty(data)
+                    msg = String(data)
+                    pkt = try JSON3.read(msg) catch nothing end
+                    
+                    if pkt !== nothing && haskey(pkt, :position)
+                        pos = pkt.position
+                        length(pos) >= 3 && begin
+                            x = Float32(pos[1])
+                            y = Float32(pos[2])
+                            z = Float32(pos[3])
+                            
+                            if isfinite(x) && isfinite(y) && isfinite(z)
+                                push!(vision_xs, x)
+                                push!(vision_ys, y)
+                                push!(vision_zs, z)
+                                
+                                # Color by distance from origin
+                                mag = sqrt(x^2 + y^2 + z^2)
+                                vision_mag_min = min(vision_mag_min, mag)
+                                vision_mag_max = max(vision_mag_max, mag)
+                                
+                                push!(vision_cols, RGBf(
+                                    norm01(Float64(x), Float64(vision_mag_min), Float64(vision_mag_max)),
+                                    norm01(Float64(y), Float64(vision_mag_min), Float64(vision_mag_max)),
+                                    norm01(Float64(z), Float64(vision_mag_min), Float64(vision_mag_max))
+                                ))
+                                
+                                if length(vision_xs) > max_points
+                                    popfirst!(vision_xs)
+                                    popfirst!(vision_ys)
+                                    popfirst!(vision_zs)
+                                    popfirst!(vision_cols)
+                                end
+                                
+                                vision_packet_count += 1
+                                
+                                # Log vision data as sanity check
+                                color_name = get(pkt, :color, "unknown")
+                                println("[Vision #$vision_packet_count] Position: ($x, $y, $z) m | Color: $color_name")
+                                
+                                if !first_vision_logged
+                                    println("First vision pose received; visualizing camera detections.")
+                                    first_vision_logged = true
+                                    vision_data_obs[] = (Point3f.(vision_xs, vision_ys, vision_zs), copy(vision_cols))
+                                    autolimits!(ax)
+                                elseif vision_packet_count % refresh_every == 0
+                                    vision_data_obs[] = (Point3f.(vision_xs, vision_ys, vision_zs), copy(vision_cols))
+                                    autolimits!(ax)
+                                end
+                            end
+                        end
+                    end
+                end
+            catch e
+                e isa EOFError && nothing  # Expected when no data available
             end
-            pose = pkt.actual_TCP_pose
-            length(pose) < 6 && continue
-
-            x = Float32(pose[1])
-            y = Float32(pose[2])
-            z = Float32(pose[3])
-            rx = Float64(pose[4])
-            ry = Float64(pose[5])
-            rz = Float64(pose[6])
-
-            # Skip bad packets so one invalid value does not poison limits.
-            if !(isfinite(x) && isfinite(y) && isfinite(z) && isfinite(rx) && isfinite(ry) && isfinite(rz))
-                yield()
-                continue
-            end
-
-            push!(xs, x)
-            push!(ys, y)
-            push!(zs, z)
-
-            rx_min = min(rx_min, rx)
-            rx_max = max(rx_max, rx)
-            ry_min = min(ry_min, ry)
-            ry_max = max(ry_max, ry)
-            rz_min = min(rz_min, rz)
-            rz_max = max(rz_max, rz)
-
-            push!(cols, RGBf(
-                norm01(rx, rx_min, rx_max),
-                norm01(ry, ry_min, ry_max),
-                norm01(rz, rz_min, rz_max)
-            ))
-
-            if length(xs) > max_points
-                popfirst!(xs)
-                popfirst!(ys)
-                popfirst!(zs)
-                popfirst!(cols)
-            end
-
-            packet_count += 1
-            if !first_packet_logged
-                println("First UDP packet received; live plot updating.")
-                first_packet_logged = true
-                data_obs[] = (Point3f.(xs, ys, zs), copy(cols))
-                autolimits!(ax)
-                yield()
-                continue
-            end
-
-            if packet_count % refresh_every == 0
-                data_obs[] = (Point3f.(xs, ys, zs), copy(cols))
-                autolimits!(ax)
-            end
-
-            # Give GLMakie's renderloop a chance to draw frames under high UDP rate.
+            
+            # Give GLMakie's renderloop a chance to draw frames
             yield()
         end
     catch err
@@ -177,7 +263,8 @@ function main()
         println("Interrupted by user.")
     finally
         Base.disable_sigint() do
-            try; close(sock); catch; end
+            try; close(sock_tcp); catch; end
+            try; close(sock_vision); catch; end
             try; GLMakie.closeall(); catch; end
         end
         Base.exit_on_sigint(true)
