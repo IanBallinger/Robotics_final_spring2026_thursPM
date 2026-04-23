@@ -23,7 +23,7 @@ struct DesiredWheelVel {
 
 #define BNO08X_RESET 14
 #define BNO08X_CS 12
-#define BNO08X_INT 3
+#define BNO08X_INT 13
 IMU imu(BNO08X_RESET, BNO08X_CS, BNO08X_INT);
 String rx_line = "";
 
