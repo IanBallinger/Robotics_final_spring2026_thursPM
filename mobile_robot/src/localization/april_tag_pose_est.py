@@ -71,7 +71,7 @@ class AprilTagPoseEst:
         # This automatically computes the rotation and translation of the tag.
         # ------------------------------------------------------------------
         results = self.at_detector.detect(
-            frame,
+            gray,
             estimate_tag_pose=True,
             camera_params=[self.fx, self.fy, self.cx, self.cy],
             tag_size=self.tag_size,
