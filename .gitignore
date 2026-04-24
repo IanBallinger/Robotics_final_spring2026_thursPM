@@ -1,2 +1,4 @@
 venv
 .pio
+*.pyc
+**/__pycache__
