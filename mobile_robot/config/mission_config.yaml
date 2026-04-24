@@ -102,7 +102,7 @@ localization:
     - [0.0, 0.02, 0.0]
     - [0.0, 0.0, 0.03]
   gyro_measurement_noise:
-    - [0.02]
+    - [0.2]
   simulation:
     apriltag_period_s: 0.20
     apriltag_dropout_prob: 0.15
