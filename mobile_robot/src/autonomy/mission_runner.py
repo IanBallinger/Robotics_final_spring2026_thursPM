@@ -1,5 +1,5 @@
 """
-Load ``config/tasks.yaml`` and step through each task using boolean enter and
+Load ``config/mission_config.yaml`` and step through each task using boolean enter and
 completion conditions.
 
 This module is intentionally planner-agnostic and hardware-agnostic. The YAML
@@ -45,8 +45,8 @@ class Task:
 
 
 def default_tasks_path() -> Path:
-    """``mobile_robot/config/tasks.yaml`` when this file lives in ``src/autonomy``."""
-    return Path(__file__).resolve().parent.parent.parent / "config" / "tasks.yaml"
+    """``mobile_robot/config/mission_config.yaml`` when this file lives in ``src/autonomy``."""
+    return Path(__file__).resolve().parent.parent.parent / "config" / "mission_config.yaml"
 
 
 def _load_pose(raw: Mapping[str, Any]) -> Pose2D:
@@ -66,18 +66,22 @@ def load_map(path: Path | str) -> Map:
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     map_raw = raw.get("map")
     if map_raw is None:
-        raise ValueError("tasks.yaml must define a 'map'")
+        raise ValueError("mission_config.yaml must define a 'map'")
 
     boundary_raw = map_raw.get("boundary")
     if boundary_raw is None:
-        raise ValueError("tasks.yaml map must define a 'boundary'")
+        raise ValueError("mission_config.yaml map must define a 'boundary'")
 
     resolution = float(map_raw.get("resolution", 0.05))
     map_ = Map([_load_point(point) for point in boundary_raw], resolution)
 
     for landmark_raw in map_raw.get("landmarks", []):
         map_.add_landmark(
-            Landmark(_load_point(landmark_raw["position"]), str(landmark_raw["name"]))
+            Landmark(
+                _load_point(landmark_raw["position"]),
+                str(landmark_raw["name"]),
+                heading=float(landmark_raw.get("heading", 0.0)),
+            )
         )
 
     for obstacle_raw in map_raw.get("obstacles", []):
@@ -100,7 +104,7 @@ def load_tasks(path: Path | str) -> List[Task]:
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     initial_state_raw = raw.get("initial_state")
     if initial_state_raw is None:
-        raise ValueError("tasks.yaml must define an 'initial_state'")
+        raise ValueError("mission_config.yaml must define an 'initial_state'")
 
     out: List[Task] = []
     current_start = _load_pose(initial_state_raw)

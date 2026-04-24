@@ -1,4 +1,4 @@
-"""A simple py_trees mission runner built from ``config/tasks.yaml``.
+"""A simple py_trees mission runner built from ``config/mission_config.yaml``.
 
 Each task becomes a subtree with:
 - a gate on the active task name

@@ -49,6 +49,7 @@ class SerialConnect:
         debug: bool = False,
     ):
         self.port = port or os.environ.get("SERIAL_PORT", "/dev/ttyESP")
+        print(self.port)
         self.baudrate = baudrate
         self._timeout = timeout
         self.tx_rate_hz = tx_rate_hz

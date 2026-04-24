@@ -54,9 +54,10 @@ class Obstacle:
 
 
 class Landmark:
-    def __init__(self, point: Tuple[float, float], name: str):
+    def __init__(self, point: Tuple[float, float], name: str, heading: float = 0.0):
         self.point = point
         self.name = name
+        self.heading = float(heading)
 
     def _get_delta_to_landmark(
         self, position: Tuple[float, float]
@@ -236,6 +237,24 @@ class Map:
                 color="blue",
                 marker="o",
             )
+            ax.arrow(
+                landmark.point[0],
+                landmark.point[1],
+                0.08 * np.cos(landmark.heading),
+                0.08 * np.sin(landmark.heading),
+                head_width=0.03,
+                head_length=0.03,
+                fc="blue",
+                ec="blue",
+                length_includes_head=True,
+            )
+            ax.text(
+                landmark.point[0] + 0.02,
+                landmark.point[1] + 0.02,
+                str(landmark.name),
+                fontsize=8,
+                color="blue",
+            )
 
         ax.xaxis.set_minor_locator(MultipleLocator(self.resolution))
         ax.yaxis.set_minor_locator(MultipleLocator(self.resolution))
@@ -255,7 +274,7 @@ if __name__ == "__main__":
     m.add_obstacle(table)
     shelf = Obstacle([(0.7, 0.4), (1, 0.4), (1, 0.7), (0.7, 0.7)], "shelf")
     m.add_obstacle(shelf)
-    at1 = Landmark((0.5, 0.5), "at1")
+    at1 = Landmark((0.5, 0.5), "at1", heading=0.0)
     m.add_landmark(at1)
 
     m.plot()

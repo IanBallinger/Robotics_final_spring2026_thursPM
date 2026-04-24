@@ -1,3 +1,4 @@
+import os
 import cv2
 from cv2.typing import MatLike
 import numpy as np
@@ -24,7 +25,10 @@ class AprilTagPoseEst:
         self.pose_estimate: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
 
     def __load_camera_calibration(self):
-        calibration_data = np.load("camera_calibration_live.npz")  # adjust filename
+        calib_path = os.path.join(
+            os.path.dirname(__file__), "camera_calibration_live.npz"
+        )
+        calibration_data = np.load(calib_path)
         self.camera_matrix = calibration_data["camera_matrix"]  # shape (3, 3)
         self.dist_coeffs = calibration_data[
             "dist_coeffs"
@@ -76,6 +80,7 @@ class AprilTagPoseEst:
         # ------------------------------------------------------------------
         # 6. Process each detection
         # ------------------------------------------------------------------
+        self.pose_estimate = {}
         for r in results:
             # r.tag_id: the ID of the detected tag
             # r.corners: the (4,2) array of corner coordinates in the image
@@ -98,7 +103,7 @@ class AprilTagPoseEst:
 
             self.pose_estimate[tag_id] = (R, t)
 
-    def get_pose_estimate(self) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
+    def get_pose_estimate(self, frame: MatLike) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
         self.__detect_april_tags(frame)
         return self.pose_estimate
 
