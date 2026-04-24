@@ -51,7 +51,7 @@ constexpr float JOYSTICK_MAX_TURN = 3.0f;
 // User-defined serial/control rates.
 constexpr unsigned long CMD_APPLY_PERIOD_MS = 50;   // latest buffered wheel cmd -> motors
 constexpr unsigned long ACK_PUBLISH_PERIOD_MS = 50; // latest applied wheel cmd -> host
-constexpr unsigned long IMU_PUBLISH_PERIOD_MS = 25; // latest IMU sample -> host
+constexpr unsigned long IMU_PUBLISH_PERIOD_MS = 50; // latest IMU sample -> host
 constexpr unsigned long CMD_TIMEOUT_MS = 250;       // stop motors if host goes silent
 constexpr unsigned long JOYSTICK_APPLY_PERIOD_MS = 50;
 constexpr unsigned long BUTTON_DEBOUNCE_MS = 50;
@@ -452,11 +452,11 @@ void loop() {
     last_joystick_apply_ms = now;
   }
 
-  if (ack_dirty && (now - last_ack_publish_ms >= ACK_PUBLISH_PERIOD_MS)) {
-    printWheelAck(latest_applied_cmd);
-    ack_dirty = false;
-    last_ack_publish_ms = now;
-  }
+  // if (ack_dirty && (now - last_ack_publish_ms >= ACK_PUBLISH_PERIOD_MS)) {
+  //   printWheelAck(latest_applied_cmd);
+  //   ack_dirty = false;
+  //   last_ack_publish_ms = now;
+  // }
 
   if (now - last_imu_publish_ms >= IMU_PUBLISH_PERIOD_MS) {
     sendIMU();
