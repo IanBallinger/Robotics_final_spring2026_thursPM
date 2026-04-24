@@ -37,7 +37,7 @@ class AprilTagPoseEst:
         self.fy = self.camera_matrix[1, 1]
         self.cx = self.camera_matrix[0, 2]
         self.cy = self.camera_matrix[1, 2]
-        self.tag_size = 0.10  # 10 cm
+        self.tag_size = 0.12  # 10 cm
 
     def __detect_april_tags(self, frame: MatLike):
 
