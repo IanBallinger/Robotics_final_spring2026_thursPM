@@ -54,10 +54,17 @@ class Obstacle:
 
 
 class Landmark:
-    def __init__(self, point: Tuple[float, float], name: str, heading: float = 0.0):
+    def __init__(
+        self,
+        point: Tuple[float, float],
+        name: str,
+        id: Optional[str] = None,
+        heading: float = 0.0,
+    ):
         self.point = point
         self.name = name
         self.heading = float(heading)
+        self.id = str(name if id is None else id)
 
     def _get_delta_to_landmark(
         self, position: Tuple[float, float]
@@ -183,6 +190,7 @@ class Map:
             extent=(self._xmin, xmax, self._ymin, ymax),
             aspect="equal",
             interpolation="nearest",
+            cmap="Paired"
         )
         ax.plot(
             self._vertices[:, 0],
@@ -190,20 +198,6 @@ class Map:
             color="k",
             linewidth=1.2,
         )
-
-        # # plot current position
-        # ax.plot(
-        #     self.current_position[0],
-        #     self.current_position[1],
-        #     color="green",
-        #     marker="o",
-        # )
-        # current_cell = np.array(self.world_to_cell(self.current_position))
-        # if current_cell is not None:
-        #     ax.imshow(
-        #         current_cell.T,
-        #         origin="lower",
-        #     )
 
         # plot obstacles
         if np.any(self.obstacle_mask):
@@ -274,7 +268,7 @@ if __name__ == "__main__":
     m.add_obstacle(table)
     shelf = Obstacle([(0.7, 0.4), (1, 0.4), (1, 0.7), (0.7, 0.7)], "shelf")
     m.add_obstacle(shelf)
-    at1 = Landmark((0.5, 0.5), "at1", heading=0.0)
+    at1 = Landmark((0.5, 0.5), "at1", id="at1", heading=0.0)
     m.add_landmark(at1)
 
     m.plot()

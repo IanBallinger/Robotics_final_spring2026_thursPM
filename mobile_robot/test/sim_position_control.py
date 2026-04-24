@@ -33,7 +33,7 @@ def make_demo_map(resolution: float = 0.1) -> Map:
     m = Map([(0, 0), (2, 0), (2, 0.5), (1, 0.5), (1, 1), (0, 1), (0, 0)], resolution)
     m.add_obstacle(Obstacle([(1, 0.5), (1, 1), (0, 1), (0, 0.5)], "table"))
     m.add_obstacle(Obstacle([(0.7, 0.4), (1, 0.4), (1, 0.7), (0.7, 0.7)], "shelf"))
-    m.add_landmark(Landmark((0.5, 0.5), "at1"))
+    m.add_landmark(Landmark((0.5, 0.5), "at1", id="at1"))
     return m
 
 

@@ -197,7 +197,7 @@ if __name__ == "__main__":
     map.add_obstacle(table)
     shelf = Obstacle([(0.7, 0.4), (1, 0.4), (1, 0.7), (0.7, 0.7)], "shelf")
     map.add_obstacle(shelf)
-    at1 = Landmark((0.5, 0.5), "at1")
+    at1 = Landmark((0.5, 0.5), "at1", id="at1")
     map.add_landmark(at1)
 
     astar = AStar(map)

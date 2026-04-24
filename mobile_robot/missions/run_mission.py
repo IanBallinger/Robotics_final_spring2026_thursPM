@@ -135,7 +135,7 @@ class MissionRuntime:
         )
         self.planned_tasks = self._plan_tasks(self.map_, self.tasks)
         self.planned_lookup = {planned.task.name: planned for planned in self.planned_tasks}
-        self.landmark_lookup = {str(landmark.name): landmark for landmark in self.map_.landmarks}
+        self.landmark_lookup = {str(landmark.id): landmark for landmark in self.map_.landmarks}
 
         self.blackboard = initialise_blackboard(
             self.tasks[0].name,

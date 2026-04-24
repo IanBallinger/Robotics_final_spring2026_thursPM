@@ -80,22 +80,25 @@ def load_map(path: Path | str) -> Map:
             Landmark(
                 _load_point(landmark_raw["position"]),
                 str(landmark_raw["name"]),
+                id=str(landmark_raw.get("id", landmark_raw["name"])),
                 heading=float(landmark_raw.get("heading", 0.0)),
             )
         )
 
-    for obstacle_raw in map_raw.get("obstacles", []):
-        obstacle_boundary = obstacle_raw.get("boundary")
-        if obstacle_boundary is None:
-            raise ValueError(
-                f"map obstacle '{obstacle_raw.get('name', '<unnamed>')}' must define a 'boundary'"
+
+    if map_raw.get("obstacles", []) is not None:
+        for obstacle_raw in map_raw.get("obstacles", []):
+            obstacle_boundary = obstacle_raw.get("boundary")
+            if obstacle_boundary is None:
+                raise ValueError(
+                    f"map obstacle '{obstacle_raw.get('name', '<unnamed>')}' must define a 'boundary'"
+                )
+            map_.add_obstacle(
+                Obstacle(
+                    [_load_point(point) for point in obstacle_boundary],
+                    str(obstacle_raw["name"]),
+                )
             )
-        map_.add_obstacle(
-            Obstacle(
-                [_load_point(point) for point in obstacle_boundary],
-                str(obstacle_raw["name"]),
-            )
-        )
 
     return map_
 
