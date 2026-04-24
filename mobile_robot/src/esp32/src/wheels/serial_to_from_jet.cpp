@@ -341,16 +341,18 @@ void sendIMU() {
   AccelReadings a = imu.getAccelReadings();
   GyroReadings g = imu.getGyroReadings();
 
+  double ax_bias = 0.4f;
+
   const unsigned long now = millis();
   float dt = 0.0f;
   if (last_accel_filter_ms == 0) {
-    filtered_ax = static_cast<float>(a.ax);
+    filtered_ax = static_cast<float>(a.ax) + ax_bias;
     filtered_ay = static_cast<float>(a.ay);
     filtered_az = static_cast<float>(a.az);
   } else {
     dt = (now - last_accel_filter_ms) / 1000.0f;
     const float alpha = dt / (IMU_ACCEL_FILTER_TAU_S + dt);
-    filtered_ax += alpha * (static_cast<float>(a.ax) - filtered_ax);
+    filtered_ax += alpha * (static_cast<float>(a.ax) + ax_bias - filtered_ax);
     filtered_ay += alpha * (static_cast<float>(a.ay) - filtered_ay);
     filtered_az += alpha * (static_cast<float>(a.az) - filtered_az);
   }

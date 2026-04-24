@@ -394,7 +394,7 @@ class MissionRuntime:
             return
 
         imu_msg = imu_msgs[-1]
-        ax_meas = imu_msg.ax + 0.4
+        ax_meas = imu_msg.ax
         ay_meas = imu_msg.ay
         imu = IMUMeasurement(ax=ax_meas, ay=ay_meas, wz=imu_msg.gz)
         self.localization_filter.predict(imu, dt)
