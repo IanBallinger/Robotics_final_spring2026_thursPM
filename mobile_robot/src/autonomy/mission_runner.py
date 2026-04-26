@@ -40,6 +40,7 @@ class Task:
     name: str
     start: Pose2D
     goal: Pose2D
+    desired_elevator_height_m: float
     enter_conditions: List[str]
     completion_conditions: List[str]
 
@@ -118,6 +119,7 @@ def load_tasks(path: Path | str) -> List[Task]:
                 name=str(row["name"]),
                 start=current_start,
                 goal=goal,
+                desired_elevator_height_m=float(row.get("desired_elevator_height_m", 0.0)),
                 enter_conditions=[str(x) for x in row.get("enter_conditions", [])],
                 completion_conditions=[
                     str(x) for x in row.get("completion_conditions", [])
@@ -170,6 +172,7 @@ class MissionRunner:
         merged.setdefault("current_task", task.name)
         merged.setdefault("task_index", self._task_i)
         merged.setdefault("previous_task_complete", previous_task_complete)
+        merged.setdefault("desired_elevator_height_m", task.desired_elevator_height_m)
         return merged
 
     def conditions_met(

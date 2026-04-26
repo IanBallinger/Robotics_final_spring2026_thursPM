@@ -484,6 +484,9 @@ def main():
             "path_ready": True,
             "obstacle_blocking_path": False,
             "zone_clear": True,
+            "current_elevator_height_m": 0.0,
+            "desired_elevator_height_m": float(tasks[0].desired_elevator_height_m),
+            "elevator_height_error_m": float(tasks[0].desired_elevator_height_m),
             "elevator_at_height": True,
             "distance_to_goal": 1.0,
             "heading_error": 1.0,
@@ -614,8 +617,16 @@ def main():
         heading_error = float(wrap_to_pi(active_task.goal.heading - est_psi))
         speed = float(np.hypot(est_state[3], est_state[4]))
 
+        current_elevator_height_m = float(bb.get("current_elevator_height_m") or 0.0)
+        desired_elevator_height_m = float(active_task.desired_elevator_height_m)
+        elevator_height_error_m = desired_elevator_height_m - current_elevator_height_m
+
         bb.set("distance_to_goal", goal_error)
         bb.set("heading_error", heading_error)
+        bb.set("current_elevator_height_m", current_elevator_height_m)
+        bb.set("desired_elevator_height_m", desired_elevator_height_m)
+        bb.set("elevator_height_error_m", elevator_height_error_m)
+        bb.set("elevator_at_height", abs(elevator_height_error_m) <= 0.01)
         bb.set("robot_stopped", speed < 0.02)
         bb.set("tray_detected", goal_error < 0.10)
         bb.set("tray_released", goal_error < 0.06)

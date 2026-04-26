@@ -56,6 +56,7 @@ except Exception:  # pragma: no cover
 
 from localization.map import Map  # noqa: E402
 from planning.a_star import AStar, waypoints_from_polyline  # noqa: E402
+from serial_connection.elevator_serial_con import ElevatorSerialConnect  # noqa: E402
 from serial_connection.serial_con import SerialConnect  # noqa: E402
 
 
@@ -119,6 +120,7 @@ class MissionRuntime:
         self,
         tasks_path: Path,
         serial_port: Optional[str],
+        elevator_serial_port: Optional[str],
         disable_camera: bool,
         camera_index: int,
         debug: bool,
@@ -146,6 +148,9 @@ class MissionRuntime:
                 "path_ready": True,
                 "obstacle_blocking_path": False,
                 "zone_clear": True,
+                "current_elevator_height_m": 0.0,
+                "desired_elevator_height_m": float(self.tasks[0].desired_elevator_height_m),
+                "elevator_height_error_m": float(self.tasks[0].desired_elevator_height_m),
                 "elevator_at_height": True,
                 "distance_to_goal": 1.0,
                 "heading_error": 1.0,
@@ -169,6 +174,14 @@ class MissionRuntime:
             rx_publish_rate_hz=max(20.0, self.runtime_config.control_rate_hz),
             debug=debug,
         )
+        self.elevator_serial: Optional[ElevatorSerialConnect] = None
+        if elevator_serial_port:
+            self.elevator_serial = ElevatorSerialConnect(
+                port=elevator_serial_port,
+                tx_rate_hz=self.runtime_config.control_rate_hz,
+                rx_publish_rate_hz=max(20.0, self.runtime_config.control_rate_hz),
+                debug=debug,
+            )
         self.localization_filter = self._create_localization_filter()
 
         self.apriltag_estimator = None
@@ -433,15 +446,34 @@ class MissionRuntime:
         self.telemetry_sock.sendto(payload, (self.telemetry_host, self.telemetry_port))
         self.last_telemetry_time = now
 
+    def _update_elevator_from_serial(self, current_task_name: str) -> None:
+        task = self.task_lookup[current_task_name]
+        self.blackboard.set("desired_elevator_height_m", float(task.desired_elevator_height_m))
+
+        if self.elevator_serial is None:
+            return
+
+        self.elevator_serial.send_height_cmd(task.desired_elevator_height_m)
+        self.elevator_serial.flush_tx()
+        for msg in self.elevator_serial.read_parsed(max_lines=32):
+            self.blackboard.set("current_elevator_height_m", float(msg.height_m))
+
     def _update_blackboard(self, current_task_name: str) -> tuple[float, float]:
         task = self.task_lookup[current_task_name]
         est = self.localization_filter.get_state()
         goal_error = float(np.hypot(task.goal.x - est[0], task.goal.y - est[1]))
         heading_error = float(wrap_to_pi(task.goal.heading - est[2]))
         speed = float(np.hypot(est[3], est[4]))
+        current_elevator_height_m = float(self.blackboard.get("current_elevator_height_m") or 0.0)
+        desired_elevator_height_m = float(task.desired_elevator_height_m)
+        elevator_height_error_m = desired_elevator_height_m - current_elevator_height_m
 
         self.blackboard.set("distance_to_goal", goal_error)
         self.blackboard.set("heading_error", heading_error)
+        self.blackboard.set("current_elevator_height_m", current_elevator_height_m)
+        self.blackboard.set("desired_elevator_height_m", desired_elevator_height_m)
+        self.blackboard.set("elevator_height_error_m", elevator_height_error_m)
+        self.blackboard.set("elevator_at_height", abs(elevator_height_error_m) <= 0.01)
         self.blackboard.set("robot_stopped", speed < 0.02)
         self.blackboard.set("tray_detected", goal_error < 0.10)
         self.blackboard.set("tray_released", goal_error < 0.06)
@@ -475,6 +507,7 @@ class MissionRuntime:
 
                 self._update_localization_from_imu(dt)
                 self._maybe_update_apriltag()
+                self._update_elevator_from_serial(current_task)
 
                 state = self._current_state_for_controller()
                 goal_wp = self._active_goal_waypoint(current_task, state)
@@ -506,6 +539,8 @@ class MissionRuntime:
             self.serial.send_wheel_cmd(0.0, 0.0, 0.0, 0.0, force=True)
             self.serial.flush_tx(force=True)
             self.serial.close()
+            if self.elevator_serial is not None:
+                self.elevator_serial.close()
             if self.camera is not None:
                 self.camera.release()
             if self.telemetry_sock is not None:
@@ -516,6 +551,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tasks", default=str(default_tasks_path()), help="Path to tasks.yaml")
     parser.add_argument("--port", default=None, help="Serial port for wheel controller ESP32")
+    parser.add_argument("--elevator-port", default=None, help="Serial port for elevator controller ESP32")
     parser.add_argument("--camera-index", type=int, default=0)
     parser.add_argument("--disable-camera", action="store_true")
     parser.add_argument("--max-ticks", type=int, default=None)
@@ -528,6 +564,7 @@ def main() -> None:
     runtime = MissionRuntime(
         tasks_path=Path(args.tasks),
         serial_port=args.port,
+        elevator_serial_port=args.elevator_port,
         disable_camera=args.disable_camera,
         camera_index=args.camera_index,
         debug=args.debug_serial,

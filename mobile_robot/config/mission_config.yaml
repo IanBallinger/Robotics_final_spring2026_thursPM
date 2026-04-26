@@ -113,6 +113,7 @@ camera_to_robot:
   yaw: 0.0
 tasks:
   - name: drive_to_tray
+    desired_elevator_height_m: 0.0
     goal:
       position:
         x: 0.75
@@ -123,7 +124,9 @@ tasks:
     completion_conditions:
       - distance_to_goal <= 0.05
       - abs(heading_error) <= 0.10
+      - abs(elevator_height_error_m) <= 0.01
   - name: drive_to_zone
+    desired_elevator_height_m: 0.0
     goal:
       position:
         x: 1.55
@@ -134,7 +137,9 @@ tasks:
     completion_conditions:
       - distance_to_goal <= 0.08
       - abs(heading_error) <= 0.12
+      - abs(elevator_height_error_m) <= 0.01
   - name: drive_to_elevator
+    desired_elevator_height_m: 0.0
     goal:
       position:
         x: 0.7
@@ -145,3 +150,4 @@ tasks:
     completion_conditions:
       - distance_to_goal <= 0.05
       - abs(heading_error) <= 0.10
+      - abs(elevator_height_error_m) <= 0.01
