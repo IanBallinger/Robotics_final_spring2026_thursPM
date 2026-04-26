@@ -1,0 +1,8 @@
+from rtde_control import RTDEControlInterface
+from robotiq_gripper_control import RobotiqGripper
+
+
+
+# rq_grip(width, speed, force)
+
+state= 1 # 1= max open, 2= max close, 3= open for bowl, 4= open for plate, 5= open for cup
