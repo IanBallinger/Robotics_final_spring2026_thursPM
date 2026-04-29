@@ -49,6 +49,7 @@ from localization import (  # noqa: E402
     UnscentedKalmanFilter2D,
 )
 
+from camera import RealSenseCamera  # noqa: E402
 from localization.april_tag_pose_est import AprilTagPoseEst
 from localization.person_detection import PersonDetector
 
@@ -196,6 +197,7 @@ class MissionRuntime:
             )
         self.localization_filter = self._create_localization_filter()
 
+        self.shared_camera: Optional[RealSenseCamera] = None
         self.apriltag_estimator = None
         self.person_detector = None
         self._warned_raw_apriltag = False
@@ -203,10 +205,13 @@ class MissionRuntime:
         self._person_obstacle_radius_m = 0.35
         self._dynamic_obstacle_packets: list[DynamicObstaclePacket] = []
         if not disable_camera:
-            self.apriltag_estimator = AprilTagPoseEst()
-            self.apriltag_estimator.open()
-            self.person_detector = PersonDetector(mission_config_path=self.tasks_path)
-            self.person_detector.open()
+            self.shared_camera = RealSenseCamera()
+            self.shared_camera.open()
+            self.apriltag_estimator = AprilTagPoseEst(realsense_camera=self.shared_camera)
+            self.person_detector = PersonDetector(
+                camera=self.shared_camera,
+                mission_config_path=self.tasks_path,
+            )
 
         self.map_figure = None
         self.map_axes = None
@@ -623,10 +628,8 @@ class MissionRuntime:
             self.serial.close()
             if self.elevator_serial is not None:
                 self.elevator_serial.close()
-            if self.apriltag_estimator is not None:
-                self.apriltag_estimator.close()
-            if self.person_detector is not None:
-                self.person_detector.close()
+            if self.shared_camera is not None:
+                self.shared_camera.close()
             if self.telemetry_sock is not None:
                 self.telemetry_sock.close()
 
