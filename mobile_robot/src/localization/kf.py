@@ -6,22 +6,27 @@ This module provides lightweight nonlinear filters for fusing:
   - body-frame linear accelerations ax, ay (used in prediction)
   - yaw rate wz (fused as a measurement update)
 
-State definition (6D):
-    x = [px, py, yaw, vx_body, vy_body, wz]
+State definition (9D):
+    x = [px, py, yaw, vx_body, vy_body, wz, b_ax, b_ay, b_wz]
 
 where:
 - px, py are global/world position coordinates
 - yaw is global heading
 - vx_body, vy_body are body-frame translational velocities
-- wz is yaw rate
+- wz is bias-corrected yaw rate
+- b_ax, b_ay are accelerometer biases
+- b_wz is gyro yaw-rate bias
 
 The process model is:
     px_{k+1} = px_k + dt * (cos(yaw) * vx_body - sin(yaw) * vy_body)
     py_{k+1} = py_k + dt * (sin(yaw) * vx_body + cos(yaw) * vy_body)
     yaw_{k+1}= yaw_k + dt * wz
-    vx_{k+1} = vx_k + dt * ax_body
-    vy_{k+1} = vy_k + dt * ay_body
+    vx_{k+1} = vx_k + dt * (ax_body - b_ax)
+    vy_{k+1} = vy_k + dt * (ay_body - b_ay)
     wz_{k+1} = wz_k
+    b_ax_{k+1} = b_ax_k
+    b_ay_{k+1} = b_ay_k
+    b_wz_{k+1} = b_wz_k
 
 This is intentionally smaller and simpler than robot_localization, but keeps
 its core idea of nonlinear state estimation with configurable process and
@@ -35,7 +40,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-STATE_DIM = 6
+STATE_DIM = 9
 POSE_MEAS_DIM = 3
 GYRO_MEAS_DIM = 1
 
@@ -45,6 +50,9 @@ YAW = 2
 VX = 3
 VY = 4
 WZ = 5
+BAX = 6
+BAY = 7
+BWZ = 8
 
 
 def wrap_angle(angle: float) -> float:
@@ -120,7 +128,7 @@ class _BaseLocalizationFilter:
 
         # Process noise is defined per second and scaled by dt in predict().
         self.process_noise = (
-            np.diag([5e-3, 5e-3, 5e-3, 5e-2, 5e-2, 2e-2])
+            np.diag([5e-3, 5e-3, 5e-3, 5e-2, 5e-2, 2e-2, 5e-4, 5e-4, 5e-4])
             if process_noise is None
             else np.asarray(process_noise, dtype=float).reshape(STATE_DIM, STATE_DIM)
         )
@@ -153,9 +161,12 @@ class _BaseLocalizationFilter:
         out[PX] = x[PX] + dt * (c * x[VX] - s * x[VY])
         out[PY] = x[PY] + dt * (s * x[VX] + c * x[VY])
         out[YAW] = wrap_angle(x[YAW] + dt * x[WZ])
-        out[VX] = x[VX] + dt * imu.ax
-        out[VY] = x[VY] + dt * imu.ay
+        out[VX] = x[VX] + dt * (imu.ax - x[BAX])
+        out[VY] = x[VY] + dt * (imu.ay - x[BAY])
         out[WZ] = x[WZ]
+        out[BAX] = x[BAX]
+        out[BAY] = x[BAY]
+        out[BWZ] = x[BWZ]
         return out
 
     @staticmethod
@@ -177,6 +188,8 @@ class _BaseLocalizationFilter:
         F[PY, VY] = dt * c
 
         F[YAW, WZ] = dt
+        F[VX, BAX] = -dt
+        F[VY, BAY] = -dt
         return F
 
     @staticmethod
@@ -185,7 +198,7 @@ class _BaseLocalizationFilter:
 
     @staticmethod
     def _gyro_measurement_model(state: np.ndarray) -> np.ndarray:
-        return np.array([state[WZ]], dtype=float)
+        return np.array([state[WZ] + state[BWZ]], dtype=float)
 
     @staticmethod
     def _pose_measurement_matrix() -> np.ndarray:
@@ -199,6 +212,7 @@ class _BaseLocalizationFilter:
     def _gyro_measurement_matrix() -> np.ndarray:
         H = np.zeros((GYRO_MEAS_DIM, STATE_DIM), dtype=float)
         H[0, WZ] = 1.0
+        H[0, BWZ] = 1.0
         return H
 
     def get_state(self) -> np.ndarray:
@@ -212,6 +226,9 @@ class _BaseLocalizationFilter:
 
     def velocity_body(self) -> Tuple[float, float, float]:
         return float(self.state[VX]), float(self.state[VY]), float(self.state[WZ])
+
+    def imu_biases(self) -> Tuple[float, float, float]:
+        return float(self.state[BAX]), float(self.state[BAY]), float(self.state[BWZ])
 
 
 class ExtendedKalmanFilter2D(_BaseLocalizationFilter):

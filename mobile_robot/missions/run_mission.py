@@ -40,6 +40,7 @@ from autonomy.trees.waypoint_mission import (  # noqa: E402
 from guidance.waypoint_controller import (  # noqa: E402
     CascadedWaypointController,
     MapPoseVelocity,
+    MecanumCommand,
     wrap_to_pi,
 )
 from localization import (  # noqa: E402
@@ -267,6 +268,9 @@ class MissionRuntime:
                     float(init.get("vx_body", 0.0)),
                     float(init.get("vy_body", 0.0)),
                     float(init.get("wz", 0.0)),
+                    float(init.get("b_ax", 0.0)),
+                    float(init.get("b_ay", 0.0)),
+                    float(init.get("b_wz", 0.0)),
                 ],
                 dtype=float,
             ),
@@ -483,6 +487,49 @@ class MissionRuntime:
 
         self.blackboard.set("obstacle_blocking_path", recognized_people > 0)
 
+    def _path_intersects_dynamic_obstacle(
+        self,
+        task_name: str,
+        state: MapPoseVelocity,
+    ) -> bool:
+        planned = self.planned_lookup[task_name]
+        remaining_points = [(state.x, state.y)] + [
+            wp.xy for wp in planned.waypoints[planned.waypoint_index :]
+        ]
+        if len(remaining_points) < 2:
+            return False
+
+        step = max(0.02, 0.5 * self.map_.resolution)
+        for p0, p1 in zip(remaining_points[:-1], remaining_points[1:]):
+            p0_arr = np.asarray(p0, dtype=float)
+            p1_arr = np.asarray(p1, dtype=float)
+            delta = p1_arr - p0_arr
+            seg_len = float(np.linalg.norm(delta))
+            if seg_len < 1e-9:
+                sample_points = [tuple(p0_arr.tolist())]
+            else:
+                n = max(2, int(np.ceil(seg_len / step)) + 1)
+                sample_points = [
+                    tuple((p0_arr + alpha * delta).tolist())
+                    for alpha in np.linspace(0.0, 1.0, n)
+                ]
+
+            for sample in sample_points:
+                cell = self.map_.world_to_cell(sample)
+                if cell is None:
+                    continue
+                if self.map_.cell_has_obstacle(cell[0], cell[1]):
+                    return True
+        return False
+
+    def _zero_mecanum_command(self) -> MecanumCommand:
+        return MecanumCommand(
+            vx=0.0,
+            vy=0.0,
+            omega=0.0,
+            wheel_rates=(0.0, 0.0, 0.0, 0.0),
+        )
+
     def _update_localization_from_imu(self, dt: float) -> None:
         imu_msgs = self.serial.read_parsed(max_lines=128)
         if not imu_msgs:
@@ -597,6 +644,10 @@ class MissionRuntime:
                 state = self._current_state_for_controller()
                 goal_wp = self._active_goal_waypoint(current_task, state)
                 cmd = self.controller.compute(state, goal_wp)
+                path_blocked = self._path_intersects_dynamic_obstacle(current_task, state)
+                if path_blocked:
+                    cmd = self._zero_mecanum_command()
+                self.blackboard.set("obstacle_blocking_path", path_blocked)
                 self.serial.send_wheel_cmd(*cmd.wheel_rates)
                 self.serial.flush_tx()
 
