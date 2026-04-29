@@ -90,6 +90,25 @@ def draw_map_background(ax, map_: Map) -> None:
         )
 
 
+def _draw_task_goals(ax, tasks: list[Any]) -> None:
+    for task in tasks:
+        ax.scatter(task.goal.x, task.goal.y, marker="*", s=140, c="tab:orange", edgecolors="black", linewidths=0.8)
+        ax.text(task.goal.x + 0.03, task.goal.y + 0.03, task.name, fontsize=9, color="tab:orange")
+
+
+
+def _apply_dynamic_obstacles(map_: Map, telemetry: dict[str, Any]) -> None:
+    map_.clear_obstacles_by_prefix("person_")
+    for obstacle in telemetry.get("dynamic_obstacles", []):
+        center = obstacle.get("center")
+        radius = obstacle.get("radius")
+        name = str(obstacle.get("name", "person_unknown"))
+        if center is None or radius is None or len(center) != 2:
+            continue
+        map_.add_circular_obstacle((float(center[0]), float(center[1])), float(radius), name)
+
+
+
 def setup_plot(map_: Map, tasks: list[Any]):
     try:
         import matplotlib.pyplot as plt
@@ -98,10 +117,7 @@ def setup_plot(map_: Map, tasks: list[Any]):
 
     fig, ax = plt.subplots(figsize=(11, 7))
     draw_map_background(ax, map_)
-
-    for task in tasks:
-        ax.scatter(task.goal.x, task.goal.y, marker="*", s=140, c="tab:orange", edgecolors="black", linewidths=0.8)
-        ax.text(task.goal.x + 0.03, task.goal.y + 0.03, task.name, fontsize=9, color="tab:orange")
+    _draw_task_goals(ax, tasks)
 
     (traj_line,) = ax.plot([], [], color="tab:cyan", linewidth=1.8, label="Jetson estimate", zorder=6)
     (robot_marker,) = ax.plot([], [], marker=(3, 0, 0), markersize=14, color="black", linestyle="None", zorder=8)
@@ -123,11 +139,9 @@ def update_visualization(
     *,
     plt,
     fig,
+    ax,
     map_: Map,
-    traj_line,
-    robot_marker,
-    cell_patch,
-    status_text,
+    tasks: list[Any],
     traj_x: list[float],
     traj_y: list[float],
     telemetry: dict[str, Any],
@@ -135,9 +149,15 @@ def update_visualization(
     x = float(telemetry["x"])
     y = float(telemetry["y"])
     yaw = float(telemetry["yaw"])
-    traj_line.set_data(traj_x, traj_y)
-    robot_marker.set_data([x], [y])
-    robot_marker.set_marker((3, 0, np.degrees(yaw) - 90.0))
+
+    _apply_dynamic_obstacles(map_, telemetry)
+
+    ax.clear()
+    draw_map_background(ax, map_)
+    _draw_task_goals(ax, tasks)
+
+    ax.plot(traj_x, traj_y, color="tab:cyan", linewidth=1.8, label="Jetson estimate", zorder=6)
+    ax.plot([x], [y], marker=(3, 0, np.degrees(yaw) - 90.0), markersize=14, color="black", linestyle="None", zorder=8)
 
     cell = telemetry.get("cell")
     if cell is not None and len(cell) == 2:
@@ -145,27 +165,46 @@ def update_visualization(
         if map_.is_valid_cell(i, j):
             x0 = map_._xmin + i * map_.resolution  # noqa: SLF001
             y0 = map_._ymin + j * map_.resolution  # noqa: SLF001
-            cell_patch.set_xy((x0, y0))
-            cell_patch.set_width(map_.resolution)
-            cell_patch.set_height(map_.resolution)
-            cell_patch.set_visible(True)
-        else:
-            cell_patch.set_visible(False)
-    else:
-        cell_patch.set_visible(False)
+            ax.add_patch(
+                plt.Rectangle(
+                    (x0, y0),
+                    map_.resolution,
+                    map_.resolution,
+                    fill=False,
+                    edgecolor="tab:blue",
+                    linewidth=2.0,
+                    zorder=7,
+                )
+            )
 
-    status_text.set_text(
-        "\n".join(
-            [
-                f"task: {telemetry.get('current_task', 'unknown')}",
-                f"pose: ({x:.3f}, {y:.3f}, {yaw:.3f})",
-                f"cell: {telemetry.get('cell')}",
-                f"distance_to_goal: {float(telemetry.get('distance_to_goal', float('nan'))):.3f}",
-                f"heading_error: {float(telemetry.get('heading_error', float('nan'))):.3f}",
-                f"localization_ok: {telemetry.get('localization_ok')}",
-            ]
-        )
+    status_text = "\n".join(
+        [
+            f"task: {telemetry.get('current_task', 'unknown')}",
+            f"pose: ({x:.3f}, {y:.3f}, {yaw:.3f})",
+            f"cell: {telemetry.get('cell')}",
+            f"distance_to_goal: {float(telemetry.get('distance_to_goal', float('nan'))):.3f}",
+            f"heading_error: {float(telemetry.get('heading_error', float('nan'))):.3f}",
+            f"localization_ok: {telemetry.get('localization_ok')}",
+            f"dynamic_obstacles: {len(telemetry.get('dynamic_obstacles', []))}",
+        ]
     )
+    ax.text(
+        0.02,
+        0.98,
+        status_text,
+        transform=ax.transAxes,
+        va="top",
+        ha="left",
+        fontsize=10,
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
+        zorder=9,
+    )
+    ax.set_title("Robot control center")
+    ax.set_xlabel("x (m)")
+    ax.set_ylabel("y (m)")
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True, alpha=0.25)
+    ax.legend(loc="upper left", fontsize=8)
 
     fig.canvas.draw_idle()
     plt.pause(0.001)
@@ -187,7 +226,7 @@ def main() -> None:
 
     tasks = load_tasks(Path(args.tasks))
     map_ = load_map(Path(args.tasks))
-    plt, fig, _, traj_line, robot_marker, cell_patch, status_text = setup_plot(map_, tasks)
+    plt, fig, ax, traj_line, robot_marker, cell_patch, status_text = setup_plot(map_, tasks)
     if not args.no_show:
         plt.ion()
         plt.show(block=False)
@@ -222,11 +261,9 @@ def main() -> None:
                 update_visualization(
                     plt=plt,
                     fig=fig,
+                    ax=ax,
                     map_=map_,
-                    traj_line=traj_line,
-                    robot_marker=robot_marker,
-                    cell_patch=cell_patch,
-                    status_text=status_text,
+                    tasks=tasks,
                     traj_x=traj_x,
                     traj_y=traj_y,
                     telemetry=latest,

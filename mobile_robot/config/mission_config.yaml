@@ -106,11 +106,16 @@ mission_runtime:
   controller_v_max: 0.35
   controller_omega_max: 1.8
 camera_to_robot:
-  # Placeholder planar extrinsics from camera frame to robot reference frame.
-  # Replace with measured values when the camera mounting is finalized.
-  x: 0.0
-  y: 0.0
-  yaw: 0.0
+  # Camera pose expressed in the robot/body frame.
+  # Keep this as the single source of truth for camera mounting extrinsics.
+  translation:
+    x: 0.0
+    y: 0.0
+    z: 0.0
+  rotation_rpy:
+    roll: 0.0
+    pitch: 0.0
+    yaw: 0.0
 tasks:
   - name: drive_to_tray
     desired_elevator_height_m: 0.0

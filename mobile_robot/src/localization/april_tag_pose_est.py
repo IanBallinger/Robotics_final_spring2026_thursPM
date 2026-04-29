@@ -1,17 +1,32 @@
-import os
-import cv2
-from cv2.typing import MatLike
+from __future__ import annotations
+
+from typing import Dict, Optional, Tuple
+
 import numpy as np
 import pupil_apriltags as apriltag
-import time
 
-from typing import Dict, Tuple
+from camera import RealSenseCamera, bgr_to_gray, undistort_image
+from camera.types import CameraFrame, CameraIntrinsics, DepthFrame, StreamConfig
 
 
 class AprilTagPoseEst:
-    def __init__(self):
+    """AprilTag pose estimation using frames from a RealSense camera.
+
+    The estimated tag pose is returned in the camera frame as
+    ``(rotation_matrix, translation_vector)``.
+    """
+
+    def __init__(
+        self,
+        *,
+        realsense_camera: Optional[RealSenseCamera] = None,
+        tag_size_m: float = 0.12,
+        color_config: StreamConfig = StreamConfig(),
+        depth_config: StreamConfig = StreamConfig(),
+        align_depth_to_color: bool = True,
+    ):
         self.at_detector = apriltag.Detector(
-            families="tag36h11",  # or 'tag25h9', etc.
+            families="tag36h11",
             nthreads=1,
             quad_decimate=1.0,
             quad_sigma=0.0,
@@ -19,113 +34,94 @@ class AprilTagPoseEst:
             decode_sharpening=0.25,
             debug=0,
         )
-        self.__load_camera_calibration()
+        self.tag_size = float(tag_size_m)
+        self.camera = realsense_camera or RealSenseCamera(
+            color_config=color_config,
+            depth_config=depth_config,
+            align_depth_to_color=align_depth_to_color,
+        )
 
         # key: tag id, value: (rotation matrix, translation vector)
-        self.pose_estimate: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+        self.pose_estimate: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
 
-    def __load_camera_calibration(self):
-        calib_path = os.path.join(
-            os.path.dirname(__file__), "camera_calibration_live.npz"
-        )
-        calibration_data = np.load(calib_path)
-        self.camera_matrix = calibration_data["camera_matrix"]  # shape (3, 3)
-        self.dist_coeffs = calibration_data[
-            "dist_coeffs"
-        ]  # shape (n,) typically (5,) or (8,)
-        self.fx = self.camera_matrix[0, 0]
-        self.fy = self.camera_matrix[1, 1]
-        self.cx = self.camera_matrix[0, 2]
-        self.cy = self.camera_matrix[1, 2]
-        self.tag_size = 0.12  # 10 cm
+    def open(self) -> None:
+        self.camera.open()
 
-    def __detect_april_tags(self, frame: MatLike):
+    def close(self) -> None:
+        self.camera.close()
 
-        # ------------------------------------------------------------------
-        # 4. Undistort (optional but recommended)
-        #    You can either:
-        #    A) Undistort the entire image once, or
-        #    B) Let the AprilTag detector handle radial distortion by
-        #       passing camera_params directly (estimate_tag_pose=True).
-        #
-        # In practice, the built-in pose estimation in pupil_apriltags
-        # uses the pinhole model with no distortion. So it's best to
-        # either undistort the frame yourself or accept small distortion
-        # errors if your lens is fairly undistorted or uses a cheap camera.
-        # ------------------------------------------------------------------
-        # Option A: Undistort the entire frame
-        ##        h, w = frame.shape[:2]
-        ##        new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(
-        ##            camera_matrix, dist_coeffs, (w, h), 1, (w, h))
-        ##        undistorted = cv2.undistort(frame, camera_matrix, dist_coeffs, None, new_camera_matrix)
+    def __enter__(self) -> "AprilTagPoseEst":
+        self.open()
+        return self
 
-        undistorted = frame  # This turns off the undistortion
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
 
-        # Convert to grayscale
-        gray = cv2.cvtColor(undistorted, cv2.COLOR_BGR2GRAY)
+    def _detect_april_tags(
+        self,
+        frame: CameraFrame,
+        *,
+        intrinsics: Optional[CameraIntrinsics] = None,
+        undistort: bool = True,
+    ) -> Dict[int, Tuple[np.ndarray, np.ndarray]]:
+        intrinsics = intrinsics or frame.intrinsics
+        if intrinsics is None:
+            raise ValueError("camera intrinsics are required for AprilTag pose estimation")
 
-        # 5. Detect AprilTags
-        # ------------------------------------------------------------------
-        # With pupil_apriltags, you can directly get pose estimation by
-        # providing 'estimate_tag_pose=True' and camera_params + tag_size.
-        # This automatically computes the rotation and translation of the tag.
-        # ------------------------------------------------------------------
+        image = frame.color
+        if undistort:
+            image = undistort_image(image, intrinsics)
+
+        gray = bgr_to_gray(image)
         results = self.at_detector.detect(
             gray,
             estimate_tag_pose=True,
-            camera_params=[self.fx, self.fy, self.cx, self.cy],
+            camera_params=[intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy],
             tag_size=self.tag_size,
         )
 
-        # ------------------------------------------------------------------
-        # 6. Process each detection
-        # ------------------------------------------------------------------
-        self.pose_estimate = {}
-        for r in results:
-            # r.tag_id: the ID of the detected tag
-            # r.corners: the (4,2) array of corner coordinates in the image
-            # r.center:  the (x,y) coordinates of the tag center
-            # r.pose_R, r.pose_t: pose of the tag in the camera frame
-            #                    (right-handed coordinate system):
-            #    - R is a 3x3 rotation matrix
-            #    - t is a 3x1 translation vector
-            #
-            # The coordinate system by default: +x to the right, +y down,
-            # and +z forward from the camera's perspective.
-            #
+        pose_estimate: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
+        for result in results:
+            pose_estimate[int(result.tag_id)] = (
+                np.asarray(result.pose_R, dtype=float),
+                np.asarray(result.pose_t, dtype=float),
+            )
 
-            # ----------------------------------------
-            # 6a. Extract Tag ID and corners
-            # ----------------------------------------
-            tag_id = r.tag_id
-            R = r.pose_R  # 3×3 rotation matrix
-            t = r.pose_t  # 3×1 translation vector
+        self.pose_estimate = pose_estimate
+        return pose_estimate
 
-            self.pose_estimate[tag_id] = (R, t)
+    def get_pose_estimate(
+        self,
+        frame: Optional[CameraFrame] = None,
+        *,
+        undistort: bool = True,
+    ) -> Dict[int, Tuple[np.ndarray, np.ndarray]]:
+        """Estimate AprilTag poses.
 
-    def get_pose_estimate(self, frame: MatLike) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
-        self.__detect_april_tags(frame)
-        return self.pose_estimate
+        When ``frame`` is omitted, this method captures a fresh frame from the
+        configured RealSense camera.
+        """
+        if frame is None:
+            frame = self.camera.read()
+        return self._detect_april_tags(frame, undistort=undistort)
+
+    def get_pose_estimate_with_depth(
+        self,
+        frame: Optional[DepthFrame] = None,
+        *,
+        undistort: bool = True,
+    ) -> Tuple[Dict[int, Tuple[np.ndarray, np.ndarray]], DepthFrame]:
+        """Return AprilTag poses along with the RealSense RGB-D frame used."""
+        if frame is None:
+            frame = self.camera.read()
+        poses = self._detect_april_tags(frame, undistort=undistort)
+        return poses, frame
 
 
 if __name__ == "__main__":
-    april_tag_pose_est = AprilTagPoseEst()
-
-    cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-    # cap = cv2.VideoCapture(0) # For MacOS or Linux, you may need to remove the cv2.CAP_DSHOW flag
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-    cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
-    cap.set(cv2.CAP_PROP_FOCUS, 0)
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc("M", "J", "P", "G"))
-
-    if not cap.isOpened():
-        print("Error: Could not open webcam.")
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        april_tag_pose_est.get_pose_estimate(frame)
-        print(april_tag_pose_est.pose_estimate)
-        time.sleep(0.1)
+    with AprilTagPoseEst() as april_tag_pose_est:
+        while True:
+            poses, frame = april_tag_pose_est.get_pose_estimate_with_depth()
+            print({tag_id: (r.shape, t.reshape(-1).tolist()) for tag_id, (r, t) in poses.items()})
+            if frame.frame_id is not None and frame.frame_id > 10:
+                break

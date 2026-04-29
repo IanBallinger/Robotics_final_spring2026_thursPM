@@ -31,7 +31,7 @@ SRC_DIR = os.path.join(REPO_ROOT, "mobile_robot", "src")
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from autonomy.mission_runner import Task, default_tasks_path, load_map, load_tasks  # noqa: E402
+from autonomy.mission_runner import Pose2D, Task, default_tasks_path, load_map, load_tasks  # noqa: E402
 from autonomy.trees.waypoint_mission import (  # noqa: E402
     MISSION_DONE,
     create_tree,
@@ -53,6 +53,11 @@ try:  # noqa: E402
     from localization.april_tag_pose_est import AprilTagPoseEst
 except Exception:  # pragma: no cover
     AprilTagPoseEst = None  # type: ignore[assignment]
+
+try:  # noqa: E402
+    from localization.person_detection import PersonDetector
+except Exception:  # pragma: no cover
+    PersonDetector = None  # type: ignore[assignment]
 
 from localization.map import Map  # noqa: E402
 from planning.a_star import AStar, waypoints_from_polyline  # noqa: E402
@@ -88,15 +93,29 @@ class RuntimeConfig:
 
 @dataclass
 class CameraToRobotTransform:
-    """Placeholder planar camera extrinsics.
+    """Camera extrinsics expressed in the robot/body frame.
 
-    x, y are the camera origin expressed in robot/body coordinates.
-    yaw is the camera yaw relative to the robot frame.
+    The mission config may provide either the legacy planar form
+    ``{x, y, yaw}`` or the richer nested 3D form
+    ``{translation: {x, y, z}, rotation_rpy: {roll, pitch, yaw}}``.
+
+    Current AprilTag localization logic still uses the planar subset
+    ``x, y, yaw`` while the full fields are available for perception modules.
     """
 
     x: float = 0.0
     y: float = 0.0
+    z: float = 0.0
+    roll: float = 0.0
+    pitch: float = 0.0
     yaw: float = 0.0
+
+
+@dataclass
+class DynamicObstaclePacket:
+    name: str
+    center: list[float]
+    radius: float
 
 
 @dataclass
@@ -113,6 +132,7 @@ class TelemetryPacket:
     localization_ok: bool
     distance_to_goal: float
     heading_error: float
+    dynamic_obstacles: list[DynamicObstaclePacket]
 
 
 class MissionRuntime:
@@ -186,7 +206,11 @@ class MissionRuntime:
 
         self.apriltag_estimator = None
         self.camera = None
+        self.person_detector = None
         self._warned_raw_apriltag = False
+        self._person_obstacle_prefix = "person_"
+        self._person_obstacle_radius_m = 0.35
+        self._dynamic_obstacle_packets: list[DynamicObstaclePacket] = []
         if not disable_camera and AprilTagPoseEst is not None:
             try:
                 import cv2
@@ -204,6 +228,20 @@ class MissionRuntime:
                 self.camera = None
         elif not disable_camera:
             print("WARN: AprilTag dependencies unavailable; continuing without camera localization")
+
+        if not disable_camera and PersonDetector is not None:
+            try:
+                self.person_detector = PersonDetector(mission_config_path=self.tasks_path)
+                self.person_detector.open()
+            except Exception as exc:  # pragma: no cover
+                print(f"WARN: failed to initialize person detector: {exc}")
+                self.person_detector = None
+        elif not disable_camera:
+            print("WARN: person-detection dependencies unavailable; continuing without dynamic people obstacles")
+
+        self.map_figure = None
+        self.map_axes = None
+        self._setup_live_map_plot()
 
         self.last_loop_time = time.monotonic()
         self.telemetry_host = telemetry_host
@@ -270,11 +308,26 @@ class MissionRuntime:
             controller_omega_max=float(runtime.get("controller_omega_max", 1.8)),
         )
         cam = raw.get("camera_to_robot", {})
-        camera_to_robot = CameraToRobotTransform(
-            x=float(cam.get("x", 0.0)),
-            y=float(cam.get("y", 0.0)),
-            yaw=float(cam.get("yaw", 0.0)),
-        )
+        if "translation" in cam or "rotation_rpy" in cam:
+            translation = cam.get("translation", {})
+            rotation = cam.get("rotation_rpy", {})
+            camera_to_robot = CameraToRobotTransform(
+                x=float(translation.get("x", 0.0)),
+                y=float(translation.get("y", 0.0)),
+                z=float(translation.get("z", 0.0)),
+                roll=float(rotation.get("roll", 0.0)),
+                pitch=float(rotation.get("pitch", 0.0)),
+                yaw=float(rotation.get("yaw", 0.0)),
+            )
+        else:
+            camera_to_robot = CameraToRobotTransform(
+                x=float(cam.get("x", 0.0)),
+                y=float(cam.get("y", 0.0)),
+                z=float(cam.get("z", 0.0)),
+                roll=float(cam.get("roll", 0.0)),
+                pitch=float(cam.get("pitch", 0.0)),
+                yaw=float(cam.get("yaw", 0.0)),
+            )
         return localization, runtime_cfg, camera_to_robot
 
     def _create_localization_filter(self):
@@ -400,6 +453,62 @@ class MissionRuntime:
             self._warned_raw_apriltag = True
         return None
 
+    def _setup_live_map_plot(self) -> None:
+        try:
+            import matplotlib.pyplot as plt
+
+            plt.ion()
+            self.map_figure, self.map_axes = plt.subplots()
+            self.map_figure.canvas.manager.set_window_title("Mission Map")
+        except Exception as exc:  # pragma: no cover
+            print(f"WARN: could not initialize live map plot: {exc}")
+            self.map_figure = None
+            self.map_axes = None
+
+    def _update_live_map_plot(self, state: MapPoseVelocity) -> None:
+        if self.map_axes is None or self.map_figure is None:
+            return
+        self.map_.current_position = (state.x, state.y)
+        self.map_.draw(self.map_axes, current_position=self.map_.current_position)
+        self.map_axes.set_title("Mission Map with Dynamic Obstacles")
+        self.map_figure.canvas.draw_idle()
+        self.map_figure.canvas.flush_events()
+
+    def _update_dynamic_person_obstacles(self) -> None:
+        if self.person_detector is None:
+            return
+
+        est = self.localization_filter.get_state()
+        robot_pose = Pose2D(x=float(est[0]), y=float(est[1]), heading=float(est[2]))
+
+        try:
+            detections = self.person_detector.detect(robot_pose=robot_pose)
+        except Exception as exc:  # pragma: no cover
+            print(f"WARN: person detection update failed: {exc}")
+            return
+
+        self.map_.clear_obstacles_by_prefix(self._person_obstacle_prefix)
+        self._dynamic_obstacle_packets = []
+        recognized_people = 0
+        for det in detections:
+            if det.position_world_m is None:
+                continue
+            center = (float(det.position_world_m[0]), float(det.position_world_m[1]))
+            if self.map_.world_to_cell(center) is None:
+                continue
+            obstacle_name = f"{self._person_obstacle_prefix}{det.track_id if det.track_id is not None else recognized_people}"
+            self.map_.add_circular_obstacle(center, self._person_obstacle_radius_m, obstacle_name)
+            self._dynamic_obstacle_packets.append(
+                DynamicObstaclePacket(
+                    name=obstacle_name,
+                    center=[center[0], center[1]],
+                    radius=float(self._person_obstacle_radius_m),
+                )
+            )
+            recognized_people += 1
+
+        self.blackboard.set("obstacle_blocking_path", recognized_people > 0)
+
     def _update_localization_from_imu(self, dt: float) -> None:
         imu_msgs = self.serial.read_parsed(max_lines=128)
         if not imu_msgs:
@@ -441,6 +550,7 @@ class MissionRuntime:
             localization_ok=True,
             distance_to_goal=float(distance_to_goal),
             heading_error=float(heading_error),
+            dynamic_obstacles=list(self._dynamic_obstacle_packets),
         )
         payload = json.dumps(asdict(packet)).encode("utf-8")
         self.telemetry_sock.sendto(payload, (self.telemetry_host, self.telemetry_port))
@@ -507,6 +617,7 @@ class MissionRuntime:
 
                 self._update_localization_from_imu(dt)
                 self._maybe_update_apriltag()
+                self._update_dynamic_person_obstacles()
                 self._update_elevator_from_serial(current_task)
 
                 state = self._current_state_for_controller()
@@ -524,6 +635,8 @@ class MissionRuntime:
                 )
                 self.tree.tick()
                 new_task = self.blackboard.get("current_task")
+
+                self._update_live_map_plot(state)
 
                 print(
                     f"tick={tick:04d} task={new_task} pos=({state.x:.3f}, {state.y:.3f}) "
@@ -543,6 +656,8 @@ class MissionRuntime:
                 self.elevator_serial.close()
             if self.camera is not None:
                 self.camera.release()
+            if self.person_detector is not None:
+                self.person_detector.close()
             if self.telemetry_sock is not None:
                 self.telemetry_sock.close()
 

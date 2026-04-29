@@ -2,6 +2,16 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <math.h>
+#include <ESP32Servo.h>
+#include "PID.h"
+#include <esp_now.h>
+#include <WiFi.h>
+#include "robot_pinout.h"
+#include "MotorDriver.h"
+#include "PID.h"
+#include "util.h"
+#include "arm_control.h"
+
 
 #define TCAADDR 0x70
 
@@ -10,6 +20,16 @@ struct DesiredElevatorState {
 
   DesiredElevatorState() : height_m(0.0f) {}
   explicit DesiredElevatorState(float height_m_) : height_m(height_m_) {}
+};
+
+// Desired arms position measured from the base joint
+// TODO: will need to adjust for the position of the camera, will come from the Jetson
+struct DesiredArmPosition {
+  float xE;
+  float yE;
+
+  DesiredArmPosition() : xE(0.0f), yE(0.0f) {}
+  DesiredArmPosition(float xE_, float yE_) : xE(xE_), yE(yE_) {}
 };
 
 Adafruit_VL53L0X lox = Adafruit_VL53L0X();
@@ -23,8 +43,26 @@ constexpr unsigned long CMD_TIMEOUT_MS = 250;
 constexpr bool SERIAL_DEBUG_TIMING = true;
 constexpr float MM_TO_M = 1.0f / 1000.0f;
 
+// Servo Arm setup and constants
+constexpr int ARM_SHOULDER_SERVO_PIN = 6;
+constexpr int ARM_ELBOW_SERVO_PIN = 7;
+constexpr int SERVO_MIN_US = 500;
+constexpr int SERVO_MAX_US = 2500;
+constexpr float RAD_TO_DEG_FACTOR = 180.0f / PI;
+constexpr float ARM_BASE_X_M = 0.0f;
+constexpr float ARM_BASE_Y_M = 0.0f;
+constexpr float ARM_LINK_1_M = 0.31f;
+constexpr float ARM_LINK_2_M = 0.43f;
+constexpr float SHOULDER_ZERO_DEG = -90.0f;
+constexpr float ELBOW_ZERO_DEG = 0.0f;
+constexpr float SHOULDER_MIN_DEG = -90.0f;
+constexpr float SHOULDER_MAX_DEG = 90.0f;
+constexpr float ELBOW_MIN_DEG = 0.0f;
+constexpr float ELBOW_MAX_DEG = 180.0f;
+
 DesiredElevatorState latest_rx_cmd;
 DesiredElevatorState latest_applied_cmd;
+DesiredArmPosition latest_arm_cmd;
 bool has_pending_cmd = false;
 bool ack_dirty = false;
 unsigned long last_cmd_rx_ms = 0;
@@ -33,6 +71,21 @@ unsigned long last_meas_publish_ms = 0;
 unsigned long last_ack_publish_ms = 0;
 unsigned long last_ack_debug_ms = 0;
 unsigned long last_meas_debug_ms = 0;
+
+MotorDriver elevator_driver {A_DIR1, A_PWM1, 0};
+Servo shoulder_servo;
+Servo elbow_servo;
+
+#define Kp 3.0f
+#define Ki 0.0f
+#define Kd 0.0f
+
+double integral_min = -1e6;
+double integral_max = 1e6;
+
+PID pid = {Kp, Ki, Kd, 0.0, 0.1f, false};
+
+
 
 void tcaSelect(uint8_t channel) {
   if (channel > 7) {
@@ -60,13 +113,35 @@ static void printDebugTiming(const char* tag, unsigned long& last_ms) {
   last_ms = now;
 }
 
+static float clampFloat(float value, float min_value, float max_value) {
+  if (value < min_value) {
+    return min_value;
+  }
+  if (value > max_value) {
+    return max_value;
+  }
+  return value;
+}
+
 static bool handleElevatorCommand(const String& line, DesiredElevatorState& cmd) {
   if (!line.startsWith("ELV_CMD,")) {
-    Serial.println("WRONG_START");
     return false;
   }
 
   if (sscanf(line.c_str(), "ELV_CMD,%f", &cmd.height_m) != 1) {
+    Serial.println("WRONG_NUM_VALUES");
+    return false;
+  }
+
+  return true;
+}
+
+static bool handleArmCommand(const String& line, DesiredArmPosition& cmd) {
+  if (!line.startsWith("ARM_CMD,")) {
+    return false;
+  }
+
+  if (sscanf(line.c_str(), "ARM_CMD,%f,%f", &cmd.xE, &cmd.yE) != 2) {
     Serial.println("WRONG_NUM_VALUES");
     return false;
   }
@@ -90,17 +165,55 @@ static void applyElevatorCommand(const DesiredElevatorState& cmd,
                                  float measured_height_m) {
   latest_applied_cmd = cmd;
 
-  // TODO: replace this placeholder with actual elevator motor control.
-  // Example closed-loop quantity to drive the motor with:
-  //   const float error_m = cmd.height_m - measured_height_m;
-  //   motor.drive(pid.calculate(measured_height_m, cmd.height_m));
-  (void)measured_height_m;
+  double control_effort = pid.calculateParallel(measured_height_m, cmd.height_m);
+  elevator_driver.drive(control_effort);
+  Serial.print("ELV_CTRL_EFF,");
+  Serial.println(control_effort, 4);
 }
 
 static void printElevatorAck(const DesiredElevatorState& cmd) {
   printDebugTiming("ELV_ACK", last_ack_debug_ms);
   Serial.print("ELV_ACK,");
   Serial.println(cmd.height_m, 4);
+}
+
+static bool moveArmToJointAngles(float theta1_rad, float theta2_rad) {
+  float shoulder_deg = SHOULDER_ZERO_DEG + theta1_rad * RAD_TO_DEG_FACTOR;
+  float elbow_deg = ELBOW_ZERO_DEG + theta2_rad * RAD_TO_DEG_FACTOR;
+
+  shoulder_deg = clampFloat(shoulder_deg, SHOULDER_MIN_DEG, SHOULDER_MAX_DEG);
+  elbow_deg = clampFloat(elbow_deg, ELBOW_MIN_DEG, ELBOW_MAX_DEG);
+
+  shoulder_servo.write(shoulder_deg);
+  elbow_servo.write(elbow_deg);
+  return true;
+}
+
+static bool moveArmToXY(const DesiredArmPosition& cmd) {
+  const auto joint_angles = inverseKinematics(
+      cmd.xE,
+      cmd.yE,
+      ARM_BASE_X_M,
+      ARM_BASE_Y_M,
+      ARM_LINK_1_M,
+      ARM_LINK_2_M);
+
+  // if (isnan(joint_angles.first) || isnan(joint_angles.second)) {
+  //   Serial.println("ARM_UNREACHABLE");
+  //   return false;
+  // }
+
+  // Hard-coding for debugging, change to joint_angles.first, joint_angles.second
+  moveArmToJointAngles(cmd.xE, cmd.yE);
+  Serial.print("ARM_ACK,");
+  Serial.print(cmd.xE, 4);
+  Serial.print(",");
+  Serial.print(cmd.yE, 4);
+  Serial.print(",");
+  Serial.print(joint_angles.first * RAD_TO_DEG_FACTOR, 2);
+  Serial.print(",");
+  Serial.println(joint_angles.second * RAD_TO_DEG_FACTOR, 2);
+  return true;
 }
 
 static void publishElevatorMeasurement(float height_m) {
@@ -115,7 +228,7 @@ static void stopElevator() {
   has_pending_cmd = false;
   ack_dirty = false;
 
-  // TODO: stop the real elevator motor driver here.
+  elevator_driver.drive(0.0);
 }
 
 void setup() {
@@ -125,10 +238,23 @@ void setup() {
   tcaSelect(TOF_MUX_CHANNEL);
   if (!lox.begin()) {
     Serial.println("ERR,VL53L0X_INIT_FAILED");
-    while (1) {
-      delay(100);
-    }
+    // TODO: fix I2C connection, this is just for debugging
+    // while (1) {
+    //   delay(100);
+    // }
   }
+
+  elevator_driver.setup();
+  pid.setParallelTunings(Kp, Ki, Kd, 0.1f, integral_min, integral_max);
+  Serial.println("SETUP_PID");
+
+  shoulder_servo.setPeriodHertz(50);
+  Serial.println("SETUP_SHLDR");
+  elbow_servo.setPeriodHertz(50);
+  // Serial.println("SETUP_ELBOW");
+  shoulder_servo.attach(ARM_SHOULDER_SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
+  elbow_servo.attach(ARM_ELBOW_SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
+  moveArmToJointAngles(0.0f, 0.0f);
 
   const unsigned long now = millis();
   last_cmd_rx_ms = now;
@@ -140,15 +266,24 @@ void setup() {
 }
 
 void loop() {
+  
   while (Serial.available()) {
     char c = static_cast<char>(Serial.read());
     if (c == '\n') {
       rx_line.trim();
       DesiredElevatorState cmd;
-      if (rx_line.length() > 0 && handleElevatorCommand(rx_line, cmd)) {
-        latest_rx_cmd = cmd;
-        has_pending_cmd = true;
-        last_cmd_rx_ms = millis();
+      DesiredArmPosition arm_cmd;
+      if (rx_line.length() > 0) {
+        if (handleElevatorCommand(rx_line, cmd)) {
+          latest_rx_cmd = cmd;
+          has_pending_cmd = true;
+          last_cmd_rx_ms = millis();
+        } else if (handleArmCommand(rx_line, arm_cmd)) {
+          latest_arm_cmd = arm_cmd;
+          moveArmToXY(latest_arm_cmd);
+        } else {
+          Serial.println("WRONG_START");
+        }
       }
       rx_line = "";
     } else {
@@ -164,7 +299,8 @@ void loop() {
   }
 
   if (has_pending_cmd && now - last_cmd_apply_ms >= CMD_APPLY_PERIOD_MS) {
-    applyElevatorCommand(latest_rx_cmd, measured_height_m);
+    // TODO: don't actually apply elevator command for now
+    // applyElevatorCommand(latest_rx_cmd, measured_height_m);
     ack_dirty = true;
     has_pending_cmd = false;
     last_cmd_apply_ms = now;

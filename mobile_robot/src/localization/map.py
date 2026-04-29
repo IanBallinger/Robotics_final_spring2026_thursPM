@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 from typing import Tuple, List, Optional
 import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
 from matplotlib.path import Path as MplPath
 from matplotlib.ticker import MultipleLocator
 
@@ -163,9 +164,49 @@ class Map:
         y = self._ymin + (j + 0.5) * self.resolution
         return (x, y)
 
+    def _recompute_obstacle_mask(self) -> None:
+        self.obstacle_mask = np.zeros((self.nx, self.ny), dtype=bool)
+        for obstacle in self.obstacles:
+            self.obstacle_mask |= obstacle.covers_cell_centers(self)
+
     def add_obstacle(self, obstacle: Obstacle) -> None:
         self.obstacles.append(obstacle)
         self.obstacle_mask |= obstacle.covers_cell_centers(self)
+
+    def remove_obstacle(self, name: str) -> bool:
+        before = len(self.obstacles)
+        self.obstacles = [ob for ob in self.obstacles if ob.name != name]
+        removed = len(self.obstacles) != before
+        if removed:
+            self._recompute_obstacle_mask()
+        return removed
+
+    def clear_obstacles_by_prefix(self, prefix: str) -> int:
+        before = len(self.obstacles)
+        self.obstacles = [ob for ob in self.obstacles if not ob.name.startswith(prefix)]
+        removed = before - len(self.obstacles)
+        if removed > 0:
+            self._recompute_obstacle_mask()
+        return removed
+
+    def add_circular_obstacle(
+        self,
+        center: GridPoint,
+        radius: float,
+        name: str,
+        num_vertices: int = 16,
+    ) -> Obstacle:
+        if radius <= 0.0:
+            raise ValueError("radius must be positive")
+        angles = np.linspace(0.0, 2.0 * np.pi, num_vertices, endpoint=False)
+        cx, cy = float(center[0]), float(center[1])
+        points = [
+            (cx + radius * np.cos(theta), cy + radius * np.sin(theta))
+            for theta in angles
+        ]
+        obstacle = Obstacle(points, name)
+        self.add_obstacle(obstacle)
+        return obstacle
 
     def add_landmark(self, landmark: Landmark):
         self.landmarks.append(landmark)
@@ -179,8 +220,8 @@ class Map:
                 self.grid[cell_i[0], cell_i[1]] = 1
                 self.grid[cell_j[0], cell_j[1]] = 1
 
-    def plot(self):
-        _, ax = plt.subplots()
+    def draw(self, ax: Axes, current_position: Optional[GridPoint] = None) -> None:
+        ax.clear()
         xmax = self._xmin + self.nx * self.resolution
         ymax = self._ymin + self.ny * self.resolution
         display = np.ma.masked_where(~self.cell_inside, self.grid)
@@ -190,7 +231,7 @@ class Map:
             extent=(self._xmin, xmax, self._ymin, ymax),
             aspect="equal",
             interpolation="nearest",
-            cmap="Paired"
+            cmap="Paired",
         )
         ax.plot(
             self._vertices[:, 0],
@@ -199,7 +240,6 @@ class Map:
             linewidth=1.2,
         )
 
-        # plot obstacles
         if np.any(self.obstacle_mask):
             obs_display = np.ma.masked_where(
                 ~self.obstacle_mask, np.ones((self.nx, self.ny))
@@ -223,7 +263,6 @@ class Map:
                 linewidth=1.0,
             )
 
-        # plot landmarks
         for landmark in self.landmarks:
             ax.plot(
                 landmark.point[0],
@@ -250,6 +289,9 @@ class Map:
                 color="blue",
             )
 
+        if current_position is not None:
+            ax.plot(current_position[0], current_position[1], marker="o", color="lime", markersize=7)
+
         ax.xaxis.set_minor_locator(MultipleLocator(self.resolution))
         ax.yaxis.set_minor_locator(MultipleLocator(self.resolution))
         ax.xaxis.set_major_locator(MultipleLocator(self.resolution))
@@ -259,6 +301,10 @@ class Map:
         ax.set_axisbelow(True)
         ax.set_xlabel("x (m)")
         ax.set_ylabel("y (m)")
+
+    def plot(self):
+        _, ax = plt.subplots()
+        self.draw(ax, current_position=self.current_position)
         plt.show()
 
 

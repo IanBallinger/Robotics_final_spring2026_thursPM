@@ -25,6 +25,11 @@ def serialize_wheel_cmd(w1: float, w2: float, w3: float, w4: float) -> str:
     return f"WHL_CMD,{w1},{w2},{w3},{w4}\n"
 
 
+def serialize_arm_cmd(x_m: float, y_m: float) -> str:
+    """Serialize a planar arm end-effector command in meters."""
+    return f"ARM_CMD,{x_m},{y_m}\n"
+
+
 # --- MCU → host -------------------------------------------------------------
 
 
@@ -62,6 +67,7 @@ def parse_mcu_line(line: str) -> Optional[IMUReading]:
 
 __all__ = [
     "IMUReading",
+    "serialize_arm_cmd",
     "serialize_wheel_cmd",
     "deserialize_imu",
     "parse_mcu_line",
