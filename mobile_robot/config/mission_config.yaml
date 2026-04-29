@@ -19,37 +19,97 @@ map:
       y: 3.545
   landmarks:
     - name: left_tag_table
-      id: 1
+      id: 5
       position:
         x: 0.315
         y: 0.59
       heading: 0.0
     - name: right_tag_table
-      id: 2
+      id: 6
       position:
         x: 0.315
         y: 1.175
       heading: 0.0
     - name: ramp_tag_1
-      id: 3
+      id: 4
       position:
         x: 1.2725
         y: 1.99
       heading: -1.57
     - name: ramp_tag_2
-      id: 4
+      id: 3
       position:
         x: 2.0575
         y: 2.8525
       heading: 0
     - name: dishwasher_tag
-      id: 5
+      id: 8
       position:
         x: 3.9725
         y: 0.3625
-      heading: 1.57
+      heading: 1.57 
+    - name: table_back_right
+      id: 7
+      position:
+        x: 4.655
+        y: 1.53
+      heading: 0
+    - name: table_tray
+      id: 1
+      position:
+        x: 3.57
+        y: 2.565
+      heading: 0
+    - name: table_back_left
+      id: 2
+      position:
+        x: 3.855
+        y: 2.865
+      heading: 0
+    - name: back_wall
+      id: 0
+      position:
+        x: 2.595
+        y: 3.545
+      heading: 0
+    - name: front_wall
+      id: 9
+      position:
+        x: 0.97
+        y: 0.06
+      heading: 0
   obstacles:
     - name: table
+      boundary:
+        - x: 0.0
+          y: 0.28
+        - x: 0.58
+          y: 0.28
+        - x: 0.58
+          y: 1.45
+        - x: 0.0
+          y: 1.45
+    - name: prep
+      boundary:
+        - x: 0.0
+          y: 0.28
+        - x: 0.58
+          y: 0.28
+        - x: 0.58
+          y: 1.45
+        - x: 0.0
+          y: 1.45
+    - name: dishwasher
+      boundary:
+        - x: 0.0
+          y: 0.28
+        - x: 0.58
+          y: 0.28
+        - x: 0.58
+          y: 1.45
+        - x: 0.0
+          y: 1.45
+    - name: ramp
       boundary:
         - x: 0.0
           y: 0.28
