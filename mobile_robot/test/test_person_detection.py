@@ -67,7 +67,7 @@ def main() -> None:
                 )
 
             combined = detector.render_debug(frame, detections)
-            cv2.imshow("Person detection test", combined)
+            # cv2.imshow("Person detection test", combined)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
 
