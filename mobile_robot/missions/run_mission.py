@@ -202,25 +202,11 @@ class MissionRuntime:
         self._person_obstacle_prefix = "person_"
         self._person_obstacle_radius_m = 0.35
         self._dynamic_obstacle_packets: list[DynamicObstaclePacket] = []
-        if not disable_camera and AprilTagPoseEst is not None:
-            try:
-                self.apriltag_estimator = AprilTagPoseEst()
-                self.apriltag_estimator.open()
-            except Exception as exc:  # pragma: no cover
-                print(f"WARN: failed to initialize AprilTag stack: {exc}")
-                self.apriltag_estimator = None
-        elif not disable_camera:
-            print("WARN: AprilTag dependencies unavailable; continuing without camera localization")
-
-        if not disable_camera and PersonDetector is not None:
-            try:
-                self.person_detector = PersonDetector(mission_config_path=self.tasks_path)
-                self.person_detector.open()
-            except Exception as exc:  # pragma: no cover
-                print(f"WARN: failed to initialize person detector: {exc}")
-                self.person_detector = None
-        elif not disable_camera:
-            print("WARN: person-detection dependencies unavailable; continuing without dynamic people obstacles")
+        if not disable_camera:
+            self.apriltag_estimator = AprilTagPoseEst()
+            self.apriltag_estimator.open()
+            self.person_detector = PersonDetector(mission_config_path=self.tasks_path)
+            self.person_detector.open()
 
         self.map_figure = None
         self.map_axes = None
