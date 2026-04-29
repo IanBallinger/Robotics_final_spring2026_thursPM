@@ -51,5 +51,6 @@ with RealSenseCamera() as camera:
 ## Notes
 
 - `pyrealsense2` must be installed on the machine to use `RealSenseCamera`.
+- Default stream settings are conservative (`640x480 @ 15 FPS`) for better Jetson / RealSense compatibility.
 - Camera-to-world transforms require calibrated extrinsics supplied by the caller.
 - For ground-plane reasoning, `pixels_to_world_on_plane(...)` assumes a plane model in the world frame.

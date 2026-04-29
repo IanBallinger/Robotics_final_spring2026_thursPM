@@ -45,8 +45,8 @@ class PersonDetectionConfig:
     max_depth_m: float = 6.0
     min_valid_depth_pixels: int = 20
     tracker: Optional[str] = "bytetrack.yaml"
-    color_config: StreamConfig = StreamConfig(width=640, height=480, fps=30)
-    depth_config: StreamConfig = StreamConfig(width=640, height=480, fps=30)
+    color_config: StreamConfig = StreamConfig(width=640, height=480, fps=15)
+    depth_config: StreamConfig = StreamConfig(width=640, height=480, fps=15)
     align_depth_to_color: bool = True
 
 
