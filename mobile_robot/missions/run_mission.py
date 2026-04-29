@@ -49,15 +49,8 @@ from localization import (  # noqa: E402
     UnscentedKalmanFilter2D,
 )
 
-try:  # noqa: E402
-    from localization.april_tag_pose_est import AprilTagPoseEst
-except Exception:  # pragma: no cover
-    AprilTagPoseEst = None  # type: ignore[assignment]
-
-try:  # noqa: E402
-    from localization.person_detection import PersonDetector
-except Exception:  # pragma: no cover
-    PersonDetector = None  # type: ignore[assignment]
+from localization.april_tag_pose_est import AprilTagPoseEst
+from localization.person_detection import PersonDetector
 
 from localization.map import Map  # noqa: E402
 from planning.a_star import AStar, waypoints_from_polyline  # noqa: E402
