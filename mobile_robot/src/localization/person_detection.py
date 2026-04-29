@@ -286,8 +286,24 @@ def load_camera_to_robot_extrinsics(
 
 
 def camera_to_robot_point(point_camera: np.ndarray, extrinsics: CameraExtrinsics) -> np.ndarray:
-    """Transform a 3D point from the camera frame into the robot/body frame."""
-    return apply_extrinsics(point_camera, extrinsics)
+    """Transform a 3D point from the camera optical frame into the robot/body frame.
+
+    Optical-frame convention from the RGB-D / AprilTag stack is assumed to be:
+    - +x right
+    - +y down
+    - +z forward
+
+    Robot/body-frame convention used in this repo is assumed to be:
+    - +x forward
+    - +y left
+    - +z up
+
+    The configured extrinsics are interpreted as the pose of this nominal
+    forward/left/up camera frame in the robot frame.
+    """
+    p_c = np.asarray(point_camera, dtype=float).reshape(3)
+    point_camera_nominal = np.array([p_c[2], -p_c[0], -p_c[1]], dtype=float)
+    return apply_extrinsics(point_camera_nominal, extrinsics)
 
 
 

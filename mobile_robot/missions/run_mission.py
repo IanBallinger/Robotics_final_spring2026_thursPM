@@ -353,6 +353,24 @@ class MissionRuntime:
         if measurement is not None:
             self.localization_filter.update_apriltag(measurement)
 
+    def _camera_optical_point_to_robot_xy(self, point_camera: np.ndarray) -> np.ndarray:
+        p_c = np.asarray(point_camera, dtype=float).reshape(3)
+        point_camera_nominal = np.array([p_c[2], -p_c[0], -p_c[1]], dtype=float)
+
+        cr = np.cos(self.camera_to_robot.roll)
+        sr = np.sin(self.camera_to_robot.roll)
+        cp = np.cos(self.camera_to_robot.pitch)
+        sp = np.sin(self.camera_to_robot.pitch)
+        cy = np.cos(self.camera_to_robot.yaw)
+        sy = np.sin(self.camera_to_robot.yaw)
+        rx = np.array([[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]], dtype=float)
+        ry = np.array([[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]], dtype=float)
+        rz = np.array([[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]], dtype=float)
+        rot = rz @ ry @ rx
+        trans = np.array([self.camera_to_robot.x, self.camera_to_robot.y, self.camera_to_robot.z], dtype=float)
+        point_robot = trans + rot @ point_camera_nominal
+        return point_robot[:2]
+
     def _coerce_global_apriltag_measurement(
         self, pose: Any
     ) -> Optional[AprilTagMeasurement]:
@@ -392,25 +410,13 @@ class MissionRuntime:
                 if t.size < 3:
                     continue
 
-                tx = float(t[0])
-                tz = float(t[2])
+                tag_offset_robot = self._camera_optical_point_to_robot_xy(t)
 
-                # camera +z = robot forward, camera +x = robot right
-                camera_offset_robot = np.array([tz, -tx], dtype=float)
-
-                # placeholder camera->robot transform from tasks.yaml
-                c_cr = np.cos(self.camera_to_robot.yaw)
-                s_cr = np.sin(self.camera_to_robot.yaw)
-                rot_cr = np.array([[c_cr, -s_cr], [s_cr, c_cr]], dtype=float)
-                tag_offset_robot = np.array(
-                    [self.camera_to_robot.x, self.camera_to_robot.y], dtype=float
-                ) + rot_cr @ camera_offset_robot
-
-                c = np.cos(landmark.heading)
-                s = np.sin(landmark.heading)
-                rot_tag_world = np.array([[c, -s], [s, c]], dtype=float)
-                robot_world = np.asarray(landmark.point, dtype=float) + rot_tag_world @ tag_offset_robot
                 robot_yaw = wrap_to_pi(landmark.heading + np.pi - self.camera_to_robot.yaw)
+                c = np.cos(robot_yaw)
+                s = np.sin(robot_yaw)
+                rot_robot_world = np.array([[c, -s], [s, c]], dtype=float)
+                robot_world = np.asarray(landmark.point, dtype=float) - rot_robot_world @ tag_offset_robot
                 measurements.append((robot_world[0], robot_world[1], robot_yaw))
 
             if measurements:
