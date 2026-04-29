@@ -133,7 +133,7 @@ localization:
     vx_body: 0.0
     vy_body: 0.0
     wz: 0.0
-    b_ax: 0.0
+    b_ax: 0.4
     b_ay: 0.0
     b_wz: 0.0
   initial_covariance:
