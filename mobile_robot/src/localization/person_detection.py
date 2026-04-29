@@ -13,7 +13,7 @@ from camera import (
     CameraExtrinsics,
     RealSenseCamera,
     StreamConfig,
-    camera_to_world,
+    apply_extrinsics,
     depth_pixel_to_camera_point,
     depth_to_meters,
 )
@@ -51,7 +51,16 @@ class PersonDetectionConfig:
 
 
 class PersonDetector:
-    """YOLO-based person detection with RealSense depth and camera-frame transforms."""
+    """YOLO-based person detection with RealSense depth.
+
+    This module is responsible for:
+    - camera-frame person detections
+    - camera-to-robot coordinate transforms
+
+    Optional robot-to-world conversion can be provided by the caller through a
+    robot pose estimate, but the camera extrinsics owned here are interpreted as
+    camera-to-robot, not camera-to-world.
+    """
 
     def __init__(
         self,
@@ -145,7 +154,7 @@ class PersonDetector:
                 point_camera = depth_pixel_to_camera_point(
                     cx, cy, depth_value, frame.intrinsics
                 )
-                point_robot = camera_to_world(point_camera, self.camera_extrinsics)
+                point_robot = camera_to_robot_point(point_camera, self.camera_extrinsics)
                 if robot_pose is not None:
                     point_world = robot_point_to_world(point_robot, robot_pose)
 
@@ -273,6 +282,14 @@ def load_camera_to_robot_extrinsics(
         rotation_camera_to_world=rotation,
         translation_camera_to_world=translation,
     )
+
+
+
+def camera_to_robot_point(point_camera: np.ndarray, extrinsics: CameraExtrinsics) -> np.ndarray:
+    """Transform a 3D point from the camera frame into the robot/body frame."""
+    return apply_extrinsics(point_camera, extrinsics)
+
+
 
 
 
