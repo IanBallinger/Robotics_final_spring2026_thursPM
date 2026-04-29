@@ -142,7 +142,6 @@ class MissionRuntime:
         serial_port: Optional[str],
         elevator_serial_port: Optional[str],
         disable_camera: bool,
-        camera_index: int,
         debug: bool,
         telemetry_host: Optional[str],
         telemetry_port: int,
@@ -205,7 +204,6 @@ class MissionRuntime:
         self.localization_filter = self._create_localization_filter()
 
         self.apriltag_estimator = None
-        self.camera = None
         self.person_detector = None
         self._warned_raw_apriltag = False
         self._person_obstacle_prefix = "person_"
@@ -213,19 +211,11 @@ class MissionRuntime:
         self._dynamic_obstacle_packets: list[DynamicObstaclePacket] = []
         if not disable_camera and AprilTagPoseEst is not None:
             try:
-                import cv2
-
                 self.apriltag_estimator = AprilTagPoseEst()
-                self.camera = cv2.VideoCapture(camera_index)
-                if not self.camera.isOpened():
-                    print("WARN: could not open camera; continuing without AprilTag updates")
-                    self.camera.release()
-                    self.camera = None
-                    self.apriltag_estimator = None
+                self.apriltag_estimator.open()
             except Exception as exc:  # pragma: no cover
                 print(f"WARN: failed to initialize AprilTag stack: {exc}")
                 self.apriltag_estimator = None
-                self.camera = None
         elif not disable_camera:
             print("WARN: AprilTag dependencies unavailable; continuing without camera localization")
 
@@ -364,13 +354,13 @@ class MissionRuntime:
         )
 
     def _maybe_update_apriltag(self) -> None:
-        if self.apriltag_estimator is None or self.camera is None:
+        if self.apriltag_estimator is None:
             return
-        ret, frame = self.camera.read()
-        if not ret:
+        try:
+            pose = self.apriltag_estimator.get_pose_estimate()
+        except Exception as exc:  # pragma: no cover
+            print(f"WARN: AprilTag update failed: {exc}")
             return
-
-        pose = self.apriltag_estimator.get_pose_estimate(frame)
         measurement = self._coerce_global_apriltag_measurement(pose)
         if measurement is not None:
             self.localization_filter.update_apriltag(measurement)
@@ -654,8 +644,8 @@ class MissionRuntime:
             self.serial.close()
             if self.elevator_serial is not None:
                 self.elevator_serial.close()
-            if self.camera is not None:
-                self.camera.release()
+            if self.apriltag_estimator is not None:
+                self.apriltag_estimator.close()
             if self.person_detector is not None:
                 self.person_detector.close()
             if self.telemetry_sock is not None:
@@ -667,7 +657,6 @@ def main() -> None:
     parser.add_argument("--tasks", default=str(default_tasks_path()), help="Path to tasks.yaml")
     parser.add_argument("--port", default=None, help="Serial port for wheel controller ESP32")
     parser.add_argument("--elevator-port", default=None, help="Serial port for elevator controller ESP32")
-    parser.add_argument("--camera-index", type=int, default=0)
     parser.add_argument("--disable-camera", action="store_true")
     parser.add_argument("--max-ticks", type=int, default=None)
     parser.add_argument("--debug-serial", action="store_true")
@@ -681,7 +670,6 @@ def main() -> None:
         serial_port=args.port,
         elevator_serial_port=args.elevator_port,
         disable_camera=args.disable_camera,
-        camera_index=args.camera_index,
         debug=args.debug_serial,
         telemetry_host=args.telemetry_host,
         telemetry_port=args.telemetry_port,
