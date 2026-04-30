@@ -466,13 +466,16 @@ class MissionRuntime:
         Tag convention used here:
         - +x tag-right in the printed tag plane
         - +y tag-down in the printed tag plane
-        - +z tag-normal, pointing out from the tag face
+        - +z tag-normal
 
-        The mission-config landmark heading is interpreted as the world-frame yaw
-        of the tag normal projected into the world xy plane.
+        Empirically, the AprilTag pose returned by the detector is consistent
+        with the tag-frame +z axis pointing opposite the stored landmark heading
+        direction used in this repo. Therefore the world tag normal below uses
+        ``-heading`` (equivalently heading + pi), which fixes the observed
+        global x/y sign flip.
         """
         z_tag_world = np.array(
-            [np.cos(landmark_heading), np.sin(landmark_heading), 0.0],
+            [-np.cos(landmark_heading), -np.sin(landmark_heading), 0.0],
             dtype=float,
         )
         y_tag_world = np.array([0.0, 0.0, -1.0], dtype=float)
