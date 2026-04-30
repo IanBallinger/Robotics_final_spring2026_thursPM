@@ -31,7 +31,15 @@ SRC_DIR = os.path.join(REPO_ROOT, "mobile_robot", "src")
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from autonomy.mission_runner import Pose2D, Task, default_tasks_path, load_map, load_tasks  # noqa: E402
+from autonomy.mission_runner import (
+    Pose2D,
+    Task,
+    default_tasks_path,
+    default_camera_path,
+    default_localization_path,
+    load_map,
+    load_tasks,
+)  # noqa: E402
 from autonomy.trees.waypoint_mission import (  # noqa: E402
     MISSION_DONE,
     create_tree,
@@ -134,7 +142,9 @@ class TelemetryPacket:
 class MissionRuntime:
     def __init__(
         self,
-        tasks_path: Path,
+        tasks_cfg_path: Path,
+        localization_cfg_path: Path,
+        camera_cfg_path: Path,
         serial_port: Optional[str],
         elevator_serial_port: Optional[str],
         disable_camera: bool,
@@ -143,16 +153,28 @@ class MissionRuntime:
         telemetry_port: int,
         telemetry_rate_hz: float,
     ):
-        self.tasks_path = Path(tasks_path)
+        self.tasks_path = Path(tasks_cfg_path)
+        self.localization_cfg_path = Path(localization_cfg_path)
+        self.camera_cfg_path = Path(camera_cfg_path)
         self.tasks = load_tasks(self.tasks_path)
         self.task_lookup = {task.name: task for task in self.tasks}
         self.map_ = load_map(self.tasks_path)
-        self.localization_config, self.runtime_config, self.camera_to_robot = self._load_config(
-            self.tasks_path
+        self.localization_config, self.runtime_config, self.camera_to_robot = (
+            self._load_config(
+                self.tasks_path, self.localization_cfg_path, self.camera_cfg_path
+            )
         )
+        import pdb
+
+        pdb.set_trace()
+
         self.planned_tasks = self._plan_tasks(self.map_, self.tasks)
-        self.planned_lookup = {planned.task.name: planned for planned in self.planned_tasks}
-        self.landmark_lookup = {str(landmark.id): landmark for landmark in self.map_.landmarks}
+        self.planned_lookup = {
+            planned.task.name: planned for planned in self.planned_tasks
+        }
+        self.landmark_lookup = {
+            str(landmark.id): landmark for landmark in self.map_.landmarks
+        }
 
         self.blackboard = initialise_blackboard(
             self.tasks[0].name,
@@ -164,8 +186,12 @@ class MissionRuntime:
                 "obstacle_blocking_path": False,
                 "zone_clear": True,
                 "current_elevator_height_m": 0.0,
-                "desired_elevator_height_m": float(self.tasks[0].desired_elevator_height_m),
-                "elevator_height_error_m": float(self.tasks[0].desired_elevator_height_m),
+                "desired_elevator_height_m": float(
+                    self.tasks[0].desired_elevator_height_m
+                ),
+                "elevator_height_error_m": float(
+                    self.tasks[0].desired_elevator_height_m
+                ),
                 "elevator_at_height": True,
                 "distance_to_goal": 1.0,
                 "heading_error": 1.0,
@@ -209,7 +235,9 @@ class MissionRuntime:
         if not disable_camera:
             self.shared_camera = RealSenseCamera()
             self.shared_camera.open()
-            self.apriltag_estimator = AprilTagPoseEst(realsense_camera=self.shared_camera)
+            self.apriltag_estimator = AprilTagPoseEst(
+                realsense_camera=self.shared_camera
+            )
             self.person_detector = PersonDetector(
                 camera=self.shared_camera,
                 mission_config_path=self.tasks_path,
@@ -222,7 +250,9 @@ class MissionRuntime:
         self.last_loop_time = time.monotonic()
         self.telemetry_host = telemetry_host
         self.telemetry_port = telemetry_port
-        self.telemetry_period = 0.0 if telemetry_rate_hz <= 0.0 else 1.0 / telemetry_rate_hz
+        self.telemetry_period = (
+            0.0 if telemetry_rate_hz <= 0.0 else 1.0 / telemetry_rate_hz
+        )
         self.last_telemetry_time = 0.0
         self.telemetry_sock: Optional[socket.socket] = None
         if telemetry_host:
@@ -243,7 +273,9 @@ class MissionRuntime:
                 PlannedTask(
                     task=task,
                     polyline=polyline,
-                    waypoints=waypoints_from_polyline(polyline, end_heading=task.goal.heading),
+                    waypoints=waypoints_from_polyline(
+                        polyline, end_heading=task.goal.heading
+                    ),
                 )
             )
         return planned
@@ -251,11 +283,19 @@ class MissionRuntime:
     @staticmethod
     def _load_config(
         tasks_path: Path,
+        localization_path: Path,
+        camera_path: Path,
     ) -> tuple[LocalizationConfig, RuntimeConfig, CameraToRobotTransform]:
         with open(tasks_path, "r", encoding="utf-8") as f:
             raw = yaml.safe_load(f)
 
-        loc = raw.get("localization", {})
+        with open(localization_path, "r", encoding="utf-8") as f:
+            localization_raw = yaml.safe_load(f)
+
+        with open(camera_path, "r", encoding="utf-8") as f:
+            camera_raw = yaml.safe_load(f)
+
+        loc = localization_raw.get("localization", {})
         runtime = raw.get("mission_runtime", {})
         init = loc.get("initial_state", {})
 
@@ -277,8 +317,12 @@ class MissionRuntime:
             ),
             initial_covariance=np.asarray(loc.get("initial_covariance"), dtype=float),
             process_noise=np.asarray(loc.get("process_noise"), dtype=float),
-            apriltag_measurement_noise=np.asarray(loc.get("apriltag_measurement_noise"), dtype=float),
-            gyro_measurement_noise=np.asarray(loc.get("gyro_measurement_noise"), dtype=float),
+            apriltag_measurement_noise=np.asarray(
+                loc.get("apriltag_measurement_noise"), dtype=float
+            ),
+            gyro_measurement_noise=np.asarray(
+                loc.get("gyro_measurement_noise"), dtype=float
+            ),
         )
         runtime_cfg = RuntimeConfig(
             control_rate_hz=float(runtime.get("control_rate_hz", 20.0)),
@@ -286,7 +330,7 @@ class MissionRuntime:
             controller_v_max=float(runtime.get("controller_v_max", 0.35)),
             controller_omega_max=float(runtime.get("controller_omega_max", 1.8)),
         )
-        cam = raw.get("camera_to_robot", {})
+        cam = camera_raw.get("camera_to_robot", {})
         if "translation" in cam or "rotation_rpy" in cam:
             translation = cam.get("translation", {})
             rotation = cam.get("rotation_rpy", {})
@@ -403,7 +447,9 @@ class MissionRuntime:
         )
 
     @staticmethod
-    def _world_from_tag_transform(landmark_heading: float, landmark_xy: tuple[float, float]) -> np.ndarray:
+    def _world_from_tag_transform(
+        landmark_heading: float, landmark_xy: tuple[float, float]
+    ) -> np.ndarray:
         z_tag_world = np.array(
             [np.cos(landmark_heading), np.sin(landmark_heading), 0.0],
             dtype=float,
@@ -419,7 +465,9 @@ class MissionRuntime:
         )
 
     @staticmethod
-    def _planar_pose_from_transform(T_world_robot: np.ndarray) -> tuple[float, float, float]:
+    def _planar_pose_from_transform(
+        T_world_robot: np.ndarray,
+    ) -> tuple[float, float, float]:
         x = float(T_world_robot[0, 3])
         y = float(T_world_robot[1, 3])
         yaw = float(np.arctan2(T_world_robot[1, 0], T_world_robot[0, 0]))
@@ -457,13 +505,18 @@ class MissionRuntime:
                 landmark = self.landmark_lookup.get(str(tag_id))
                 if landmark is None:
                     continue
-                if not isinstance(raw_tag_pose, (tuple, list)) or len(raw_tag_pose) != 2:
+                if (
+                    not isinstance(raw_tag_pose, (tuple, list))
+                    or len(raw_tag_pose) != 2
+                ):
                     continue
                 R_ct, t_ct = raw_tag_pose
                 R_ct = np.asarray(R_ct, dtype=float).reshape(3, 3)
                 t_ct = np.asarray(t_ct, dtype=float).reshape(3)
 
-                T_camera_from_tag = self._transform_from_rotation_translation(R_ct, t_ct)
+                T_camera_from_tag = self._transform_from_rotation_translation(
+                    R_ct, t_ct
+                )
                 T_tag_from_camera = self._invert_transform(T_camera_from_tag)
                 T_robot_from_camera = self._robot_from_camera_optical_transform()
                 T_camera_from_robot = self._invert_transform(T_robot_from_camera)
@@ -471,12 +524,18 @@ class MissionRuntime:
                     landmark.heading,
                     tuple(landmark.point),
                 )
-                T_world_from_robot = T_world_from_tag @ T_tag_from_camera @ T_camera_from_robot
-                measurements.append(self._planar_pose_from_transform(T_world_from_robot))
+                T_world_from_robot = (
+                    T_world_from_tag @ T_tag_from_camera @ T_camera_from_robot
+                )
+                measurements.append(
+                    self._planar_pose_from_transform(T_world_from_robot)
+                )
 
             if measurements:
                 meas = np.asarray(measurements, dtype=float)
-                yaw = float(np.arctan2(np.mean(np.sin(meas[:, 2])), np.mean(np.cos(meas[:, 2]))))
+                yaw = float(
+                    np.arctan2(np.mean(np.sin(meas[:, 2])), np.mean(np.cos(meas[:, 2])))
+                )
                 return AprilTagMeasurement(
                     x=float(np.mean(meas[:, 0])),
                     y=float(np.mean(meas[:, 1])),
@@ -536,7 +595,9 @@ class MissionRuntime:
             if self.map_.world_to_cell(center) is None:
                 continue
             obstacle_name = f"{self._person_obstacle_prefix}{det.track_id if det.track_id is not None else recognized_people}"
-            self.map_.add_circular_obstacle(center, self._person_obstacle_radius_m, obstacle_name)
+            self.map_.add_circular_obstacle(
+                center, self._person_obstacle_radius_m, obstacle_name
+            )
             self._dynamic_obstacle_packets.append(
                 DynamicObstaclePacket(
                     name=obstacle_name,
@@ -623,7 +684,10 @@ class MissionRuntime:
     ) -> None:
         if self.telemetry_sock is None:
             return
-        if self.telemetry_period > 0.0 and (now - self.last_telemetry_time) < self.telemetry_period:
+        if (
+            self.telemetry_period > 0.0
+            and (now - self.last_telemetry_time) < self.telemetry_period
+        ):
             return
 
         est = self.localization_filter.get_state()
@@ -649,7 +713,9 @@ class MissionRuntime:
 
     def _update_elevator_from_serial(self, current_task_name: str) -> None:
         task = self.task_lookup[current_task_name]
-        self.blackboard.set("desired_elevator_height_m", float(task.desired_elevator_height_m))
+        self.blackboard.set(
+            "desired_elevator_height_m", float(task.desired_elevator_height_m)
+        )
 
         if self.elevator_serial is None:
             return
@@ -665,7 +731,9 @@ class MissionRuntime:
         goal_error = float(np.hypot(task.goal.x - est[0], task.goal.y - est[1]))
         heading_error = float(wrap_to_pi(task.goal.heading - est[2]))
         speed = float(np.hypot(est[3], est[4]))
-        current_elevator_height_m = float(self.blackboard.get("current_elevator_height_m") or 0.0)
+        current_elevator_height_m = float(
+            self.blackboard.get("current_elevator_height_m") or 0.0
+        )
         desired_elevator_height_m = float(task.desired_elevator_height_m)
         elevator_height_error_m = desired_elevator_height_m - current_elevator_height_m
 
@@ -685,7 +753,10 @@ class MissionRuntime:
         planned = self.planned_lookup[task_name]
         goal_wp = planned.waypoints[planned.waypoint_index]
         rho = float(np.hypot(goal_wp.xy[0] - state.x, goal_wp.xy[1] - state.y))
-        if rho < self.runtime_config.waypoint_capture_radius and planned.waypoint_index < len(planned.waypoints) - 1:
+        if (
+            rho < self.runtime_config.waypoint_capture_radius
+            and planned.waypoint_index < len(planned.waypoints) - 1
+        ):
             planned.waypoint_index += 1
             goal_wp = planned.waypoints[planned.waypoint_index]
         is_final_waypoint = planned.waypoint_index == len(planned.waypoints) - 1
@@ -713,9 +784,15 @@ class MissionRuntime:
                 self._update_elevator_from_serial(current_task)
 
                 state = self._current_state_for_controller()
-                goal_wp, final_pose_mode = self._active_goal_waypoint(current_task, state)
-                cmd = self.controller.compute(state, goal_wp, final_pose_mode=final_pose_mode)
-                path_blocked = self._path_intersects_dynamic_obstacle(current_task, state)
+                goal_wp, final_pose_mode = self._active_goal_waypoint(
+                    current_task, state
+                )
+                cmd = self.controller.compute(
+                    state, goal_wp, final_pose_mode=final_pose_mode
+                )
+                path_blocked = self._path_intersects_dynamic_obstacle(
+                    current_task, state
+                )
                 if path_blocked:
                     cmd = self._zero_drive_command()
                 self.blackboard.set("obstacle_blocking_path", path_blocked)
@@ -758,19 +835,39 @@ class MissionRuntime:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tasks", default=str(default_tasks_path()), help="Path to tasks.yaml")
-    parser.add_argument("--port", default=None, help="Serial port for wheel controller ESP32")
-    parser.add_argument("--elevator-port", default=None, help="Serial port for elevator controller ESP32")
+    parser.add_argument(
+        "--tasks", default=str(default_tasks_path()), help="Path to tasks.yaml"
+    )
+    parser.add_argument(
+        "--camera", default=str(default_camera_path()), help="Path to camera.yaml"
+    )
+    parser.add_argument(
+        "--localization",
+        default=str(default_localization_path()),
+        help="Path to localization.yaml",
+    )
+    parser.add_argument(
+        "--port", default=None, help="Serial port for wheel controller ESP32"
+    )
+    parser.add_argument(
+        "--elevator-port",
+        default=None,
+        help="Serial port for elevator controller ESP32",
+    )
     parser.add_argument("--disable-camera", action="store_true")
     parser.add_argument("--max-ticks", type=int, default=None)
     parser.add_argument("--debug-serial", action="store_true")
-    parser.add_argument("--telemetry-host", default=None, help="UDP host/IP for visualization telemetry")
+    parser.add_argument(
+        "--telemetry-host", default=None, help="UDP host/IP for visualization telemetry"
+    )
     parser.add_argument("--telemetry-port", type=int, default=8765)
     parser.add_argument("--telemetry-rate-hz", type=float, default=10.0)
     args = parser.parse_args()
 
     runtime = MissionRuntime(
-        tasks_path=Path(args.tasks),
+        tasks_cfg_path=Path(args.tasks),
+        localization_cfg_path=Path(args.localization),
+        camera_cfg_path=Path(args.camera),
         serial_port=args.port,
         elevator_serial_port=args.elevator_port,
         disable_camera=args.disable_camera,

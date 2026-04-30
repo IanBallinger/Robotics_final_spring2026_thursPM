@@ -124,67 +124,11 @@ initial_state:
     x: 2.15
     y: 1.31
   heading: 0.0
-localization:
-  filter: ekf
-  initial_state:
-    x: 2.15
-    y: 1.31
-    yaw: 0.0
-    vx_body: 0.0
-    vy_body: 0.0
-    wz: 0.0
-    b_ax: 0.4
-    b_ay: 0.0
-    b_wz: 0.0
-  initial_covariance:
-    - [0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    - [0.0, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    - [0.0, 0.0, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    - [0.0, 0.0, 0.0, 0.10, 0.0, 0.0, 0.0, 0.0, 0.0]
-    - [0.0, 0.0, 0.0, 0.0, 0.10, 0.0, 0.0, 0.0, 0.0]
-    - [0.0, 0.0, 0.0, 0.0, 0.0, 0.10, 0.0, 0.0, 0.0]
-    - [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.0, 0.0]
-    - [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.0]
-    - [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02]
-  process_noise:
-    - [0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    - [0.0, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    - [0.0, 0.0, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    - [0.0, 0.0, 0.0, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0]
-    - [0.0, 0.0, 0.0, 0.0, 0.05, 0.0, 0.0, 0.0, 0.0]
-    - [0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.0, 0.0, 0.0]
-    - [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.005, 0.0, 0.0]
-    - [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.005, 0.0]
-    - [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.005]
-  apriltag_measurement_noise:
-    - [0.02, 0.0, 0.0]
-    - [0.0, 0.02, 0.0]
-    - [0.0, 0.0, 0.03]
-  gyro_measurement_noise:
-    - [0.2]
-  simulation:
-    apriltag_period_s: 0.20
-    apriltag_dropout_prob: 0.15
-    imu_accel_noise_std: 0.03
-    imu_gyro_noise_std: 0.02
-    apriltag_position_noise_std: 0.03
-    apriltag_yaw_noise_std: 0.04
 mission_runtime:
   control_rate_hz: 20.0
   waypoint_capture_radius: 0.05
   controller_v_max: 0.35
   controller_omega_max: 1.8
-camera_to_robot:
-  # Camera pose expressed in the robot/body frame.
-  # Keep this as the single source of truth for camera mounting extrinsics.
-  translation:
-    x: 0.0
-    y: 0.0
-    z: 0.0
-  rotation_rpy:
-    roll: 0.0
-    pitch: 0.0
-    yaw: 0.0
 tasks:
   - name: drive_to_tray
     desired_elevator_height_m: 0.0

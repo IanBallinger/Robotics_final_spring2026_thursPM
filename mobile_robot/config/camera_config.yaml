@@ -1,0 +1,11 @@
+camera_to_robot:
+  # Camera pose expressed in the robot/body frame.
+  # Keep this as the single source of truth for camera mounting extrinsics.
+  translation:
+    x: 0.0
+    y: 0.0
+    z: 0.0
+  rotation_rpy:
+    roll: 0.0
+    pitch: 0.0
+    yaw: 0.0

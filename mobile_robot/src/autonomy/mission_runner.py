@@ -47,7 +47,25 @@ class Task:
 
 def default_tasks_path() -> Path:
     """``mobile_robot/config/mission_config.yaml`` when this file lives in ``src/autonomy``."""
-    return Path(__file__).resolve().parent.parent.parent / "config" / "mission_config.yaml"
+    return (
+        Path(__file__).resolve().parent.parent.parent / "config" / "mission_config.yaml"
+    )
+
+
+def default_camera_path() -> Path:
+    """``mobile_robot/config/camera_config.yaml`` when this file lives in ``src/autonomy``."""
+    return (
+        Path(__file__).resolve().parent.parent.parent / "config" / "camera_config.yaml"
+    )
+
+
+def default_localization_path() -> Path:
+    """``mobile_robot/config/localization_config.yaml`` when this file lives in ``src/autonomy``."""
+    return (
+        Path(__file__).resolve().parent.parent.parent
+        / "config"
+        / "localization_config.yaml"
+    )
 
 
 def _load_pose(raw: Mapping[str, Any]) -> Pose2D:
@@ -86,7 +104,6 @@ def load_map(path: Path | str) -> Map:
             )
         )
 
-
     if map_raw.get("obstacles", []) is not None:
         for obstacle_raw in map_raw.get("obstacles", []):
             obstacle_boundary = obstacle_raw.get("boundary")
@@ -119,7 +136,9 @@ def load_tasks(path: Path | str) -> List[Task]:
                 name=str(row["name"]),
                 start=current_start,
                 goal=goal,
-                desired_elevator_height_m=float(row.get("desired_elevator_height_m", 0.0)),
+                desired_elevator_height_m=float(
+                    row.get("desired_elevator_height_m", 0.0)
+                ),
                 enter_conditions=[str(x) for x in row.get("enter_conditions", [])],
                 completion_conditions=[
                     str(x) for x in row.get("completion_conditions", [])
