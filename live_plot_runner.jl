@@ -41,6 +41,55 @@ function arg_int(flag::String, default::Int)
     end
 end
 
+function csv_escape(s)
+    txt = string(s)
+    if occursin('"', txt)
+        txt = replace(txt, '"' => "\"\"")
+    end
+    if occursin(',', txt) || occursin('"', txt) || occursin('\n', txt)
+        return "\"" * txt * "\""
+    end
+    return txt
+end
+
+function append_named_waypoint_row(path::String, row::Dict{String, Any})
+    values = [
+        get(row, "waypoint_index", ""),
+        get(row, "waypoint_name", ""),
+        get(row, "task_id", ""),
+        get(row, "task_name", ""),
+        get(row, "dependent_item_label", ""),
+        get(row, "left_x", ""), get(row, "left_y", ""), get(row, "left_z", ""),
+        get(row, "left_rx", ""), get(row, "left_ry", ""), get(row, "left_rz", ""),
+        get(row, "right_x", ""), get(row, "right_y", ""), get(row, "right_z", ""),
+        get(row, "right_rx", ""), get(row, "right_ry", ""), get(row, "right_rz", ""),
+        get(row, "left_distance_to_dependent_m", ""),
+        get(row, "right_distance_to_dependent_m", ""),
+        get(row, "left_offset_dx", ""), get(row, "left_offset_dy", ""), get(row, "left_offset_dz", ""),
+        get(row, "right_offset_dx", ""), get(row, "right_offset_dy", ""), get(row, "right_offset_dz", ""),
+        get(row, "waypoint_mark_time", ""),
+    ]
+    open(path, "a") do io
+        println(io, join(csv_escape.(values), ","))
+    end
+end
+
+function ensure_named_waypoints_header(path::String)
+    if isfile(path)
+        return
+    end
+    open(path, "w") do io
+        println(io,
+            "waypoint_index,waypoint_name,task_id,task_name,dependent_item_label," *
+            "left_x,left_y,left_z,left_rx,left_ry,left_rz," *
+            "right_x,right_y,right_z,right_rx,right_ry,right_rz," *
+            "left_distance_to_dependent_m,right_distance_to_dependent_m," *
+            "left_offset_dx,left_offset_dy,left_offset_dz,right_offset_dx,right_offset_dy,right_offset_dz," *
+            "waypoint_mark_time"
+        )
+    end
+end
+
 function arg_host(default::String)
     raw = arg_value("--host", default)
     try
@@ -61,10 +110,12 @@ function main()
     max_points = arg_int("--max-points", 400000000)
     refresh_every = arg_int("--refresh-every", 5)
     output_path = arg_value("--jld2-file", arg_value("--output", ""))
+    named_waypoints_csv = arg_value("--named-waypoints-csv", "named_waypoints.csv")
+    active_named_waypoints_csv = named_waypoints_csv
 
     GLMakie.activate!()
 
-    fig = Figure(size = (1100, 800))
+    fig = Figure(size = (1200, 860))
     ax = Axis3(
         fig[1, 1],
         xlabel = "X [m]",
@@ -72,6 +123,17 @@ function main()
         zlabel = "Z [m]",
         title = "Live Left/Right TCP (XYZ) & Camera Vision Poses"
     )
+
+    Label(fig[2, 1], "Waypoint Name (press Enter to assign to oldest pending mark):", halign = :left)
+    waypoint_name_box = Textbox(
+        fig[3, 1],
+        placeholder = "e.g. pregrasp_bowl",
+        validator = r"^[A-Za-z0-9_.-]+$",
+        defocus_on_submit = false,
+        reset_on_defocus = true,
+        tellwidth = true,
+    )
+    waypoint_status = Label(fig[4, 1], "Pending waypoint marks: 0", halign = :left)
 
     # Three observables: left TCP, right TCP, and vision detections.
     left_tcp_data_obs = Observable((Point3f[], RGBf[]))
@@ -92,6 +154,9 @@ function main()
     bind(sock, host, port)
     println("Listening on ", host, ":", port, " (TCP poses + vision detections)")
     println("Close the plot window or press Ctrl+C to stop.")
+    println("Named waypoint CSV: ", named_waypoints_csv)
+
+    ensure_named_waypoints_header(active_named_waypoints_csv)
 
     # Left TCP pose data
     left_tcp_xs = Float32[];  left_tcp_ys = Float32[];  left_tcp_zs = Float32[]
@@ -122,6 +187,27 @@ function main()
     first_left_tcp_logged = false
     first_right_tcp_logged = false
     first_vision_logged = false
+    pending_waypoints = Dict{String, Any}[]
+
+    on(waypoint_name_box.stored_string) do s
+        if s === nothing
+            return
+        end
+        waypoint_name = strip(String(s))
+        if isempty(waypoint_name)
+            return
+        end
+        if isempty(pending_waypoints)
+            waypoint_status.text[] = "No pending waypoint marks."
+            return
+        end
+
+        wp = popfirst!(pending_waypoints)
+        wp["waypoint_name"] = waypoint_name
+        append_named_waypoint_row(active_named_waypoints_csv, wp)
+        waypoint_status.text[] = "Saved waypoint '" * waypoint_name * "'. Pending waypoint marks: " * string(length(pending_waypoints))
+        waypoint_name_box.displayed_string[] = nothing
+    end
 
     # Color map for vision detections by color name
     color_map = Dict(
@@ -155,8 +241,52 @@ function main()
                 pkt = try JSON3.read(String(data)) catch; nothing end
 
                 if pkt !== nothing
+                    # --- Waypoint mark packet ---
+                    if haskey(pkt, :packet_type) && String(pkt.packet_type) == "waypoint_mark"
+                        packet_waypoint_csv = String(get(pkt, :named_waypoints_csv, active_named_waypoints_csv))
+                        if !isempty(packet_waypoint_csv) && packet_waypoint_csv != active_named_waypoints_csv
+                            active_named_waypoints_csv = packet_waypoint_csv
+                            ensure_named_waypoints_header(active_named_waypoints_csv)
+                            println("Waypoint CSV path switched to: ", active_named_waypoints_csv)
+                        end
+
+                        left_pose = haskey(pkt, :left_actual_TCP_pose) ? collect(Float64.(pkt.left_actual_TCP_pose)) : Float64[]
+                        right_pose = haskey(pkt, :right_actual_TCP_pose) ? collect(Float64.(pkt.right_actual_TCP_pose)) : Float64[]
+                        left_offset = haskey(pkt, :left_offset_to_dependent_xyz) && pkt.left_offset_to_dependent_xyz !== nothing ? collect(Float64.(pkt.left_offset_to_dependent_xyz)) : Float64[]
+                        right_offset = haskey(pkt, :right_offset_to_dependent_xyz) && pkt.right_offset_to_dependent_xyz !== nothing ? collect(Float64.(pkt.right_offset_to_dependent_xyz)) : Float64[]
+
+                        row = Dict{String, Any}(
+                            "waypoint_index" => get(pkt, :waypoint_index, 0),
+                            "task_id" => String(get(pkt, :task_id, "")),
+                            "task_name" => String(get(pkt, :task_name, "")),
+                            "dependent_item_label" => String(get(pkt, :dependent_item_label, "")),
+                            "left_x" => length(left_pose) >= 1 ? left_pose[1] : "",
+                            "left_y" => length(left_pose) >= 2 ? left_pose[2] : "",
+                            "left_z" => length(left_pose) >= 3 ? left_pose[3] : "",
+                            "left_rx" => length(left_pose) >= 4 ? left_pose[4] : "",
+                            "left_ry" => length(left_pose) >= 5 ? left_pose[5] : "",
+                            "left_rz" => length(left_pose) >= 6 ? left_pose[6] : "",
+                            "right_x" => length(right_pose) >= 1 ? right_pose[1] : "",
+                            "right_y" => length(right_pose) >= 2 ? right_pose[2] : "",
+                            "right_z" => length(right_pose) >= 3 ? right_pose[3] : "",
+                            "right_rx" => length(right_pose) >= 4 ? right_pose[4] : "",
+                            "right_ry" => length(right_pose) >= 5 ? right_pose[5] : "",
+                            "right_rz" => length(right_pose) >= 6 ? right_pose[6] : "",
+                            "left_distance_to_dependent_m" => get(pkt, :left_distance_to_dependent_m, ""),
+                            "right_distance_to_dependent_m" => get(pkt, :right_distance_to_dependent_m, ""),
+                            "left_offset_dx" => length(left_offset) >= 1 ? left_offset[1] : "",
+                            "left_offset_dy" => length(left_offset) >= 2 ? left_offset[2] : "",
+                            "left_offset_dz" => length(left_offset) >= 3 ? left_offset[3] : "",
+                            "right_offset_dx" => length(right_offset) >= 1 ? right_offset[1] : "",
+                            "right_offset_dy" => length(right_offset) >= 2 ? right_offset[2] : "",
+                            "right_offset_dz" => length(right_offset) >= 3 ? right_offset[3] : "",
+                            "waypoint_mark_time" => get(pkt, :waypoint_mark_time, ""),
+                        )
+                        push!(pending_waypoints, row)
+                        waypoint_status.text[] = "Pending waypoint marks: " * string(length(pending_waypoints))
+
                     # --- Left/Right TCP pose packet ---
-                    if haskey(pkt, :left_actual_TCP_pose) || haskey(pkt, :right_actual_TCP_pose) || haskey(pkt, :actual_TCP_pose)
+                    elseif haskey(pkt, :left_actual_TCP_pose) || haskey(pkt, :right_actual_TCP_pose) || haskey(pkt, :actual_TCP_pose)
                         if haskey(pkt, :left_actual_TCP_pose) || haskey(pkt, :actual_TCP_pose)
                             left_pose = haskey(pkt, :left_actual_TCP_pose) ? pkt.left_actual_TCP_pose : pkt.actual_TCP_pose
                             if length(left_pose) >= 6

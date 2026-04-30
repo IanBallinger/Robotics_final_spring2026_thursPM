@@ -99,6 +99,36 @@ Run an intentional deadlock simulation demo:
 c:/Users/iballing/workspaces/robotics/venv/Scripts/python.exe UR5/Supervisor.py run-subtask ignored --autonomy-mode --autonomy-simulate --autonomy-graph-file UR5/deadlock_task_graph_example.json
 ```
 
+## Waypoint Recording Workflow (Python + Julia)
+
+Start Julia live UI (includes waypoint naming textbox):
+```powershell
+julia --threads 1 live_plot_runner.jl --host 127.0.0.1 --port 9999 --named-waypoints-csv UR5/waypoints_acquire_bowl.csv
+```
+
+Start recorder with graph/task context and optional graph label write-back:
+```powershell
+c:/Users/iballing/workspaces/robotics/venv/Scripts/python.exe UR5/demo_4_16/record.py --stream-udp-host 127.0.0.1 --stream-udp-port 9999 --output UR5/traces/acquire_bowl.csv --task-graph-file UR5/master_task_graph.json --task-id acquire_bowl --named-waypoints-csv UR5/waypoints_acquire_bowl.csv --write-task-graph-labels
+```
+
+Controls while recording:
+- Press `w` to mark a waypoint snapshot from Python.
+- In Julia, type a waypoint name in the textbox and press Enter to assign the oldest pending waypoint.
+- Press `l` / `r` to toggle left/right grippers.
+- Press Delete (or Ctrl+C) to stop recording.
+
+Recorded outputs:
+- Pose traces: `<output>_left.csv` and `<output>_right.csv`.
+- Named waypoints CSV: includes waypoint name, both arm poses, distance to dependent item, and XYZ offsets to that dependent item.
+
+Task-graph-aware behavior:
+- For acquire tasks, dependent item is derived from that task's `params.target_label`.
+- With `--write-task-graph-labels`, recorder writes the selected task params fields:
+	- `pose_trace_csv_left`
+	- `pose_trace_csv_right`
+	- `named_waypoints_csv`
+	- `dependent_item_label`
+
 Score cap fields in graph tasks:
 - score_token: groups repeated actions under one scoring bucket (for example, all door-open actions)
 - max_score_count: maximum number of times points can be awarded for that score_token (0 means unlimited)

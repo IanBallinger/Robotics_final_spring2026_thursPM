@@ -6,6 +6,7 @@ import time
 import argparse
 import sys
 import json
+import math
 import socket
 import threading
 import cv2
@@ -20,10 +21,15 @@ gripper_state_L = True  # Left gripper, open initially
 gripper_state_R = True  # Right gripper, open initially
 gripper_state_lock = threading.Lock()
 recording_active = True
+pending_waypoint_marks = 0
+waypoint_index = 0
+waypoint_lock = threading.Lock()
+vision_targets_lock = threading.Lock()
+latest_target_positions = {}
 
 def on_press(key):
     """Handle keyboard press events for gripper control."""
-    global gripper_state_L, gripper_state_R, recording_active
+    global gripper_state_L, gripper_state_R, recording_active, pending_waypoint_marks
     try:
         # "l" key toggles left gripper
         if key.char == 'l':
@@ -35,6 +41,11 @@ def on_press(key):
             with gripper_state_lock:
                 gripper_state_R = not gripper_state_R
             print(f"Right gripper {'open' if gripper_state_R else 'close'}")
+        # "w" marks a waypoint snapshot to be named in Julia UI.
+        elif key.char == 'w':
+            with waypoint_lock:
+                pending_waypoint_marks += 1
+            print("Waypoint mark queued")
     except AttributeError:
         # Special keys like Delete don't have .char
         if key == Key.delete:
@@ -98,7 +109,7 @@ CENTER_Y  = 337.5
 VISION_Z  = 0.1         # fixed z: top-down camera (metres above table plane)
 
 
-def run_camera_detection(udp_socket, udp_target, stop_event, udp_send_lock, camera_index=2):
+def run_camera_detection(udp_socket, udp_target, stop_event, udp_send_lock, camera_index=2, color_to_target_label=None):
     """Background thread: detect coloured objects and stream vision packets."""
     cap = cv2.VideoCapture(camera_index)
     kernel = np.ones((5, 5), np.uint8)
@@ -142,6 +153,14 @@ def run_camera_detection(udp_socket, udp_target, stop_event, udp_send_lock, came
                             udp_socket.sendto(json.dumps(packet).encode("utf-8"), udp_target)
                     except Exception as e:
                         print(f"Vision UDP send error: {e}")
+
+                    resolved_label = color_to_target_label.get(color_name, color_name) if color_to_target_label else color_name
+                    with vision_targets_lock:
+                        latest_target_positions[resolved_label] = {
+                            "position": [float(packet["position"][0]), float(packet["position"][1]), float(packet["position"][2])],
+                            "timestamp": time.time(),
+                            "color": color_name,
+                        }
 
             cv2.imshow("Camera (record.py)", frame)
             cv2.waitKey(3)
@@ -230,8 +249,142 @@ def parse_args(args):
         default=2,
         metavar="<camera index>",
         help="OpenCV camera device index (default: 0)")
+    parser.add_argument(
+        "--task-graph-file",
+        dest="task_graph_file",
+        type=str,
+        default="",
+        metavar="<task graph json>",
+        help="optional path to task graph JSON for task-aware waypoint logging")
+    parser.add_argument(
+        "--task-id",
+        dest="task_id",
+        type=str,
+        default="",
+        metavar="<task id>",
+        help="task id from graph used to resolve dependent item label")
+    parser.add_argument(
+        "--named-waypoints-csv",
+        dest="named_waypoints_csv",
+        type=str,
+        default="named_waypoints.csv",
+        metavar="<named waypoints csv>",
+        help="output CSV path Julia naming UI should write to")
+    parser.add_argument(
+        "--write-task-graph-labels",
+        dest="write_task_graph_labels",
+        action="store_true",
+        help="write trace/waypoint CSV labels back into selected task params in graph")
 
     return parser.parse_args(args)
+
+
+def load_task_context(task_graph_file, task_id):
+    context = {
+        "task_id": task_id,
+        "task_name": "",
+        "dependent_item_label": "",
+        "target_coloring": {},
+    }
+    if not task_graph_file or not task_id:
+        return context
+
+    try:
+        with open(task_graph_file, "r", encoding="utf-8") as f:
+            graph = json.load(f)
+    except Exception as exc:
+        print(f"Warning: could not read task graph '{task_graph_file}': {exc}")
+        return context
+
+    context["target_coloring"] = dict(graph.get("target_coloring", {}))
+
+    candidate_tasks = []
+    primary = graph.get("primary_task")
+    if isinstance(primary, dict):
+        candidate_tasks.append(primary)
+    queue = graph.get("autonomy_queue", [])
+    if isinstance(queue, list):
+        for item in queue:
+            if isinstance(item, dict):
+                candidate_tasks.append(item)
+
+    selected = None
+    for item in candidate_tasks:
+        if str(item.get("task_id", "")) == task_id:
+            selected = item
+            break
+    if selected is None:
+        print(f"Warning: task_id '{task_id}' not found in graph '{task_graph_file}'")
+        return context
+
+    params = selected.get("params", {}) if isinstance(selected.get("params", {}), dict) else {}
+    context["task_name"] = str(selected.get("name", ""))
+    # Task dependency heuristic. Acquire tasks typically depend on target_label.
+    if context["task_name"].startswith("acquire_"):
+        context["dependent_item_label"] = str(params.get("target_label", ""))
+    else:
+        context["dependent_item_label"] = str(
+            params.get("dependent_item_label")
+            or params.get("target_label")
+            or params.get("object_label")
+            or params.get("source_label")
+            or ""
+        )
+    return context
+
+
+def write_graph_task_labels(task_graph_file, task_id, left_csv, right_csv, named_waypoints_csv, dependent_item_label):
+    if not task_graph_file or not task_id:
+        return
+    try:
+        with open(task_graph_file, "r", encoding="utf-8") as f:
+            graph = json.load(f)
+    except Exception as exc:
+        print(f"Warning: could not update graph labels, read failed: {exc}")
+        return
+
+    updated = False
+    tasks = []
+    if isinstance(graph.get("primary_task"), dict):
+        tasks.append(graph["primary_task"])
+    if isinstance(graph.get("autonomy_queue"), list):
+        tasks.extend([item for item in graph["autonomy_queue"] if isinstance(item, dict)])
+
+    for task in tasks:
+        if str(task.get("task_id", "")) != task_id:
+            continue
+        params = task.get("params", {})
+        if not isinstance(params, dict):
+            params = {}
+        params["pose_trace_csv_left"] = left_csv
+        params["pose_trace_csv_right"] = right_csv
+        params["named_waypoints_csv"] = named_waypoints_csv
+        if dependent_item_label:
+            params["dependent_item_label"] = dependent_item_label
+        task["params"] = params
+        updated = True
+        break
+
+    if not updated:
+        print(f"Warning: graph label write skipped, task_id '{task_id}' not found")
+        return
+
+    try:
+        with open(task_graph_file, "w", encoding="utf-8") as f:
+            json.dump(graph, f, indent=2)
+            f.write("\n")
+        print(f"Updated task graph labels for task_id '{task_id}'")
+    except Exception as exc:
+        print(f"Warning: could not write updated task graph: {exc}")
+
+
+def _offset_and_distance(arm_pose, target_position):
+    if not arm_pose or len(arm_pose) < 3 or not target_position or len(target_position) < 3:
+        return None, None
+    dx = float(target_position[0]) - float(arm_pose[0])
+    dy = float(target_position[1]) - float(arm_pose[1])
+    dz = float(target_position[2]) - float(arm_pose[2])
+    return [dx, dy, dz], math.sqrt(dx * dx + dy * dy + dz * dz)
 
 def main(args):
     """Main entry point allowing external calls
@@ -239,10 +392,19 @@ def main(args):
     Args:
       args ([str]): command line parameter list
     """
-    global recording_active, gripper_state_L, gripper_state_R
+    global recording_active, gripper_state_L, gripper_state_R, pending_waypoint_marks, waypoint_index
     
     args = parse_args(args)
     dt = 1 / args.frequency
+    task_context = load_task_context(args.task_graph_file, args.task_id)
+    target_coloring = task_context.get("target_coloring", {})
+    color_to_target_label = {str(v): str(k) for k, v in target_coloring.items()}
+    dependent_item_label = str(task_context.get("dependent_item_label", ""))
+    if args.task_id:
+        print(
+            f"Task context: id={args.task_id}, name={task_context.get('task_name', '')}, "
+            f"dependent_item_label={dependent_item_label or '<none>'}"
+        )
 
     udp_socket = None
     udp_target = None
@@ -259,7 +421,7 @@ def main(args):
     if use_camera and udp_socket and udp_target:
         camera_thread = threading.Thread(
             target=run_camera_detection,
-            args=(udp_socket, udp_target, camera_stop, udp_send_lock, args.camera_index),
+            args=(udp_socket, udp_target, camera_stop, udp_send_lock, args.camera_index, color_to_target_label),
             daemon=True,
         )
         camera_thread.start()
@@ -323,6 +485,16 @@ def main(args):
     left_output = f"{output_base}_left{output_ext}"
     right_output = f"{output_base}_right{output_ext}"
 
+    if args.write_task_graph_labels:
+        write_graph_task_labels(
+            args.task_graph_file,
+            args.task_id,
+            left_output,
+            right_output,
+            args.named_waypoints_csv,
+            dependent_item_label,
+        )
+
     rtde_r_left.startFileRecording(left_output, variables)
     rtde_r_right.startFileRecording(right_output, variables)
     if udp_target:
@@ -359,6 +531,49 @@ def main(args):
                 }
                 with udp_send_lock:
                     udp_socket.sendto(json.dumps(packet).encode("utf-8"), udp_target)
+
+            marks_to_send = 0
+            with waypoint_lock:
+                if pending_waypoint_marks > 0:
+                    marks_to_send = pending_waypoint_marks
+                    pending_waypoint_marks = 0
+
+            for _ in range(marks_to_send):
+                waypoint_index += 1
+                dependent_snapshot = None
+                if dependent_item_label:
+                    with vision_targets_lock:
+                        dependent_snapshot = latest_target_positions.get(dependent_item_label)
+
+                dependent_position = dependent_snapshot.get("position") if dependent_snapshot else None
+                left_offset, left_distance = _offset_and_distance(left_pose, dependent_position)
+                right_offset, right_distance = _offset_and_distance(right_pose, dependent_position)
+
+                waypoint_packet = {
+                    "packet_type": "waypoint_mark",
+                    "waypoint_index": waypoint_index,
+                    "waypoint_mark_time": time.time(),
+                    "task_id": args.task_id,
+                    "task_name": task_context.get("task_name", ""),
+                    "dependent_item_label": dependent_item_label,
+                    "dependent_item_position": dependent_position,
+                    "dependent_item_seen_time": dependent_snapshot.get("timestamp") if dependent_snapshot else None,
+                    "left_actual_TCP_pose": left_pose,
+                    "right_actual_TCP_pose": right_pose,
+                    "left_distance_to_dependent_m": left_distance,
+                    "right_distance_to_dependent_m": right_distance,
+                    "left_offset_to_dependent_xyz": left_offset,
+                    "right_offset_to_dependent_xyz": right_offset,
+                    "named_waypoints_csv": args.named_waypoints_csv,
+                }
+                if udp_socket and udp_target:
+                    with udp_send_lock:
+                        udp_socket.sendto(json.dumps(waypoint_packet).encode("utf-8"), udp_target)
+                print(
+                    f"Waypoint #{waypoint_index} marked "
+                    f"(dependent={dependent_item_label or 'none'}, "
+                    f"left_dist={left_distance}, right_dist={right_distance})"
+                )
 
             # Update gripper states if they changed
             with gripper_state_lock:

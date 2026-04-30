@@ -27,8 +27,8 @@ class UR5Arm:
     # TODO we should tune these
     DEFAULT_JOINT_SPEED = pi/20                         # rad/s   see examples/move_until_contact
     DEFAULT_JOINT_ACCELERATION = DEFAULT_JOINT_SPEED/20 # rad/s^2 arbitrary default
-    DEFAULT_TOOL_SPEED = 0.01                           # m/s     arbitrary small ddefault
-    DEFAULT_TOOL_ACCELERATION = DEFAULT_TOOL_SPEED/20   # m/s^2   arbitrary default
+    DEFAULT_TOOL_SPEED = 0.3                           # m/s     arbitrary small ddefault
+    DEFAULT_TOOL_ACCELERATION = 10.0   # m/s^2   arbitrary default
 
     def __init__(self, ip_address, frequency=500.0, verbose=False):
         """
