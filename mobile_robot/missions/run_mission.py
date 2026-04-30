@@ -424,6 +424,16 @@ class MissionRuntime:
         return rz @ ry @ rx
 
     def _robot_from_camera_optical_transform(self) -> np.ndarray:
+        """Return ``T_robot_from_camera_optical``.
+
+        This uses the same optical-frame convention as the RGB-D / person-
+        detection stack:
+        - camera optical: +x right, +y down, +z forward
+        - nominal robot-like camera frame: +x forward, +y left, +z up
+
+        ``camera_to_robot`` in the mission config is interpreted as the pose of
+        that nominal forward/left/up camera frame in the robot frame.
+        """
         R_nominal_from_optical = np.array(
             [[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]],
             dtype=float,
@@ -444,9 +454,23 @@ class MissionRuntime:
         )
 
     @staticmethod
-    def _world_from_tag_transform(
+    def _world_from_vertical_tag_transform(
         landmark_heading: float, landmark_xy: tuple[float, float]
     ) -> np.ndarray:
+        """Return ``T_world_from_tag`` for a wall-mounted AprilTag.
+
+        Global/world convention:
+        - +x, +y in the floor plane
+        - +z up
+
+        Tag convention used here:
+        - +x tag-right in the printed tag plane
+        - +y tag-down in the printed tag plane
+        - +z tag-normal, pointing out from the tag face
+
+        The mission-config landmark heading is interpreted as the world-frame yaw
+        of the tag normal projected into the world xy plane.
+        """
         z_tag_world = np.array(
             [np.cos(landmark_heading), np.sin(landmark_heading), 0.0],
             dtype=float,
@@ -511,19 +535,27 @@ class MissionRuntime:
                 R_ct = np.asarray(R_ct, dtype=float).reshape(3, 3)
                 t_ct = np.asarray(t_ct, dtype=float).reshape(3)
 
+                # pupil_apriltags returns tag pose in the camera optical frame:
+                # T_camera_from_tag.
                 T_camera_from_tag = self._transform_from_rotation_translation(
                     R_ct, t_ct
                 )
-                print(T_camera_from_tag)
                 T_tag_from_camera = self._invert_transform(T_camera_from_tag)
+
+                # Camera mounting is expressed as T_robot_from_camera_optical.
                 T_robot_from_camera = self._robot_from_camera_optical_transform()
                 T_camera_from_robot = self._invert_transform(T_robot_from_camera)
-                T_world_from_tag = self._world_from_tag_transform(
+
+                # Landmark heading is interpreted as the world yaw of the tag
+                # face normal, i.e. tag +z projected into the world xy plane.
+                T_world_from_tag = self._world_from_vertical_tag_transform(
                     landmark.heading,
                     tuple(landmark.point),
                 )
+
+                # Compose: world <- tag <- camera_optical <- robot
                 T_world_from_robot = (
-                    T_world_from_tag @ T_tag_from_camera @ T_camera_from_robot
+                    T_world_from_tag @ T_tag_from_camera # @ T_camera_from_robot
                 )
                 measurements.append(
                     self._planar_pose_from_transform(T_world_from_robot)

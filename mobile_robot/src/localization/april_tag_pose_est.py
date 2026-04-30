@@ -12,8 +12,17 @@ from camera.types import CameraFrame, CameraIntrinsics, DepthFrame, StreamConfig
 class AprilTagPoseEst:
     """AprilTag pose estimation using frames from a RealSense camera.
 
-    The estimated tag pose is returned in the camera frame as
-    ``(rotation_matrix, translation_vector)``.
+    The estimated tag pose is returned in the camera optical frame as
+    ``(rotation_matrix, translation_vector)``, where the transform is
+    interpreted as ``T_camera_from_tag``:
+
+    - ``rotation_matrix`` maps tag-frame vectors into the camera optical frame
+    - ``translation_vector`` is the tag origin expressed in the camera optical frame
+
+    Camera optical convention is assumed to be:
+    - +x right
+    - +y down
+    - +z forward
     """
 
     def __init__(
