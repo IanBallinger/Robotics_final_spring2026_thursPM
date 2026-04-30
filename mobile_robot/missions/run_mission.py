@@ -514,6 +514,7 @@ class MissionRuntime:
                 T_camera_from_tag = self._transform_from_rotation_translation(
                     R_ct, t_ct
                 )
+                print(T_camera_from_tag)
                 T_tag_from_camera = self._invert_transform(T_camera_from_tag)
                 T_robot_from_camera = self._robot_from_camera_optical_transform()
                 T_camera_from_robot = self._invert_transform(T_robot_from_camera)
