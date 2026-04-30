@@ -30,12 +30,22 @@ localization:
     - [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.005, 0.0, 0.0]
     - [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.005, 0.0]
     - [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.005]
+  # Trust AprilTag global pose corrections strongly.
   apriltag_measurement_noise:
-    - [0.02, 0.0, 0.0]
-    - [0.0, 0.02, 0.0]
-    - [0.0, 0.0, 0.03]
+    - [0.01, 0.0, 0.0]
+    - [0.0, 0.01, 0.0]
+    - [0.0, 0.0, 0.02]
+  # Trust IMU gyro much less than encoder/apriltag corrections.
   gyro_measurement_noise:
-    - [0.2]
+    - [1.5]
+  # Trust wheel-derived body twist strongly.
+  wheel_twist_measurement_noise:
+    - [0.005, 0.0, 0.0]
+    - [0.0, 0.005, 0.0]
+    - [0.0, 0.0, 0.02]
+  # Ignore linear accelerometer integration in prediction; let wheel encoders
+  # dominate body-velocity estimation.
+  use_imu_accel_in_prediction: false
   simulation:
     apriltag_period_s: 0.20
     apriltag_dropout_prob: 0.15

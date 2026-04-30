@@ -85,6 +85,8 @@ class LocalizationConfig:
     process_noise: np.ndarray
     apriltag_measurement_noise: np.ndarray
     gyro_measurement_noise: np.ndarray
+    wheel_twist_measurement_noise: np.ndarray
+    use_imu_accel_in_prediction: bool
 
 
 @dataclass
@@ -320,6 +322,16 @@ class MissionRuntime:
             gyro_measurement_noise=np.asarray(
                 loc.get("gyro_measurement_noise"), dtype=float
             ),
+            wheel_twist_measurement_noise=np.asarray(
+                loc.get(
+                    "wheel_twist_measurement_noise",
+                    [[0.02, 0.0, 0.0], [0.0, 0.02, 0.0], [0.0, 0.0, 0.08]],
+                ),
+                dtype=float,
+            ),
+            use_imu_accel_in_prediction=bool(
+                loc.get("use_imu_accel_in_prediction", False)
+            ),
         )
         runtime_cfg = RuntimeConfig(
             control_rate_hz=float(runtime.get("control_rate_hz", 20.0)),
@@ -361,6 +373,7 @@ class MissionRuntime:
             process_noise=self.localization_config.process_noise,
             apriltag_measurement_noise=self.localization_config.apriltag_measurement_noise,
             gyro_measurement_noise=self.localization_config.gyro_measurement_noise,
+            wheel_twist_measurement_noise=self.localization_config.wheel_twist_measurement_noise,
         )
 
     def _current_state_for_controller(self) -> MapPoseVelocity:
@@ -558,7 +571,7 @@ class MissionRuntime:
 
                 # Compose: world <- tag <- camera_optical <- robot
                 T_world_from_robot = (
-                    T_world_from_tag @ T_tag_from_camera # @ T_camera_from_robot
+                    T_world_from_tag @ T_tag_from_camera @ T_camera_from_robot
                 )
                 measurements.append(
                     self._planar_pose_from_transform(T_world_from_robot)
@@ -694,9 +707,15 @@ class MissionRuntime:
             self.localization_filter.predict(IMUMeasurement(ax=0.0, ay=0.0, wz=0.0), dt)
         else:
             imu_msg = imu_packets[-1]
-            imu = IMUMeasurement(ax=imu_msg.ax, ay=imu_msg.ay, wz=imu_msg.gz)
+            ax_meas = (
+                imu_msg.ax if self.localization_config.use_imu_accel_in_prediction else 0.0
+            )
+            ay_meas = (
+                imu_msg.ay if self.localization_config.use_imu_accel_in_prediction else 0.0
+            )
+            imu = IMUMeasurement(ax=ax_meas, ay=ay_meas, wz=imu_msg.gz)
             self.localization_filter.predict(imu, dt)
-            self.localization_filter.update_imu(imu)
+            self.localization_filter.update_imu(IMUMeasurement(wz=imu_msg.gz))
 
         if encoder_packets:
             enc = encoder_packets[-1]

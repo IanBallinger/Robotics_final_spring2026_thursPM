@@ -96,6 +96,24 @@ def _draw_task_goals(ax, tasks: list[Any]) -> None:
         ax.text(task.goal.x + 0.03, task.goal.y + 0.03, task.name, fontsize=9, color="tab:orange")
 
 
+def _draw_robot_heading_arrow(ax, x: float, y: float, yaw: float, length: float = 0.18) -> None:
+    dx = length * float(np.cos(yaw))
+    dy = length * float(np.sin(yaw))
+    ax.arrow(
+        x,
+        y,
+        dx,
+        dy,
+        head_width=0.05,
+        head_length=0.05,
+        fc="tab:blue",
+        ec="tab:blue",
+        linewidth=2.0,
+        length_includes_head=True,
+        zorder=8,
+    )
+
+
 
 def _apply_dynamic_obstacles(map_: Map, telemetry: dict[str, Any]) -> None:
     map_.clear_obstacles_by_prefix("person_")
@@ -157,7 +175,8 @@ def update_visualization(
     _draw_task_goals(ax, tasks)
 
     ax.plot(traj_x, traj_y, color="tab:cyan", linewidth=1.8, label="Jetson estimate", zorder=6)
-    ax.plot([x], [y], marker=(3, 0, np.degrees(yaw) - 90.0), markersize=14, color="black", linestyle="None", zorder=8)
+    ax.plot([x], [y], marker="o", markersize=7, color="black", linestyle="None", zorder=8)
+    _draw_robot_heading_arrow(ax, x, y, yaw)
 
     cell = telemetry.get("cell")
     if cell is not None and len(cell) == 2:

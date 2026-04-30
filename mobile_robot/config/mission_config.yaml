@@ -18,6 +18,11 @@ map:
     - x: 0.0
       y: 3.545
   landmarks:
+    # Landmark heading convention for AprilTag localization:
+    # - heading is the world-frame yaw of the wall outward normal / viewing direction
+    # - internally the AprilTag transform uses the opposite tag-frame normal,
+    #   so the runtime applies a 180 deg flip when building T_world_from_tag
+    # - world frame is +x/+y in the floor plane, +z up
     - name: left_tag_table
       id: 5
       position:
@@ -123,7 +128,21 @@ initial_state:
   position:
     x: 2.15
     y: 1.31
-  heading: 0.0
+  heading: -3.14
+localization:
+  # Demo/local defaults: trust AprilTag and wheel odometry far more than raw IMU.
+  filter: ekf
+  wheel_twist_measurement_noise:
+    - [0.005, 0.0, 0.0]
+    - [0.0, 0.005, 0.0]
+    - [0.0, 0.0, 0.02]
+  apriltag_measurement_noise:
+    - [0.01, 0.0, 0.0]
+    - [0.0, 0.01, 0.0]
+    - [0.0, 0.0, 0.02]
+  gyro_measurement_noise:
+    - [1.5]
+  use_imu_accel_in_prediction: false
 mission_runtime:
   control_rate_hz: 20.0
   waypoint_capture_radius: 0.05
