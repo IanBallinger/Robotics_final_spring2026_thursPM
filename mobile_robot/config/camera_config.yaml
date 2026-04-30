@@ -9,3 +9,30 @@ camera_to_robot:
     roll: 0.0
     pitch: 0.0
     yaw: 0.0
+
+# ── HSV Color Config ──
+
+HSV_CONFIG = {
+    "handle": {
+        "ranges": [
+            ((0,   120, 100), (10,  255, 255)),   # red lower wrap
+            ((170, 120, 100), (179, 255, 255)),   # red upper wrap
+        ],
+        "label": "handle",
+        "color_bgr": (0, 0, 255)                  # red box in display
+    },
+    "tray_green": {
+        "ranges": [
+            ((30, 15, 100), (60, 255, 255)),       # yellow-green
+        ],
+        "label": "tray (green)",
+        "color_bgr": (0, 255, 0)                  # green box in display
+    },
+    "tray_blue": {
+        "ranges": [
+            ((95, 200, 80), (110, 255, 255)),      # blue
+        ],
+        "label": "tray (blue)",
+        "color_bgr": (255, 100, 0)                # blue box in display
+    }
+}
