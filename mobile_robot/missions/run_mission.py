@@ -39,8 +39,8 @@ from autonomy.trees.waypoint_mission import (  # noqa: E402
 )
 from guidance.waypoint_controller import (  # noqa: E402
     CascadedWaypointController,
+    DifferentialDriveCommand,
     MapPoseVelocity,
-    MecanumCommand,
     wrap_to_pi,
 )
 from localization import (  # noqa: E402
@@ -353,23 +353,77 @@ class MissionRuntime:
         if measurement is not None:
             self.localization_filter.update_apriltag(measurement)
 
-    def _camera_optical_point_to_robot_xy(self, point_camera: np.ndarray) -> np.ndarray:
-        p_c = np.asarray(point_camera, dtype=float).reshape(3)
-        point_camera_nominal = np.array([p_c[2], -p_c[0], -p_c[1]], dtype=float)
+    @staticmethod
+    def _transform_from_rotation_translation(
+        rotation: np.ndarray,
+        translation: np.ndarray,
+    ) -> np.ndarray:
+        T = np.eye(4, dtype=float)
+        T[:3, :3] = np.asarray(rotation, dtype=float).reshape(3, 3)
+        T[:3, 3] = np.asarray(translation, dtype=float).reshape(3)
+        return T
 
-        cr = np.cos(self.camera_to_robot.roll)
-        sr = np.sin(self.camera_to_robot.roll)
-        cp = np.cos(self.camera_to_robot.pitch)
-        sp = np.sin(self.camera_to_robot.pitch)
-        cy = np.cos(self.camera_to_robot.yaw)
-        sy = np.sin(self.camera_to_robot.yaw)
+    @staticmethod
+    def _invert_transform(T: np.ndarray) -> np.ndarray:
+        R = T[:3, :3]
+        t = T[:3, 3]
+        T_inv = np.eye(4, dtype=float)
+        T_inv[:3, :3] = R.T
+        T_inv[:3, 3] = -R.T @ t
+        return T_inv
+
+    @staticmethod
+    def _rotation_matrix_from_rpy(roll: float, pitch: float, yaw: float) -> np.ndarray:
+        cr, sr = np.cos(roll), np.sin(roll)
+        cp, sp = np.cos(pitch), np.sin(pitch)
+        cy, sy = np.cos(yaw), np.sin(yaw)
         rx = np.array([[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]], dtype=float)
         ry = np.array([[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]], dtype=float)
         rz = np.array([[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]], dtype=float)
-        rot = rz @ ry @ rx
-        trans = np.array([self.camera_to_robot.x, self.camera_to_robot.y, self.camera_to_robot.z], dtype=float)
-        point_robot = trans + rot @ point_camera_nominal
-        return point_robot[:2]
+        return rz @ ry @ rx
+
+    def _robot_from_camera_optical_transform(self) -> np.ndarray:
+        R_nominal_from_optical = np.array(
+            [[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]],
+            dtype=float,
+        )
+        R_robot_from_nominal = self._rotation_matrix_from_rpy(
+            self.camera_to_robot.roll,
+            self.camera_to_robot.pitch,
+            self.camera_to_robot.yaw,
+        )
+        R_robot_from_optical = R_robot_from_nominal @ R_nominal_from_optical
+        t_robot_from_optical = np.array(
+            [self.camera_to_robot.x, self.camera_to_robot.y, self.camera_to_robot.z],
+            dtype=float,
+        )
+        return self._transform_from_rotation_translation(
+            R_robot_from_optical,
+            t_robot_from_optical,
+        )
+
+    @staticmethod
+    def _world_from_tag_transform(landmark_heading: float, landmark_xy: tuple[float, float]) -> np.ndarray:
+        z_tag_world = np.array(
+            [np.cos(landmark_heading), np.sin(landmark_heading), 0.0],
+            dtype=float,
+        )
+        y_tag_world = np.array([0.0, 0.0, -1.0], dtype=float)
+        x_tag_world = np.cross(y_tag_world, z_tag_world)
+        x_tag_world /= np.linalg.norm(x_tag_world)
+        R_world_from_tag = np.column_stack([x_tag_world, y_tag_world, z_tag_world])
+        t_world_from_tag = np.array([landmark_xy[0], landmark_xy[1], 0.0], dtype=float)
+        return MissionRuntime._transform_from_rotation_translation(
+            R_world_from_tag,
+            t_world_from_tag,
+        )
+
+    @staticmethod
+    def _planar_pose_from_transform(T_world_robot: np.ndarray) -> tuple[float, float, float]:
+        x = float(T_world_robot[0, 3])
+        y = float(T_world_robot[1, 3])
+        yaw = float(np.arctan2(T_world_robot[1, 0], T_world_robot[0, 0]))
+        return x, y, wrap_to_pi(yaw)
 
     def _coerce_global_apriltag_measurement(
         self, pose: Any
@@ -405,19 +459,20 @@ class MissionRuntime:
                     continue
                 if not isinstance(raw_tag_pose, (tuple, list)) or len(raw_tag_pose) != 2:
                     continue
-                _, t = raw_tag_pose
-                t = np.asarray(t, dtype=float).reshape(-1)
-                if t.size < 3:
-                    continue
+                R_ct, t_ct = raw_tag_pose
+                R_ct = np.asarray(R_ct, dtype=float).reshape(3, 3)
+                t_ct = np.asarray(t_ct, dtype=float).reshape(3)
 
-                tag_offset_robot = self._camera_optical_point_to_robot_xy(t)
-
-                robot_yaw = wrap_to_pi(landmark.heading + np.pi - self.camera_to_robot.yaw)
-                c = np.cos(robot_yaw)
-                s = np.sin(robot_yaw)
-                rot_robot_world = np.array([[c, -s], [s, c]], dtype=float)
-                robot_world = np.asarray(landmark.point, dtype=float) - rot_robot_world @ tag_offset_robot
-                measurements.append((robot_world[0], robot_world[1], robot_yaw))
+                T_camera_from_tag = self._transform_from_rotation_translation(R_ct, t_ct)
+                T_tag_from_camera = self._invert_transform(T_camera_from_tag)
+                T_robot_from_camera = self._robot_from_camera_optical_transform()
+                T_camera_from_robot = self._invert_transform(T_robot_from_camera)
+                T_world_from_tag = self._world_from_tag_transform(
+                    landmark.heading,
+                    tuple(landmark.point),
+                )
+                T_world_from_robot = T_world_from_tag @ T_tag_from_camera @ T_camera_from_robot
+                measurements.append(self._planar_pose_from_transform(T_world_from_robot))
 
             if measurements:
                 meas = np.asarray(measurements, dtype=float)
@@ -528,8 +583,8 @@ class MissionRuntime:
                     return True
         return False
 
-    def _zero_mecanum_command(self) -> MecanumCommand:
-        return MecanumCommand(
+    def _zero_drive_command(self) -> DifferentialDriveCommand:
+        return DifferentialDriveCommand(
             vx=0.0,
             vy=0.0,
             omega=0.0,
@@ -652,7 +707,7 @@ class MissionRuntime:
                 cmd = self.controller.compute(state, goal_wp)
                 path_blocked = self._path_intersects_dynamic_obstacle(current_task, state)
                 if path_blocked:
-                    cmd = self._zero_mecanum_command()
+                    cmd = self._zero_drive_command()
                 self.blackboard.set("obstacle_blocking_path", path_blocked)
                 self.serial.send_wheel_cmd(*cmd.wheel_rates)
                 self.serial.flush_tx()
