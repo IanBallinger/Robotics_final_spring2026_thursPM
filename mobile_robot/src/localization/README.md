@@ -1,6 +1,6 @@
 # Localization filters
 
-This directory now includes a lightweight local 2D EKF/UKF implementation in `kf.py` inspired by the architecture of `robot_localization`.
+This directory now includes a lightweight local 2D EKF implementation in `kf.py` inspired by the architecture of `robot_localization`.
 
 ## State
 

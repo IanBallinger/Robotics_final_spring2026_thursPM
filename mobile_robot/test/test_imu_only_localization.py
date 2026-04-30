@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Test the 2D EKF/UKF with IMU-only updates and visualize the estimate.
+"""Test the 2D EKF with IMU-only updates and visualize the estimate.
 
 Modes
 -----
@@ -27,14 +27,14 @@ if SRC_DIR not in sys.path:
 from localization import (  # noqa: E402
     ExtendedKalmanFilter2D,
     IMUMeasurement,
-    UnscentedKalmanFilter2D,
 )
 from serial_connection.serial_con import SerialConnect  # noqa: E402
 
 
 def make_filter(filter_name: str, gyro_noise: float):
-    filter_cls = UnscentedKalmanFilter2D if filter_name == "ukf" else ExtendedKalmanFilter2D
-    return filter_cls(
+    if filter_name != "ekf":
+        raise ValueError(f"unsupported localization filter '{filter_name}'; only 'ekf' is supported")
+    return ExtendedKalmanFilter2D(
         initial_state=np.zeros(6),
         initial_covariance=np.diag([1e-4, 1e-4, 1e-4, 1e-3, 1e-3, 1e-3]),
         process_noise=np.diag([5e-4, 5e-4, 5e-4, 8e-3, 8e-3, 4e-3]),
@@ -357,7 +357,7 @@ def run_live_serial(args) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--filter", choices=["ekf", "ukf"], default="ekf")
+    parser.add_argument("--filter", choices=["ekf"], default="ekf")
     parser.add_argument("--dt", type=float, default=0.02)
     parser.add_argument("--duration", type=float, default=15.0)
     parser.add_argument("--accel-noise", type=float, default=0.03)

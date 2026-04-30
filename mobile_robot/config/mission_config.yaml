@@ -125,7 +125,7 @@ initial_state:
     y: 1.31
   heading: 0.0
 localization:
-  filter: ekf  # ekf or ukf
+  filter: ekf
   initial_state:
     x: 2.15
     y: 1.31

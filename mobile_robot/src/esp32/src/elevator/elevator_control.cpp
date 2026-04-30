@@ -11,6 +11,7 @@
 #include "PID.h"
 #include "util.h"
 #include "arm_control.h"
+#include "EncoderVelocity.h"
 
 
 #define TCAADDR 0x70
@@ -43,6 +44,17 @@ constexpr unsigned long CMD_TIMEOUT_MS = 250;
 constexpr bool SERIAL_DEBUG_TIMING = true;
 constexpr float MM_TO_M = 1.0f / 1000.0f;
 
+// Elevator encoder configuration.
+// By default this uses ENCODER1 on the elevator ESP32. Tune
+// ELEVATOR_METERS_PER_RAD and ELEVATOR_ENCODER_SIGN to match the pulley/lead
+// screw geometry and wiring direction.
+constexpr int ELEVATOR_ENCODER_A_PIN = ENCODER1_A_PIN;
+constexpr int ELEVATOR_ENCODER_B_PIN = ENCODER1_B_PIN;
+constexpr int ELEVATOR_ENCODER_CPR = CPR_312_RPM;
+constexpr float ELEVATOR_ENCODER_TAU_S = 0.05f;
+constexpr float ELEVATOR_ENCODER_SIGN = 1.0f;
+constexpr float ELEVATOR_METERS_PER_RAD = 0.005f;
+
 // Servo Arm setup and constants
 constexpr int ARM_SHOULDER_SERVO_PIN = 6;
 constexpr int ARM_ELBOW_SERVO_PIN = 7;
@@ -73,8 +85,16 @@ unsigned long last_ack_debug_ms = 0;
 unsigned long last_meas_debug_ms = 0;
 
 MotorDriver elevator_driver {A_DIR1, A_PWM1, 0};
+EncoderVelocity elevator_encoder {ELEVATOR_ENCODER_A_PIN,
+                                  ELEVATOR_ENCODER_B_PIN,
+                                  ELEVATOR_ENCODER_CPR,
+                                  ELEVATOR_ENCODER_TAU_S};
 Servo shoulder_servo;
 Servo elbow_servo;
+
+bool encoder_height_initialized = false;
+float encoder_zero_height_m = 0.0f;
+float encoder_zero_position_rad = 0.0f;
 
 #define Kp 3.0f
 #define Ki 0.0f
@@ -149,7 +169,7 @@ static bool handleArmCommand(const String& line, DesiredArmPosition& cmd) {
   return true;
 }
 
-static float readElevatorHeightMeters() {
+static float readTofElevatorHeightMeters() {
   tcaSelect(TOF_MUX_CHANNEL);
   VL53L0X_RangingMeasurementData_t measure;
   lox.rangingTest(&measure, false);
@@ -159,6 +179,35 @@ static float readElevatorHeightMeters() {
   }
 
   return static_cast<float>(measure.RangeMilliMeter) * MM_TO_M;
+}
+
+static void maybeInitializeEncoderHeight(float tof_height_m) {
+  if (encoder_height_initialized || isnan(tof_height_m)) {
+    return;
+  }
+  encoder_zero_height_m = tof_height_m;
+  encoder_zero_position_rad = ELEVATOR_ENCODER_SIGN * elevator_encoder.getPosition();
+  encoder_height_initialized = true;
+}
+
+static float readEncoderHeightMeters() {
+  if (!encoder_height_initialized) {
+    return NAN;
+  }
+  const float position_rad = ELEVATOR_ENCODER_SIGN * elevator_encoder.getPosition();
+  return encoder_zero_height_m +
+         (position_rad - encoder_zero_position_rad) * ELEVATOR_METERS_PER_RAD;
+}
+
+static float readElevatorHeightMeters() {
+  const float tof_height_m = readTofElevatorHeightMeters();
+  maybeInitializeEncoderHeight(tof_height_m);
+
+  const float encoder_height_m = readEncoderHeightMeters();
+  if (!isnan(encoder_height_m)) {
+    return encoder_height_m;
+  }
+  return tof_height_m;
 }
 
 static void applyElevatorCommand(const DesiredElevatorState& cmd,
@@ -220,6 +269,19 @@ static void publishElevatorMeasurement(float height_m) {
   printDebugTiming("ELV_MEAS", last_meas_debug_ms);
   Serial.print("ELV_MEAS,");
   Serial.println(height_m, 4);
+
+  const float encoder_position_rad = ELEVATOR_ENCODER_SIGN * elevator_encoder.getPosition();
+  const float encoder_velocity_rad_s = ELEVATOR_ENCODER_SIGN * elevator_encoder.getVelocity();
+  Serial.print("ELV_ENC,");
+  Serial.print(encoder_position_rad, 4);
+  Serial.print(",");
+  Serial.print(encoder_velocity_rad_s, 4);
+  Serial.print(",");
+  if (encoder_height_initialized) {
+    Serial.println(readEncoderHeightMeters(), 4);
+  } else {
+    Serial.println("nan");
+  }
 }
 
 static void stopElevator() {
@@ -299,8 +361,11 @@ void loop() {
   }
 
   if (has_pending_cmd && now - last_cmd_apply_ms >= CMD_APPLY_PERIOD_MS) {
-    // TODO: don't actually apply elevator command for now
-    // applyElevatorCommand(latest_rx_cmd, measured_height_m);
+    if (!isnan(measured_height_m)) {
+      applyElevatorCommand(latest_rx_cmd, measured_height_m);
+    } else {
+      elevator_driver.drive(0.0);
+    }
     ack_dirty = true;
     has_pending_cmd = false;
     last_cmd_apply_ms = now;

@@ -1,4 +1,4 @@
-"""Local 2D EKF/UKF pose estimator inspired by robot_localization.
+"""Local 2D EKF pose estimator inspired by robot_localization.
 
 This module provides lightweight nonlinear filters for fusing:
 - AprilTag global pose measurements: [x, y, yaw]
@@ -128,7 +128,7 @@ class WheelTwistMeasurement:
 
 
 class _BaseLocalizationFilter:
-    """Common utilities shared by the EKF and UKF implementations."""
+    """Common utilities shared by the localization filter implementation."""
 
     def __init__(
         self,
@@ -371,205 +371,10 @@ class ExtendedKalmanFilter2D(_BaseLocalizationFilter):
         return self.get_state()
 
 
-class UnscentedKalmanFilter2D(_BaseLocalizationFilter):
-    """Minimal 2D UKF for AprilTag + IMU + wheel-twist fusion."""
-
-    def __init__(
-        self,
-        initial_state: Optional[np.ndarray] = None,
-        initial_covariance: Optional[np.ndarray] = None,
-        process_noise: Optional[np.ndarray] = None,
-        apriltag_measurement_noise: Optional[np.ndarray] = None,
-        gyro_measurement_noise: Optional[np.ndarray] = None,
-        wheel_twist_measurement_noise: Optional[np.ndarray] = None,
-        alpha: float = 1e-1,
-        beta: float = 2.0,
-        kappa: float = 0.0,
-    ):
-        super().__init__(
-            initial_state=initial_state,
-            initial_covariance=initial_covariance,
-            process_noise=process_noise,
-            apriltag_measurement_noise=apriltag_measurement_noise,
-            gyro_measurement_noise=gyro_measurement_noise,
-            wheel_twist_measurement_noise=wheel_twist_measurement_noise,
-        )
-        self.alpha = alpha
-        self.beta = beta
-        self.kappa = kappa
-
-    def _sigma_point_weights(self) -> Tuple[np.ndarray, np.ndarray, float]:
-        n = STATE_DIM
-        lam = self.alpha**2 * (n + self.kappa) - n
-
-        wm = np.full(2 * n + 1, 1.0 / (2.0 * (n + lam)), dtype=float)
-        wc = np.full(2 * n + 1, 1.0 / (2.0 * (n + lam)), dtype=float)
-        wm[0] = lam / (n + lam)
-        wc[0] = wm[0] + (1.0 - self.alpha**2 + self.beta)
-        return wm, wc, lam
-
-    def _sigma_points(self) -> np.ndarray:
-        wm, _, lam = self._sigma_point_weights()
-        _ = wm  # suppress unused warning in pure Python linters
-
-        n = STATE_DIM
-        jitter = 1e-9 * np.eye(n)
-        sqrt = np.linalg.cholesky((n + lam) * (self.covariance + jitter))
-
-        sigma = np.zeros((2 * n + 1, n), dtype=float)
-        sigma[0] = self.state
-        for i in range(n):
-            sigma[i + 1] = self.state + sqrt[:, i]
-            sigma[n + i + 1] = self.state - sqrt[:, i]
-            sigma[i + 1, YAW] = wrap_angle(sigma[i + 1, YAW])
-            sigma[n + i + 1, YAW] = wrap_angle(sigma[n + i + 1, YAW])
-        return sigma
-
-    @staticmethod
-    def _mean_from_sigma_points(points: np.ndarray, weights: np.ndarray) -> np.ndarray:
-        mean = np.zeros(points.shape[1], dtype=float)
-        mean[:YAW] = np.sum(weights[:, None] * points[:, :YAW], axis=0)
-        mean[VX:] = np.sum(weights[:, None] * points[:, VX:], axis=0)
-        mean[PY] = np.sum(weights * points[:, PY])
-        mean[PX] = np.sum(weights * points[:, PX])
-
-        sin_sum = np.sum(weights * np.sin(points[:, YAW]))
-        cos_sum = np.sum(weights * np.cos(points[:, YAW]))
-        mean[YAW] = np.arctan2(sin_sum, cos_sum)
-        return mean
-
-    @staticmethod
-    def _state_diff(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-        d = np.asarray(a, dtype=float) - np.asarray(b, dtype=float)
-        d[YAW] = wrap_angle(d[YAW])
-        return d
-
-    @staticmethod
-    def _meas_diff_pose(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-        d = np.asarray(a, dtype=float) - np.asarray(b, dtype=float)
-        d[2] = wrap_angle(d[2])
-        return d
-
-    def predict(self, imu: IMUMeasurement, dt: float) -> np.ndarray:
-        if dt <= 0.0:
-            return self.get_state()
-
-        wm, wc, _ = self._sigma_point_weights()
-        sigma = self._sigma_points()
-        propagated = np.array([self._process_model(sp, imu, dt) for sp in sigma])
-
-        self.state = self._mean_from_sigma_points(propagated, wm)
-
-        P = np.zeros((STATE_DIM, STATE_DIM), dtype=float)
-        for i in range(propagated.shape[0]):
-            dx = self._state_diff(propagated[i], self.state)
-            P += wc[i] * np.outer(dx, dx)
-        self.covariance = P + self.process_noise * dt
-        self.state[YAW] = wrap_angle(self.state[YAW])
-        return self.get_state()
-
-    def update_apriltag(self, measurement: AprilTagMeasurement) -> np.ndarray:
-        z = measurement.as_vector()
-        z[2] = wrap_angle(z[2])
-        R = (
-            self.apriltag_measurement_noise
-            if measurement.covariance is None
-            else np.asarray(measurement.covariance, dtype=float).reshape(POSE_MEAS_DIM, POSE_MEAS_DIM)
-        )
-
-        wm, wc, _ = self._sigma_point_weights()
-        sigma = self._sigma_points()
-        meas_sigma = np.array([self._pose_measurement_model(sp) for sp in sigma])
-
-        z_pred = np.zeros(POSE_MEAS_DIM, dtype=float)
-        z_pred[0] = np.sum(wm * meas_sigma[:, 0])
-        z_pred[1] = np.sum(wm * meas_sigma[:, 1])
-        z_pred[2] = np.arctan2(
-            np.sum(wm * np.sin(meas_sigma[:, 2])),
-            np.sum(wm * np.cos(meas_sigma[:, 2])),
-        )
-
-        S = np.zeros((POSE_MEAS_DIM, POSE_MEAS_DIM), dtype=float)
-        Pxz = np.zeros((STATE_DIM, POSE_MEAS_DIM), dtype=float)
-        for i in range(meas_sigma.shape[0]):
-            dz = self._meas_diff_pose(meas_sigma[i], z_pred)
-            dx = self._state_diff(sigma[i], self.state)
-            S += wc[i] * np.outer(dz, dz)
-            Pxz += wc[i] * np.outer(dx, dz)
-        S += R
-
-        innovation = self._meas_diff_pose(z, z_pred)
-        K = Pxz @ np.linalg.inv(S)
-        self.state = self.state + K @ innovation
-        self.state[YAW] = wrap_angle(self.state[YAW])
-        self.covariance = self.covariance - K @ S @ K.T
-        return self.get_state()
-
-    def update_imu(self, imu: IMUMeasurement) -> np.ndarray:
-        z = np.array([imu.wz], dtype=float)
-        R = self.gyro_measurement_noise
-
-        wm, wc, _ = self._sigma_point_weights()
-        sigma = self._sigma_points()
-        meas_sigma = np.array([self._gyro_measurement_model(sp) for sp in sigma])
-        z_pred = np.sum(wm[:, None] * meas_sigma, axis=0)
-
-        S = np.zeros((GYRO_MEAS_DIM, GYRO_MEAS_DIM), dtype=float)
-        Pxz = np.zeros((STATE_DIM, GYRO_MEAS_DIM), dtype=float)
-        for i in range(meas_sigma.shape[0]):
-            dz = meas_sigma[i] - z_pred
-            dx = self._state_diff(sigma[i], self.state)
-            S += wc[i] * np.outer(dz, dz)
-            Pxz += wc[i] * np.outer(dx, dz)
-        S += R
-
-        innovation = z - z_pred
-        K = Pxz @ np.linalg.inv(S)
-        self.state = self.state + K @ innovation
-        self.state[YAW] = wrap_angle(self.state[YAW])
-        self.covariance = self.covariance - K @ S @ K.T
-        return self.get_state()
-
-    def update_wheel_twist(self, measurement: WheelTwistMeasurement) -> np.ndarray:
-        z = measurement.as_vector()
-        R = (
-            self.wheel_twist_measurement_noise
-            if measurement.covariance is None
-            else np.asarray(measurement.covariance, dtype=float).reshape(
-                WHEEL_TWIST_MEAS_DIM, WHEEL_TWIST_MEAS_DIM
-            )
-        )
-
-        wm, wc, _ = self._sigma_point_weights()
-        sigma = self._sigma_points()
-        meas_sigma = np.array([self._wheel_twist_measurement_model(sp) for sp in sigma])
-        z_pred = np.sum(wm[:, None] * meas_sigma, axis=0)
-
-        S = np.zeros((WHEEL_TWIST_MEAS_DIM, WHEEL_TWIST_MEAS_DIM), dtype=float)
-        Pxz = np.zeros((STATE_DIM, WHEEL_TWIST_MEAS_DIM), dtype=float)
-        for i in range(meas_sigma.shape[0]):
-            dz = meas_sigma[i] - z_pred
-            dx = self._state_diff(sigma[i], self.state)
-            S += wc[i] * np.outer(dz, dz)
-            Pxz += wc[i] * np.outer(dx, dz)
-        S += R
-
-        innovation = z - z_pred
-        K = Pxz @ np.linalg.inv(S)
-        self.state = self.state + K @ innovation
-        self.state[YAW] = wrap_angle(self.state[YAW])
-        self.covariance = self.covariance - K @ S @ K.T
-        return self.get_state()
-
-
-# Backward-compatible alias for the original placeholder class name.
-
-
 __all__ = [
     "AprilTagMeasurement",
     "ExtendedKalmanFilter2D",
     "IMUMeasurement",
-    "UnscentedKalmanFilter2D",
     "WheelTwistMeasurement",
     "wrap_angle",
 ]

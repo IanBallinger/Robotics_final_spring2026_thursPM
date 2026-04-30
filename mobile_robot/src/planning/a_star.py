@@ -103,14 +103,14 @@ class AStar(Planner):
                 # no diagonal neighbors
                 if di == 0 and dj == 0:
                     continue
-                if di == -1 and dj == -1:
-                    continue
-                if di == 1 and dj == 1:
-                    continue
-                if di == -1 and dj == 1:
-                    continue
-                if di == 1 and dj == -1:
-                    continue
+                # if di == -1 and dj == -1:
+                #     continue
+                # if di == 1 and dj == 1:
+                #     continue
+                # if di == -1 and dj == 1:
+                #     continue
+                # if di == 1 and dj == -1:
+                #     continue
                 ni, nj = cell[0] + di, cell[1] + dj
                 if self.map.is_open_cell(ni, nj):
                     neighbors.append(self.__cell_to_point((ni, nj)))

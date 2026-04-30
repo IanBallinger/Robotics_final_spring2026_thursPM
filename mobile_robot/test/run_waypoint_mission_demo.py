@@ -38,10 +38,9 @@ from localization import (  # noqa: E402
     AprilTagMeasurement,
     ExtendedKalmanFilter2D,
     IMUMeasurement,
-    UnscentedKalmanFilter2D,
 )
 from localization.map import Map  # noqa: E402
-from planning.a_star import AStar, waypoints_from_polyline  # noqa: E402
+from planning.a_star import AStar, Waypoint, waypoints_from_polyline  # noqa: E402
 from sim_position_control import integrate_step  # noqa: E402
 from serial_connection.serial_con import SerialConnect  # noqa: E402
 
@@ -81,6 +80,25 @@ def tick_and_print(
     print(py_trees.display.unicode_tree(tree.root, show_status=True))
 
 
+def simplify_polyline(polyline: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Keep only turning points so the differential-drive demo does not stop at every grid cell."""
+    if len(polyline) <= 2:
+        return list(polyline)
+
+    simplified = [polyline[0]]
+    prev_dx = polyline[1][0] - polyline[0][0]
+    prev_dy = polyline[1][1] - polyline[0][1]
+    for i in range(1, len(polyline) - 1):
+        dx = polyline[i + 1][0] - polyline[i][0]
+        dy = polyline[i + 1][1] - polyline[i][1]
+        if not np.isclose(dx, prev_dx) or not np.isclose(dy, prev_dy):
+            simplified.append(polyline[i])
+        prev_dx = dx
+        prev_dy = dy
+    simplified.append(polyline[-1])
+    return simplified
+
+
 def plan_tasks(map_: Map, tasks: list[Task]) -> list[PlannedTask]:
     planner = AStar(map_)
     planned: list[PlannedTask] = []
@@ -90,12 +108,13 @@ def plan_tasks(map_: Map, tasks: list[Task]) -> list[PlannedTask]:
         polyline = planner.generate_plan(start_xy, goal_xy)
         if not polyline:
             raise RuntimeError(f"A* found no path for task {task.name}")
+        sparse_polyline = simplify_polyline(polyline)
         planned.append(
             PlannedTask(
                 task=task,
-                polyline=polyline,
+                polyline=sparse_polyline,
                 waypoints=waypoints_from_polyline(
-                    polyline, end_heading=task.goal.heading
+                    sparse_polyline, end_heading=task.goal.heading
                 ),
             )
         )
@@ -120,6 +139,9 @@ def load_localization_config(tasks_path: str | os.PathLike[str]) -> Localization
                 float(init.get("vx_body", 0.0)),
                 float(init.get("vy_body", 0.0)),
                 float(init.get("wz", 0.0)),
+                float(init.get("b_ax", 0.0)),
+                float(init.get("b_ay", 0.0)),
+                float(init.get("b_wz", 0.0)),
             ],
             dtype=float,
         ),
@@ -139,10 +161,11 @@ def load_localization_config(tasks_path: str | os.PathLike[str]) -> Localization
 
 
 def create_localization_filter(config: LocalizationSimConfig):
-    filter_cls = (
-        UnscentedKalmanFilter2D if config.filter_name == "ukf" else ExtendedKalmanFilter2D
-    )
-    return filter_cls(
+    if config.filter_name != "ekf":
+        raise ValueError(
+            f"unsupported localization filter '{config.filter_name}'; only 'ekf' is supported"
+        )
+    return ExtendedKalmanFilter2D(
         initial_state=config.initial_state,
         initial_covariance=config.initial_covariance,
         process_noise=config.process_noise,
@@ -365,7 +388,6 @@ def simulate_active_task(
     y: float,
     psi: float,
     vx_body: float,
-    vy_body: float,
     omega: float,
     *,
     dt: float,
@@ -373,7 +395,7 @@ def simulate_active_task(
     capture_radius: float,
     tau_v: float,
     tau_w: float,
-) -> tuple[float, float, float, float, float, float]:
+) -> tuple[float, float, float, float, float, tuple[float, float, float, float]]:
     n_steps = max(1, int(np.ceil(sim_time_per_tick / dt)))
 
     for _ in range(n_steps):
@@ -383,8 +405,18 @@ def simulate_active_task(
             planned.waypoint_index += 1
             goal_wp = planned.waypoints[planned.waypoint_index]
 
-        vx_world = vx_body * np.cos(psi) - vy_body * np.sin(psi)
-        vy_world = vx_body * np.sin(psi) + vy_body * np.cos(psi)
+        # For intermediate path vertices, steer toward the waypoint position and
+        # only enforce a specific heading at the final task goal. This avoids
+        # getting stuck trying to match sharp per-vertex tangent headings at
+        # A* corners with a differential-drive robot.
+        if planned.waypoint_index < len(planned.waypoints) - 1:
+            goal_wp = Waypoint(
+                xy=goal_wp.xy,
+                heading=float(np.arctan2(goal_wp.xy[1] - y, goal_wp.xy[0] - x)),
+            )
+
+        vx_world = vx_body * np.cos(psi)
+        vy_world = vx_body * np.sin(psi)
         state = MapPoseVelocity(
             x=x,
             y=y,
@@ -393,23 +425,25 @@ def simulate_active_task(
             vy=float(vy_world),
             heading_rate=omega,
         )
-        cmd = controller.compute(state, goal_wp)
-        x, y, psi, vx_body, vy_body, omega = integrate_step(
+        cmd = controller.compute(
+            state,
+            goal_wp,
+            final_pose_mode=planned.waypoint_index == len(planned.waypoints) - 1,
+        )
+        x, y, psi, vx_body, omega = integrate_step(
             x,
             y,
             psi,
             vx_body,
-            vy_body,
             omega,
             cmd.vx,
-            cmd.vy,
             cmd.omega,
             dt,
             tau_v,
             tau_w,
         )
 
-    return x, y, psi, vx_body, vy_body, omega, cmd.wheel_rates
+    return x, y, psi, vx_body, omega, cmd.wheel_rates
 
 
 def main():
@@ -427,13 +461,6 @@ def main():
     p.add_argument(
         "--capture", type=float, default=0.05, help="waypoint capture radius (m)"
     )
-    p.add_argument(
-        "--v-des",
-        type=float,
-        default=0.25,
-        help="controller translational speed cap (m/s)",
-    )
-    p.add_argument("--omega-des", type=float, default=0.0)
     p.add_argument("--tau-v", type=float, default=0.12, help="first-order lag on v (s)")
     p.add_argument(
         "--tau-w", type=float, default=0.12, help="first-order lag on omega (s)"
@@ -471,7 +498,6 @@ def main():
     localization_config = load_localization_config(tasks_path)
     task_lookup = {task.name: task for task in tasks}
     map_ = load_map(tasks_path)
-    map_.plot()
     planned_tasks = plan_tasks(map_, tasks)
     planned_lookup = {planned.task.name: planned for planned in planned_tasks}
 
@@ -502,12 +528,6 @@ def main():
     tree.setup(timeout=2.0)
 
     controller = CascadedWaypointController()
-    controller.kv_inner = 10
-    controller.ky_inner = 10
-    controller.komega_inner = 10
-    controller.k_rho = 1
-    controller.k_alpha = 1
-    controller.k_heading = 1
     x = float(tasks[0].start.x)
     y = float(tasks[0].start.y)
     psi = float(tasks[0].start.heading)
@@ -558,17 +578,15 @@ def main():
         planned = planned_lookup[previous_task]
         # serial_con.read_parsed()
         prev_vx_body = vx_body
-        prev_vy_body = vy_body
         prev_omega = omega
 
-        x, y, psi, vx_body, vy_body, omega, wheel_rates = simulate_active_task(
+        x, y, psi, vx_body, omega, wheel_rates = simulate_active_task(
             planned,
             controller,
             x,
             y,
             psi,
             vx_body,
-            vy_body,
             omega,
             dt=args.dt,
             sim_time_per_tick=args.sim_time_per_tick,
@@ -576,6 +594,7 @@ def main():
             tau_v=args.tau_v,
             tau_w=args.tau_w,
         )
+        vy_body = 0.0
         # serial_con.send_wheel_cmd(
         #     wheel_rates[0], wheel_rates[1], wheel_rates[2], wheel_rates[3]
         # )
@@ -585,7 +604,7 @@ def main():
         sim_time += args.sim_time_per_tick
         imu_dt = args.sim_time_per_tick
         ax_body = (vx_body - prev_vx_body) / max(imu_dt, 1e-6)
-        ay_body = (vy_body - prev_vy_body) / max(imu_dt, 1e-6)
+        ay_body = 0.0
         imu_meas = IMUMeasurement(
             ax=ax_body + rng.normal(0.0, localization_config.imu_accel_noise_std),
             ay=ay_body + rng.normal(0.0, localization_config.imu_accel_noise_std),
@@ -613,9 +632,12 @@ def main():
         est_traj_y.append(est_y)
 
         active_task = task_lookup[previous_task]
-        goal_error = float(np.hypot(active_task.goal.x - est_x, active_task.goal.y - est_y))
-        heading_error = float(wrap_to_pi(active_task.goal.heading - est_psi))
-        speed = float(np.hypot(est_state[3], est_state[4]))
+        # Drive task completion off the simulated ground-truth robot pose in this
+        # demo. The localization filter is still plotted, but its noisy/divergent
+        # estimate should not prevent task transitions in a controller demo.
+        goal_error = float(np.hypot(active_task.goal.x - x, active_task.goal.y - y))
+        heading_error = float(wrap_to_pi(active_task.goal.heading - psi))
+        speed = float(abs(vx_body))
 
         current_elevator_height_m = float(bb.get("current_elevator_height_m") or 0.0)
         desired_elevator_height_m = float(active_task.desired_elevator_height_m)

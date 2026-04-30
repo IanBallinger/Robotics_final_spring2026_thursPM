@@ -4,7 +4,6 @@ from .kf import (
     AprilTagMeasurement,
     ExtendedKalmanFilter2D,
     IMUMeasurement,
-    UnscentedKalmanFilter2D,
     WheelTwistMeasurement,
 )
 from .map import Landmark, Map, Obstacle
@@ -16,6 +15,5 @@ __all__ = [
     "Landmark",
     "Map",
     "Obstacle",
-    "UnscentedKalmanFilter2D",
     "WheelTwistMeasurement",
 ]

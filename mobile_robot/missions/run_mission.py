@@ -3,7 +3,7 @@
 
 Loads `config/tasks.yaml`, initializes:
 - serial connection to the ESP32 wheel controller
-- EKF/UKF localization
+- EKF localization
 - optional AprilTag camera localization
 - A* path planning
 - waypoint controller
@@ -47,7 +47,6 @@ from localization import (  # noqa: E402
     AprilTagMeasurement,
     ExtendedKalmanFilter2D,
     IMUMeasurement,
-    UnscentedKalmanFilter2D,
     WheelTwistMeasurement,
 )
 
@@ -311,12 +310,11 @@ class MissionRuntime:
         return localization, runtime_cfg, camera_to_robot
 
     def _create_localization_filter(self):
-        filter_cls = (
-            UnscentedKalmanFilter2D
-            if self.localization_config.filter_name == "ukf"
-            else ExtendedKalmanFilter2D
-        )
-        return filter_cls(
+        if self.localization_config.filter_name != "ekf":
+            raise ValueError(
+                f"unsupported localization filter '{self.localization_config.filter_name}'; only 'ekf' is supported"
+            )
+        return ExtendedKalmanFilter2D(
             initial_state=self.localization_config.initial_state,
             initial_covariance=self.localization_config.initial_covariance,
             process_noise=self.localization_config.process_noise,
