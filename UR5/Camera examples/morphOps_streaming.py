@@ -28,7 +28,7 @@ def send_detection(x_cm, y_cm, color_name, bbox_info=None):
         # Convert cm to meters for Julia plotter
         x_m = x_cm / 100.0
         y_m = y_cm / 100.0
-        z_m = 0.0  # No depth from 2D camera
+        z_m = 0.1  # Fixed height: top-down camera, z represents camera plane
         
         packet = {
             "position": [x_m, y_m, z_m],

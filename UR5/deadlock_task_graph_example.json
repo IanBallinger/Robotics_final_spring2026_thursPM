@@ -1,0 +1,43 @@
+{
+  "schema_version": "1.0",
+  "graph_name": "deadlock_demo",
+  "primary_task": {
+    "name": "example",
+    "task_id": "hold_left",
+    "points": 5,
+    "arm": "left",
+    "blocks_arms": ["left"],
+    "prerequisites": [],
+    "points_if_completed": {},
+    "params": {}
+  },
+  "autonomy_queue": [
+    {
+      "name": "example",
+      "task_id": "wait_on_left",
+      "points": 9,
+      "arm": "left",
+      "prerequisites": ["hold_left"],
+      "params": {}
+    },
+    {
+      "name": "example",
+      "task_id": "cycle_a",
+      "points": 4,
+      "arm": "right",
+      "prerequisites": ["cycle_b"],
+      "params": {}
+    },
+    {
+      "name": "example",
+      "task_id": "cycle_b",
+      "points": 4,
+      "arm": "right",
+      "prerequisites": ["cycle_a"],
+      "params": {}
+    }
+  ],
+  "runtime": {
+    "autonomy_max_tasks": 0
+  }
+}

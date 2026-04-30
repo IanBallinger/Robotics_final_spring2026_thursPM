@@ -212,15 +212,39 @@ class UR5Arm:
         Returns:
             bool: True if path execution succeeded, False otherwise
         """
+        if not waypoints:
+            if self.verbose:
+                print("[PATH] Empty waypoint list; nothing to execute")
+            return True
+
         try:
-            # TODO: Implement path following. 
-            # see https://sdurobotics.gitlab.io/ur_rtde/examples/examples.html#movel-path-with-blending-example
-            # robustness principal:
-            # if path is [[1,2,3,4,5,6],...] use movel(pose, speed, acc) => no blending
-            # else use movel(path) (but check entry length == 9) => use user specified blending.
-            #long story short: path entries list should be appended with vel, acc, and blend radius per entry
             if self.verbose:
                 print(f"[PATH] Executing path with {len(waypoints)} waypoints")
+
+            for idx, waypoint in enumerate(waypoints):
+                if len(waypoint) < 6:
+                    raise ValueError(
+                        f"Waypoint {idx} must include at least 6 values [x, y, z, rx, ry, rz]"
+                    )
+
+                pose = waypoint[:6]
+                speed = waypoint[6] if len(waypoint) >= 7 else None
+                acceleration = waypoint[7] if len(waypoint) >= 8 else None
+
+                # Execute each segment synchronously to preserve order.
+                # If asynchronous=True, only the final segment returns immediately.
+                segment_async = bool(asynchronous and idx == len(waypoints) - 1)
+
+                ok = self.move_linear_to_pose(
+                    pose,
+                    speed=speed,
+                    acceleration=acceleration,
+                    asynchronous=segment_async,
+                )
+                if not ok:
+                    print(f"[ERROR] Path failed at waypoint {idx}: {waypoint}")
+                    return False
+
             return True
         except Exception as e:
             print(f"[ERROR] path execution failed: {str(e)}")

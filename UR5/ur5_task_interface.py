@@ -35,6 +35,7 @@ class UR5TaskInterface(ABC):
             robot_ip (str): IP address of UR5 controller
         """
         self.robot_ip = robot_ip
+        self.robot = None
         if connect_immediately: #useful for prototyping at task layer.
             self.robot = UR5Arm(self.robot_ip, verbose=True)
 

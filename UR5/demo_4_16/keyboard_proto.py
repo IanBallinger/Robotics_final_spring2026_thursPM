@@ -31,11 +31,12 @@ def pressed(key):
         if key.char == "g":
             gripperstate = not gripperstate
 
+
+
 def released(key):
     if key.char in directions.keys():
         directions[key.char] = False
         print(f"{key.char} released")
-
 
 with Listener(on_press = pressed, on_release = released) as listener:
     #### SETUP ####
@@ -175,12 +176,6 @@ with Listener(on_press = pressed, on_release = released) as listener:
     gripper_L.set_speed(100)
     gripper_L.open()
 
-    gripper_R = RobotiqGripper(rtde_c_R)
-    gripper_R.activate()
-    gripper_R.set_force(50)
-    gripper_R.set_speed(100)
-    gripper_R.open()
-
     # gripper_R = RobotiqGripper(rtde_c_R)
     # gripper_R.activate()
     # gripper_R.set_force(50)
@@ -199,42 +194,31 @@ with Listener(on_press = pressed, on_release = released) as listener:
         
         if True not in directions.values():
             rtde_c_L.forceModeStop()
-            rtde_c_R.forceModeStop()
         if directions["a"]:
             rtde_c_L.forceMode(task_frame_L, selection_vector_x, wrench_pos_x, force_type, limits)
-            rtde_c_R.forceMode(task_frame_R, selection_vector_x, wrench_pos_x, force_type, limits)
         if directions["d"]:
             rtde_c_L.forceMode(task_frame_L, selection_vector_x, wrench_neg_x, force_type, limits)
-            rtde_c_R.forceMode(task_frame_R, selection_vector_x, wrench_neg_x, force_type, limits)
         if directions["w"]:
             rtde_c_L.forceMode(task_frame_L, selection_vector_y, wrench_pos_y, force_type, limits)
-            rtde_c_R.forceMode(task_frame_R, selection_vector_y, wrench_pos_y, force_type, limits)
         if directions["s"]:
             rtde_c_L.forceMode(task_frame_L, selection_vector_y, wrench_neg_y, force_type, limits)
-            rtde_c_R.forceMode(task_frame_R, selection_vector_y, wrench_neg_y, force_type, limits)
         if directions["q"]:
             rtde_c_L.forceMode(task_frame_L, selection_vector_z, wrench_pos_z, force_type, limits)
-            rtde_c_R.forceMode(task_frame_R, selection_vector_z, wrench_pos_z, force_type, limits)
         if directions["e"]:
             rtde_c_L.forceMode(task_frame_L, selection_vector_z, wrench_neg_z, force_type, limits)
-            rtde_c_R.forceMode(task_frame_R, selection_vector_z, wrench_neg_z, force_type, limits)
         
         if gripperstate != prevstate:
             if gripperstate:
                 gripper_L.open()
-                gripper_R.open()
             else:
                 gripper_L.close()
-                gripper_R.close()
         
         prevstate = gripperstate
         # Wait until the next 2ms control cycle begins
         rtde_c_L.waitPeriod(t_start)
-        
 
-    # Stop the program
+
+    # Stop force mode and move back to initial position
     rtde_c_L.forceModeStop()
+    # rtde_c_L.moveJ(joint_q_L)
     listener.join()
-
-
-
