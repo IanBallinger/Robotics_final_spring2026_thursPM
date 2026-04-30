@@ -164,10 +164,7 @@ class MissionRuntime:
                 self.tasks_path, self.localization_cfg_path, self.camera_cfg_path
             )
         )
-        import pdb
-
-        pdb.set_trace()
-
+        
         self.planned_tasks = self._plan_tasks(self.map_, self.tasks)
         self.planned_lookup = {
             planned.task.name: planned for planned in self.planned_tasks
