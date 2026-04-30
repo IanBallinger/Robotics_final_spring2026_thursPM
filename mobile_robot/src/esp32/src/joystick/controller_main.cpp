@@ -56,13 +56,11 @@ static JoystickReading lowPassReading(JoystickReading current,
 
 static void printDebug(const JoystickReading& leftStick, const JoystickReading& rightStick) {
     Serial.printf(
-        "POTS raw_fb=%d raw_strafe=%d raw_turn=%d mapped_fb=%.3f mapped_strafe=%.3f mapped_turn=%.3f joy1(x,y)=(%.3f, %.3f) joy2(x,y)=(%.3f, %.3f)\n",
+        "POTS raw_fb=%d raw_turn=%d mapped_fb=%.3f mapped_turn=%.3f joy1(x,y)=(%.3f, %.3f) joy2(x,y)=(%.3f, %.3f)\n",
         joystickRangeToAnalog(leftStick.y),
         joystickRangeToAnalog(rightStick.y),
-        joystickRangeToAnalog(leftStick.x),
         leftStick.y,
         rightStick.y,
-        leftStick.x,
         controllerMessage.joystick1.x,
         controllerMessage.joystick1.y,
         controllerMessage.joystick2.x,
@@ -96,16 +94,13 @@ void loop() {
 
         controllerMessage.millis = now;
 
-        // Based on the observed controller wiring:
+        // Differential-drive mapping:
         // - left-stick forward/back comes from joystick1.y
-        // - left/right translation comes from joystick2.y
-        // - turn-in-place comes from joystick1.x
-        controllerMessage.joystick1.x = filteredRightCommand.y;
+        // - right-stick up/down comes from joystick2.y and commands turn-in-place
+        controllerMessage.joystick1.x = 0.0f;
         controllerMessage.joystick1.y = filteredLeftCommand.y;
-
-        // right stick handles turning
         controllerMessage.joystick2.x = 0.0f;
-        controllerMessage.joystick2.y = filteredLeftCommand.x;
+        controllerMessage.joystick2.y = filteredRightCommand.y;
 
         if (!(prevControllerMessage == controllerMessage)) {
             sendControllerData();

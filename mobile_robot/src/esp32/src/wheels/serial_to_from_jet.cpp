@@ -45,7 +45,6 @@ constexpr float ENCODER_SIGN[num_wheels] = {1.0f, -1.0f, 1.0f, -1.0f};
 
 constexpr float JOYSTICK_DEADBAND = 0.1f;
 constexpr float JOYSTICK_MAX_FORWARD = 6.0f;
-constexpr float JOYSTICK_MAX_STRAFE = 6.0f;
 constexpr float JOYSTICK_MAX_TURN = 3.0f;
 
 // User-defined serial/control rates.
@@ -163,9 +162,10 @@ bool handleWheelCommand(const String& line, DesiredWheelVel& des_wheel_spd) {
     return false;
   }
 
-  // Match wheel_pid_tuner.cpp command polarity.
+  // Match physical wheel polarity:
+  // w1 = left_front, w2 = right_front, w3 = left_rear, w4 = right_rear.
   des_wheel_spd.w2 *= -1.0f;
-  des_wheel_spd.w3 *= -1.0f;
+  des_wheel_spd.w4 *= -1.0f;
 
   return true;
 }
@@ -233,7 +233,6 @@ static void applyWheelCommand(const DesiredWheelVel& cmd) {
 static bool joystickToWheelCommand(const ControllerMessage& controller_msg,
                                   DesiredWheelVel& des_wheel_spd) {
   const float forward_input = controller_msg.joystick1.y;
-  const float strafe_input = controller_msg.joystick1.x;
   const float turn_input = controller_msg.joystick2.y;
 
   const float forward = fabs(forward_input) < JOYSTICK_DEADBAND
@@ -241,11 +240,6 @@ static bool joystickToWheelCommand(const ControllerMessage& controller_msg,
                             : static_cast<float>(mapDouble(forward_input, -1.0, 1.0,
                                                            -JOYSTICK_MAX_FORWARD,
                                                            JOYSTICK_MAX_FORWARD));
-  const float strafe = fabs(strafe_input) < JOYSTICK_DEADBAND
-                           ? 0.0f
-                           : static_cast<float>(mapDouble(strafe_input, -1.0, 1.0,
-                                                          -JOYSTICK_MAX_STRAFE,
-                                                          JOYSTICK_MAX_STRAFE));
   const float turn = fabs(turn_input) < JOYSTICK_DEADBAND
                          ? 0.0f
                          : static_cast<float>(mapDouble(turn_input, -1.0, 1.0,
@@ -254,33 +248,28 @@ static bool joystickToWheelCommand(const ControllerMessage& controller_msg,
 
   Serial.print("JOY_CMD,forward,");
   Serial.print(forward);
-  Serial.print(",strafe,");
-  Serial.print(strafe);
   Serial.print(",turn,");
   Serial.println(turn);
 
-  // Mecanum mixing:
+  // Differential/skid-steer mixing:
   //   joystick1.y -> forward/back
-  //   joystick1.x -> left/right translation (strafe)
   //   joystick2.y -> turn in place
   // Wheel command order here is:
-  //   w1 = front_left
-  //   w2 = back_left
-  //   w3 = front_right
-  //   w4 = back_right
-  const float front_left = forward + strafe + turn;
-  const float back_left = forward - strafe + turn;
-  const float front_right = forward - strafe - turn;
-  const float back_right = forward + strafe - turn;
+  //   w1 = left_front
+  //   w2 = right_front
+  //   w3 = left_rear
+  //   w4 = right_rear
+  const float left = forward - turn;
+  const float right = forward + turn;
 
   String wheel_cmd_line = "WHL_CMD,";
-  wheel_cmd_line += String(front_left, 4);
+  wheel_cmd_line += String(left, 4);
   wheel_cmd_line += ",";
-  wheel_cmd_line += String(back_left, 4);
+  wheel_cmd_line += String(right, 4);
   wheel_cmd_line += ",";
-  wheel_cmd_line += String(front_right, 4);
+  wheel_cmd_line += String(left, 4);
   wheel_cmd_line += ",";
-  wheel_cmd_line += String(back_right, 4);
+  wheel_cmd_line += String(right, 4);
 
   Serial.println(wheel_cmd_line);
 

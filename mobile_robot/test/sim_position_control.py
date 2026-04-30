@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """
-Simulate Mecanum-body dynamics + ``CascadedWaypointController`` along an A* path
-from a start grid cell to a goal grid cell (same map model as ``a_star`` demo).
+Simulate differential-drive body dynamics + ``CascadedWaypointController`` along
+an A* path from a start grid cell to a goal grid cell (same map model as
+``a_star`` demo).
 
 Run from repo root:
   python mobile_robot/test/sim_position_control.py --start 0 0 --goal 14 2
@@ -24,7 +25,7 @@ from guidance.waypoint_controller import (  # noqa: E402
     CascadedWaypointController,
     MapPoseVelocity,
 )
-from localization.map import Map, Obstacle, Landmark  # noqa: E402
+from localization.map import Landmark, Map, Obstacle  # noqa: E402
 from planning.a_star import AStar, waypoints_from_polyline  # noqa: E402
 
 
@@ -46,27 +47,24 @@ def cell_start_pose(
     return float(x), float(y), float(heading)
 
 
+
 def integrate_step(
     x: float,
     y: float,
     psi: float,
     vx_body: float,
-    vy_body: float,
     omega: float,
     vx_cmd: float,
-    vy_cmd: float,
     omega_cmd: float,
     dt: float,
     tau_v: float,
     tau_w: float,
-) -> tuple[float, float, float, float, float, float]:
+) -> tuple[float, float, float, float, float]:
     if tau_v > 0.0:
         a_v = min(1.0, dt / tau_v)
         vx_body_n = vx_body + a_v * (vx_cmd - vx_body)
-        vy_body_n = vy_body + a_v * (vy_cmd - vy_body)
     else:
         vx_body_n = vx_cmd
-        vy_body_n = vy_cmd
 
     if tau_w > 0.0:
         a_w = min(1.0, dt / tau_w)
@@ -76,11 +74,12 @@ def integrate_step(
 
     psi_n = psi + dt * omega_n
     c, s = np.cos(psi_n), np.sin(psi_n)
-    vx_world_n = vx_body_n * c - vy_body_n * s
-    vy_world_n = vx_body_n * s + vy_body_n * c
+    vx_world_n = vx_body_n * c
+    vy_world_n = vx_body_n * s
     x_n = x + dt * vx_world_n
     y_n = y + dt * vy_world_n
-    return x_n, y_n, psi_n, vx_body_n, vy_body_n, omega_n
+    return x_n, y_n, psi_n, vx_body_n, omega_n
+
 
 
 def run_simulation(
@@ -91,24 +90,22 @@ def run_simulation(
     dt: float,
     max_time: float,
     capture_radius: float,
-    v_des: float,
-    omega_des: float,
     tau_v: float,
     tau_w: float,
     show_plot: bool,
 ) -> None:
-    map = make_demo_map()
+    map_ = make_demo_map()
     si, sj = start_cell
     gi, gj = goal_cell
-    x, y, psi = cell_start_pose(map, si, sj, start_heading)
-    if not map.is_open_cell(gi, gj):
+    x, y, psi = cell_start_pose(map_, si, sj, start_heading)
+    if not map_.is_open_cell(gi, gj):
         raise ValueError(f"goal cell ({gi}, {gj}) is not an open map cell")
 
-    gx, gy = map.cell_center(gi, gj)
+    gx, gy = map_.cell_center(gi, gj)
     start_xy = (x, y)
     goal_xy = (float(gx), float(gy))
 
-    planner = AStar(map)
+    planner = AStar(map_)
     polyline = planner.generate_plan(start_xy, goal_xy)
     if not polyline:
         raise RuntimeError("A* found no path for the chosen start/goal cells")
@@ -117,7 +114,7 @@ def run_simulation(
     ctrl = CascadedWaypointController()
 
     wp_index = 0
-    vx_body, vy_body, omega = 0.0, 0.0, 0.0
+    vx_body, omega = 0.0, 0.0
     traj_x = [x]
     traj_y = [y]
 
@@ -134,7 +131,6 @@ def run_simulation(
     vy_bodys = [0.0]
     omegas = [0.0]
     vx_cmds: list[float] = [float("nan")]
-    vy_cmds: list[float] = [float("nan")]
     omega_cmds: list[float] = [float("nan")]
 
     for _ in range(n_steps):
@@ -144,8 +140,8 @@ def run_simulation(
             wp_index += 1
             goal_wp = wpts[wp_index]
 
-        vx_world = vx_body * np.cos(psi) - vy_body * np.sin(psi)
-        vy_world = vx_body * np.sin(psi) + vy_body * np.cos(psi)
+        vx_world = vx_body * np.cos(psi)
+        vy_world = vx_body * np.sin(psi)
         state = MapPoseVelocity(
             x=x,
             y=y,
@@ -154,27 +150,26 @@ def run_simulation(
             vy=float(vy_world),
             heading_rate=omega,
         )
-        cmd = ctrl.compute(state, goal_wp, v_des, omega_des)
+        cmd = ctrl.compute(state, goal_wp, final_pose_mode=wp_index == len(wpts) - 1)
 
-        x, y, psi, vx_body, vy_body, omega = integrate_step(
+        x, y, psi, vx_body, omega = integrate_step(
             x,
             y,
             psi,
             vx_body,
-            vy_body,
             omega,
             cmd.vx,
-            cmd.vy,
             cmd.omega,
             dt,
             tau_v,
             tau_w,
         )
+        vy_body = 0.0
         traj_x.append(x)
         traj_y.append(y)
         t += dt
-        vx_world_n = float(vx_body * np.cos(psi) - vy_body * np.sin(psi))
-        vy_world_n = float(vx_body * np.sin(psi) + vy_body * np.cos(psi))
+        vx_world_n = float(vx_body * np.cos(psi))
+        vy_world_n = float(vx_body * np.sin(psi))
         times.append(t)
         xs.append(x)
         ys.append(y)
@@ -185,7 +180,6 @@ def run_simulation(
         vy_bodys.append(vy_body)
         omegas.append(omega)
         vx_cmds.append(cmd.vx)
-        vy_cmds.append(cmd.vy)
         omega_cmds.append(cmd.omega)
 
         last = wpts[-1]
@@ -195,7 +189,7 @@ def run_simulation(
 
     print(f"plan vertices: {len(polyline)}, waypoints: {len(wpts)}")
     print(
-        f"stopped at t={t:.2f}s, final cell {map.world_to_cell((x, y))}, pos=({x:.3f}, {y:.3f}), psi={psi:.3f}"
+        f"stopped at t={t:.2f}s, final cell {map_.world_to_cell((x, y))}, pos=({x:.3f}, {y:.3f}), psi={psi:.3f}"
     )
 
     try:
@@ -213,7 +207,6 @@ def run_simulation(
     vy_body_arr = np.asarray(vy_bodys)
     omega_arr = np.asarray(omegas)
     vx_cmd_arr = np.asarray(vx_cmds)
-    vy_cmd_arr = np.asarray(vy_cmds)
     omega_cmd_arr = np.asarray(omega_cmds)
     v_mag = np.hypot(vx_arr, vy_arr)
     v_body_mag = np.hypot(vx_body_arr, vy_body_arr)
@@ -226,24 +219,24 @@ def run_simulation(
     ax_vxy = fig.add_subplot(gs[2, 0])
     ax_om = fig.add_subplot(gs[2, 1])
 
-    xmax = map._xmin + map.nx * map.resolution  # noqa: SLF001
-    ymax = map._ymin + map.ny * map.resolution  # noqa: SLF001
-    display = np.ma.masked_where(~map.cell_inside, map.grid)
+    xmax = map_._xmin + map_.nx * map_.resolution  # noqa: SLF001
+    ymax = map_._ymin + map_.ny * map_.resolution  # noqa: SLF001
+    display = np.ma.masked_where(~map_.cell_inside, map_.grid)
     ax_map.imshow(
         display.T,
         origin="lower",
-        extent=(map._xmin, xmax, map._ymin, ymax),  # noqa: SLF001
+        extent=(map_._xmin, xmax, map_._ymin, ymax),  # noqa: SLF001
         aspect="equal",
         interpolation="nearest",
         cmap="Greens",
         alpha=0.25,
     )
-    if np.any(map.obstacle_mask):
-        obs_display = np.ma.masked_where(~map.obstacle_mask, np.ones((map.nx, map.ny)))
+    if np.any(map_.obstacle_mask):
+        obs_display = np.ma.masked_where(~map_.obstacle_mask, np.ones((map_.nx, map_.ny)))
         ax_map.imshow(
             obs_display.T,
             origin="lower",
-            extent=(map._xmin, xmax, map._ymin, ymax),  # noqa: SLF001
+            extent=(map_._xmin, xmax, map_._ymin, ymax),  # noqa: SLF001
             aspect="equal",
             interpolation="nearest",
             cmap="Reds",
@@ -260,7 +253,7 @@ def run_simulation(
     ax_map.set_xlabel("x (m)")
     ax_map.set_ylabel("y (m)")
     ax_map.legend(loc="upper right")
-    ax_map.set_title("Simulated position control (cell → cell)")
+    ax_map.set_title("Simulated position control (differential drive)")
     ax_map.set_aspect("equal", adjustable="box")
 
     ax_xy.plot(t_arr, xs_arr, label="x (m)")
@@ -295,19 +288,10 @@ def run_simulation(
         linewidth=1.0,
         label="vx_cmd",
     )
-    ax_vxy.plot(
-        t_arr[m_cmd],
-        vy_cmd_arr[m_cmd],
-        color="k",
-        linestyle=":",
-        alpha=0.65,
-        linewidth=1.0,
-        label="vy_cmd",
-    )
     ax_vxy.set_xlabel("t (s)")
     ax_vxy.set_ylabel("velocity (m/s)")
     ax_vxy.legend(loc="best", fontsize=8)
-    ax_vxy.set_title("World/body velocity + commands")
+    ax_vxy.set_title("Differential-drive world/body velocity + commands")
     ax_vxy.grid(True, alpha=0.3)
 
     ax_om.plot(t_arr, omega_arr, label="heading_rate ω")
@@ -335,6 +319,7 @@ def run_simulation(
         print(f"wrote {out}")
 
 
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--start", type=int, nargs=2, metavar=("I", "J"), default=[0, 0])
@@ -345,10 +330,6 @@ def main() -> None:
     p.add_argument(
         "--capture", type=float, default=0.01, help="waypoint capture radius (m)"
     )
-    p.add_argument(
-        "--v-des", type=float, default=0.25, help="outer-loop speed cap (m/s)"
-    )
-    p.add_argument("--omega-des", type=float, default=0.0)
     p.add_argument(
         "--tau-v",
         type=float,
@@ -375,8 +356,6 @@ def main() -> None:
         dt=args.dt,
         max_time=args.max_time,
         capture_radius=args.capture,
-        v_des=args.v_des,
-        omega_des=args.omega_des,
         tau_v=args.tau_v,
         tau_w=args.tau_w,
         show_plot=not args.no_show,

@@ -48,6 +48,7 @@ from localization import (  # noqa: E402
     ExtendedKalmanFilter2D,
     IMUMeasurement,
     UnscentedKalmanFilter2D,
+    WheelTwistMeasurement,
 )
 
 from camera import RealSenseCamera  # noqa: E402
@@ -58,6 +59,7 @@ from localization.map import Map  # noqa: E402
 from planning.a_star import AStar, waypoints_from_polyline  # noqa: E402
 from serial_connection.elevator_serial_con import ElevatorSerialConnect  # noqa: E402
 from serial_connection.serial_con import SerialConnect  # noqa: E402
+from serial_connection.serialization import EncoderReading, IMUReading  # noqa: E402
 
 
 @dataclass
@@ -592,17 +594,26 @@ class MissionRuntime:
         )
 
     def _update_localization_from_imu(self, dt: float) -> None:
-        imu_msgs = self.serial.read_parsed(max_lines=128)
-        if not imu_msgs:
-            self.localization_filter.predict(IMUMeasurement(ax=0.0, ay=0.0, wz=0.0), dt)
-            return
+        packets = self.serial.read_packets(max_lines=128)
+        imu_packets = [msg for msg in packets if isinstance(msg, IMUReading)]
+        encoder_packets = [msg for msg in packets if isinstance(msg, EncoderReading)]
 
-        imu_msg = imu_msgs[-1]
-        ax_meas = imu_msg.ax
-        ay_meas = imu_msg.ay
-        imu = IMUMeasurement(ax=ax_meas, ay=ay_meas, wz=imu_msg.gz)
-        self.localization_filter.predict(imu, dt)
-        self.localization_filter.update_imu(imu)
+        if not imu_packets:
+            self.localization_filter.predict(IMUMeasurement(ax=0.0, ay=0.0, wz=0.0), dt)
+        else:
+            imu_msg = imu_packets[-1]
+            imu = IMUMeasurement(ax=imu_msg.ax, ay=imu_msg.ay, wz=imu_msg.gz)
+            self.localization_filter.predict(imu, dt)
+            self.localization_filter.update_imu(imu)
+
+        if encoder_packets:
+            enc = encoder_packets[-1]
+            vx_body, vy_body, omega = self.controller.wheel_rates_to_body_twist(
+                (enc.w1, enc.w2, enc.w3, enc.w4)
+            )
+            self.localization_filter.update_wheel_twist(
+                WheelTwistMeasurement(vx=vx_body, vy=vy_body, wz=omega)
+            )
 
     def _publish_telemetry(
         self,
@@ -679,7 +690,8 @@ class MissionRuntime:
         if rho < self.runtime_config.waypoint_capture_radius and planned.waypoint_index < len(planned.waypoints) - 1:
             planned.waypoint_index += 1
             goal_wp = planned.waypoints[planned.waypoint_index]
-        return goal_wp
+        is_final_waypoint = planned.waypoint_index == len(planned.waypoints) - 1
+        return goal_wp, is_final_waypoint
 
     def run(self, max_ticks: Optional[int] = None) -> None:
         period = 1.0 / self.runtime_config.control_rate_hz
@@ -703,8 +715,8 @@ class MissionRuntime:
                 self._update_elevator_from_serial(current_task)
 
                 state = self._current_state_for_controller()
-                goal_wp = self._active_goal_waypoint(current_task, state)
-                cmd = self.controller.compute(state, goal_wp)
+                goal_wp, final_pose_mode = self._active_goal_waypoint(current_task, state)
+                cmd = self.controller.compute(state, goal_wp, final_pose_mode=final_pose_mode)
                 path_blocked = self._path_intersects_dynamic_obstacle(current_task, state)
                 if path_blocked:
                     cmd = self._zero_drive_command()

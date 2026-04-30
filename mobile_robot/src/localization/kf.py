@@ -27,10 +27,6 @@ The process model is:
     b_ax_{k+1} = b_ax_k
     b_ay_{k+1} = b_ay_k
     b_wz_{k+1} = b_wz_k
-
-This is intentionally smaller and simpler than robot_localization, but keeps
-its core idea of nonlinear state estimation with configurable process and
-measurement covariances.
 """
 
 from __future__ import annotations
@@ -43,6 +39,7 @@ import numpy as np
 STATE_DIM = 9
 POSE_MEAS_DIM = 3
 GYRO_MEAS_DIM = 1
+WHEEL_TWIST_MEAS_DIM = 3
 
 PX = 0
 PY = 1
@@ -104,6 +101,32 @@ class AprilTagMeasurement:
         return np.array([self.x, self.y, self.yaw], dtype=float)
 
 
+@dataclass
+class WheelTwistMeasurement:
+    """Body-frame velocity measurement derived from wheel encoders.
+
+    Attributes
+    ----------
+    vx : float
+        Body-frame longitudinal velocity [m/s].
+    vy : float
+        Body-frame lateral velocity [m/s]. For this platform this is expected to
+        be zero, but it is kept for filter/state consistency.
+    wz : float
+        Body-frame yaw rate [rad/s].
+    covariance : Optional[np.ndarray]
+        Optional 3x3 measurement covariance for [vx, vy, wz].
+    """
+
+    vx: float
+    vy: float
+    wz: float
+    covariance: Optional[np.ndarray] = None
+
+    def as_vector(self) -> np.ndarray:
+        return np.array([self.vx, self.vy, self.wz], dtype=float)
+
+
 class _BaseLocalizationFilter:
     """Common utilities shared by the EKF and UKF implementations."""
 
@@ -114,23 +137,18 @@ class _BaseLocalizationFilter:
         process_noise: Optional[np.ndarray] = None,
         apriltag_measurement_noise: Optional[np.ndarray] = None,
         gyro_measurement_noise: Optional[np.ndarray] = None,
+        wheel_twist_measurement_noise: Optional[np.ndarray] = None,
     ):
-        self.state = (
-            np.zeros(STATE_DIM, dtype=float)
-            if initial_state is None
-            else np.asarray(initial_state, dtype=float).reshape(STATE_DIM)
-        )
-        self.covariance = (
-            np.eye(STATE_DIM, dtype=float) * 1e-2
-            if initial_covariance is None
-            else np.asarray(initial_covariance, dtype=float).reshape(STATE_DIM, STATE_DIM)
+        self.state = self._coerce_initial_state(initial_state)
+        self.covariance = self._coerce_square_matrix(
+            initial_covariance,
+            default=np.eye(STATE_DIM, dtype=float) * 1e-2,
         )
 
         # Process noise is defined per second and scaled by dt in predict().
-        self.process_noise = (
-            np.diag([5e-3, 5e-3, 5e-3, 5e-2, 5e-2, 2e-2, 5e-4, 5e-4, 5e-4])
-            if process_noise is None
-            else np.asarray(process_noise, dtype=float).reshape(STATE_DIM, STATE_DIM)
+        self.process_noise = self._coerce_square_matrix(
+            process_noise,
+            default=np.diag([5e-3, 5e-3, 5e-3, 5e-2, 5e-2, 2e-2, 5e-4, 5e-4, 5e-4]),
         )
 
         self.apriltag_measurement_noise = (
@@ -147,6 +165,38 @@ class _BaseLocalizationFilter:
             else np.asarray(gyro_measurement_noise, dtype=float).reshape(
                 GYRO_MEAS_DIM, GYRO_MEAS_DIM
             )
+        )
+
+        self.wheel_twist_measurement_noise = (
+            np.diag([2e-2, 2e-2, 8e-2])
+            if wheel_twist_measurement_noise is None
+            else np.asarray(wheel_twist_measurement_noise, dtype=float).reshape(
+                WHEEL_TWIST_MEAS_DIM, WHEEL_TWIST_MEAS_DIM
+            )
+        )
+
+    @staticmethod
+    def _coerce_initial_state(initial_state: Optional[np.ndarray]) -> np.ndarray:
+        if initial_state is None:
+            return np.zeros(STATE_DIM, dtype=float)
+        arr = np.asarray(initial_state, dtype=float).reshape(-1)
+        if arr.size == STATE_DIM:
+            return arr.copy()
+        raise ValueError(f"initial_state must have length {STATE_DIM}")
+
+    @staticmethod
+    def _coerce_square_matrix(
+        matrix: Optional[np.ndarray],
+        *,
+        default: np.ndarray,
+    ) -> np.ndarray:
+        if matrix is None:
+            return np.asarray(default, dtype=float).copy()
+        arr = np.asarray(matrix, dtype=float)
+        if arr.shape == (STATE_DIM, STATE_DIM):
+            return arr.copy()
+        raise ValueError(
+            f"matrix must have shape {(STATE_DIM, STATE_DIM)}"
         )
 
     @staticmethod
@@ -201,6 +251,10 @@ class _BaseLocalizationFilter:
         return np.array([state[WZ] + state[BWZ]], dtype=float)
 
     @staticmethod
+    def _wheel_twist_measurement_model(state: np.ndarray) -> np.ndarray:
+        return np.array([state[VX], state[VY], state[WZ]], dtype=float)
+
+    @staticmethod
     def _pose_measurement_matrix() -> np.ndarray:
         H = np.zeros((POSE_MEAS_DIM, STATE_DIM), dtype=float)
         H[0, PX] = 1.0
@@ -213,6 +267,14 @@ class _BaseLocalizationFilter:
         H = np.zeros((GYRO_MEAS_DIM, STATE_DIM), dtype=float)
         H[0, WZ] = 1.0
         H[0, BWZ] = 1.0
+        return H
+
+    @staticmethod
+    def _wheel_twist_measurement_matrix() -> np.ndarray:
+        H = np.zeros((WHEEL_TWIST_MEAS_DIM, STATE_DIM), dtype=float)
+        H[0, VX] = 1.0
+        H[1, VY] = 1.0
+        H[2, WZ] = 1.0
         return H
 
     def get_state(self) -> np.ndarray:
@@ -232,7 +294,7 @@ class _BaseLocalizationFilter:
 
 
 class ExtendedKalmanFilter2D(_BaseLocalizationFilter):
-    """Minimal 2D EKF for AprilTag + IMU fusion."""
+    """Minimal 2D EKF for AprilTag + IMU + wheel-twist fusion."""
 
     def predict(self, imu: IMUMeasurement, dt: float) -> np.ndarray:
         if dt <= 0.0:
@@ -285,9 +347,32 @@ class ExtendedKalmanFilter2D(_BaseLocalizationFilter):
         self.covariance = (I - K @ H) @ self.covariance
         return self.get_state()
 
+    def update_wheel_twist(self, measurement: WheelTwistMeasurement) -> np.ndarray:
+        z = measurement.as_vector()
+        h = self._wheel_twist_measurement_model(self.state)
+        H = self._wheel_twist_measurement_matrix()
+        R = (
+            self.wheel_twist_measurement_noise
+            if measurement.covariance is None
+            else np.asarray(measurement.covariance, dtype=float).reshape(
+                WHEEL_TWIST_MEAS_DIM, WHEEL_TWIST_MEAS_DIM
+            )
+        )
+
+        innovation = z - h
+        S = H @ self.covariance @ H.T + R
+        K = self.covariance @ H.T @ np.linalg.inv(S)
+
+        self.state = self.state + K @ innovation
+        self.state[YAW] = wrap_angle(self.state[YAW])
+
+        I = np.eye(STATE_DIM)
+        self.covariance = (I - K @ H) @ self.covariance
+        return self.get_state()
+
 
 class UnscentedKalmanFilter2D(_BaseLocalizationFilter):
-    """Minimal 2D UKF for AprilTag + IMU fusion."""
+    """Minimal 2D UKF for AprilTag + IMU + wheel-twist fusion."""
 
     def __init__(
         self,
@@ -296,6 +381,7 @@ class UnscentedKalmanFilter2D(_BaseLocalizationFilter):
         process_noise: Optional[np.ndarray] = None,
         apriltag_measurement_noise: Optional[np.ndarray] = None,
         gyro_measurement_noise: Optional[np.ndarray] = None,
+        wheel_twist_measurement_noise: Optional[np.ndarray] = None,
         alpha: float = 1e-1,
         beta: float = 2.0,
         kappa: float = 0.0,
@@ -306,6 +392,7 @@ class UnscentedKalmanFilter2D(_BaseLocalizationFilter):
             process_noise=process_noise,
             apriltag_measurement_noise=apriltag_measurement_noise,
             gyro_measurement_noise=gyro_measurement_noise,
+            wheel_twist_measurement_noise=wheel_twist_measurement_noise,
         )
         self.alpha = alpha
         self.beta = beta
@@ -443,16 +530,46 @@ class UnscentedKalmanFilter2D(_BaseLocalizationFilter):
         self.covariance = self.covariance - K @ S @ K.T
         return self.get_state()
 
+    def update_wheel_twist(self, measurement: WheelTwistMeasurement) -> np.ndarray:
+        z = measurement.as_vector()
+        R = (
+            self.wheel_twist_measurement_noise
+            if measurement.covariance is None
+            else np.asarray(measurement.covariance, dtype=float).reshape(
+                WHEEL_TWIST_MEAS_DIM, WHEEL_TWIST_MEAS_DIM
+            )
+        )
+
+        wm, wc, _ = self._sigma_point_weights()
+        sigma = self._sigma_points()
+        meas_sigma = np.array([self._wheel_twist_measurement_model(sp) for sp in sigma])
+        z_pred = np.sum(wm[:, None] * meas_sigma, axis=0)
+
+        S = np.zeros((WHEEL_TWIST_MEAS_DIM, WHEEL_TWIST_MEAS_DIM), dtype=float)
+        Pxz = np.zeros((STATE_DIM, WHEEL_TWIST_MEAS_DIM), dtype=float)
+        for i in range(meas_sigma.shape[0]):
+            dz = meas_sigma[i] - z_pred
+            dx = self._state_diff(sigma[i], self.state)
+            S += wc[i] * np.outer(dz, dz)
+            Pxz += wc[i] * np.outer(dx, dz)
+        S += R
+
+        innovation = z - z_pred
+        K = Pxz @ np.linalg.inv(S)
+        self.state = self.state + K @ innovation
+        self.state[YAW] = wrap_angle(self.state[YAW])
+        self.covariance = self.covariance - K @ S @ K.T
+        return self.get_state()
+
 
 # Backward-compatible alias for the original placeholder class name.
-KalmanFilter = ExtendedKalmanFilter2D
 
 
 __all__ = [
     "AprilTagMeasurement",
     "ExtendedKalmanFilter2D",
     "IMUMeasurement",
-    "KalmanFilter",
     "UnscentedKalmanFilter2D",
+    "WheelTwistMeasurement",
     "wrap_angle",
 ]

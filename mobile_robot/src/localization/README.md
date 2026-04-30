@@ -7,13 +7,15 @@ This directory now includes a lightweight local 2D EKF/UKF implementation in `kf
 The filter state is
 
 ```text
-[x, y, yaw, vx_body, vy_body, wz]
+[x, y, yaw, vx_body, vy_body, wz, b_ax, b_ay, b_wz]
 ```
 
 where:
 - `x, y, yaw` are global pose
 - `vx_body, vy_body` are body-frame translational velocities
-- `wz` is yaw rate
+- `wz` is bias-corrected yaw rate
+- `b_ax, b_ay` are accelerometer bias states
+- `b_wz` is gyro yaw-rate bias
 
 ## Inputs fused
 
@@ -43,7 +45,7 @@ from localization import (
 
 kf = ExtendedKalmanFilter2D(
     initial_state=np.zeros(6),
-    initial_covariance=np.eye(6) * 0.1,
+    initial_covariance=np.eye(9) * 0.1,
 )
 
 imu = IMUMeasurement(ax=0.1, ay=0.0, wz=0.05)

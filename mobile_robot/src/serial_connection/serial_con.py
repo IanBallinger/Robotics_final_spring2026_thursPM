@@ -19,22 +19,24 @@ from __future__ import annotations
 
 import os
 import time
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 import random
 
 import serial
 
 try:
     from .serialization import (
+        EncoderReading,
         IMUReading,
-        serialize_wheel_cmd,
         parse_mcu_line,
+        serialize_wheel_cmd,
     )
 except ImportError:
     from serialization import (  # type: ignore[no-redef]
+        EncoderReading,
         IMUReading,
-        serialize_wheel_cmd,
         parse_mcu_line,
+        serialize_wheel_cmd,
     )
 
 
@@ -70,7 +72,7 @@ class SerialConnect:
         self._last_raw_publish_time: Optional[float] = None
         self._last_raw_debug_time: Optional[float] = None
 
-        self._latest_parsed_msg: Optional[IMUReading] = None
+        self._pending_packets: List[Union[IMUReading, EncoderReading]] = []
         self._latest_parsed_rx_time: Optional[float] = None
         self._last_parsed_publish_time: Optional[float] = None
         self._last_parsed_debug_time: Optional[float] = None
@@ -197,7 +199,7 @@ class SerialConnect:
 
             parsed = parse_mcu_line(line)
             if parsed is not None:
-                self._latest_parsed_msg = parsed
+                self._pending_packets.append(parsed)
                 self._latest_parsed_rx_time = now
 
         return consumed
@@ -226,29 +228,30 @@ class SerialConnect:
         self._latest_raw_rx_time = None
         return [line]
 
-    def read_parsed(self, max_lines: int = 256) -> List[IMUReading]:
-        """
-        Drain the RX buffer, but publish at most the latest parsed IMU message at
-        the configured fixed output rate.
-        """
+    def read_packets(self, max_lines: int = 256) -> List[Union[IMUReading, EncoderReading]]:
+        """Drain the RX buffer and publish parsed IMU/encoder packets."""
         self.poll(max_lines=max_lines)
-        if self._latest_parsed_msg is None or self._latest_parsed_rx_time is None:
+        if not self._pending_packets or self._latest_parsed_rx_time is None:
             return []
 
         now = time.monotonic()
         if not self._publish_due(now, self._last_parsed_publish_time):
             return []
 
-        msg = self._latest_parsed_msg
+        packets = list(self._pending_packets)
+        self._pending_packets.clear()
         self._last_parsed_publish_time = now
-        self._latest_parsed_msg = None
-        self._debug_dt("RX IMU", now, self._last_parsed_debug_time)
+        self._debug_dt("RX PKT", now, self._last_parsed_debug_time)
         if self.debug:
             age = now - self._latest_parsed_rx_time
-            print(f"[RX IMU] age={age:.6f}s msg={msg}")
+            print(f"[RX PKT] age={age:.6f}s packets={packets}")
         self._last_parsed_debug_time = now
         self._latest_parsed_rx_time = None
-        return [msg]
+        return packets
+
+    def read_parsed(self, max_lines: int = 256) -> List[IMUReading]:
+        """Backward-compatible IMU-only view of parsed packets."""
+        return [msg for msg in self.read_packets(max_lines=max_lines) if isinstance(msg, IMUReading)]
 
 
 if __name__ == "__main__":

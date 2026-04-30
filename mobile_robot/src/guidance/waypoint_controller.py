@@ -32,8 +32,8 @@ class MapPoseVelocity:
 
 
 @dataclass(frozen=True)
-class MecanumCommand:
-    """Body twist plus wheel angular-rate command for a Mecanum platform."""
+class DifferentialDriveCommand:
+    """Body twist plus wheel angular-rate command for a 4-wheel 2-side drive."""
 
     vx: float
     vy: float
@@ -43,18 +43,19 @@ class MecanumCommand:
 
 class CascadedWaypointController:
     """
-    Holonomic waypoint tracker for a Mecanum base.
+    Waypoint tracker for a 4-wheel two-side drive base.
 
     Outer loop:
-        map-frame position error -> body-frame translational references
-        heading error -> yaw-rate reference
+        map-frame position/heading error -> forward-speed and yaw-rate references
 
     Inner loop:
-        proportional velocity feedback on body longitudinal/lateral speed and
-        yaw rate.
+        proportional velocity feedback on body longitudinal speed and yaw rate.
 
-    The kinematic conversion between body twist and wheel speeds follows the
-    exact Mecanum-wheel constraint relations in Zeidis & Zimmermann (2019).
+    Lateral body velocity is not commanded for this platform and is always zero.
+    Left/right wheel commands are duplicated across front/rear wheels. For this
+    project, the wheel-rate mapping intentionally ignores track width and treats
+    turn command contribution as side-based rather than metric differential-drive
+    kinematics.
     """
 
     def __init__(
@@ -69,8 +70,7 @@ class CascadedWaypointController:
         ky_inner: float = 0.9,
         komega_inner: float = 0.9,
         wheel_radius: float = 0.06,
-        longitudinal_half_extent: float = 0.2,
-        lateral_half_extent: float = 0.2,
+        track_width: float = 0.4,
     ):
         self.k_rho = k_rho
         self.k_alpha = k_alpha
@@ -82,59 +82,50 @@ class CascadedWaypointController:
         self.ky_inner = ky_inner
         self.komega_inner = komega_inner
         self.wheel_radius = wheel_radius
-        self.longitudinal_half_extent = longitudinal_half_extent
-        self.lateral_half_extent = lateral_half_extent
-
-    @property
-    def yaw_moment_arm(self) -> float:
-        """Return ``ρ + l`` from the paper's notation."""
-        return self.longitudinal_half_extent + self.lateral_half_extent
+        self.track_width = track_width
 
     def body_twist_to_wheel_rates(
         self,
         vx_body: float,
-        vy_body: float,
         omega: float,
     ) -> Tuple[float, float, float, float]:
-        """
-        Convert body twist to wheel angular rates using Eq. (11) rearranged.
+        """Convert body command to per-side wheel angular rates.
 
-        Wheel ordering is ``(φ̇1, φ̇2, φ̇3, φ̇4)``. The result satisfies
-        ``φ̇1 + φ̇2 = φ̇3 + φ̇4`` exactly.
+        Wheel ordering is ``(left_front, right_front, left_rear, right_rear)``.
+        ``vy_body`` is ignored because lateral body motion is not supported.
+
+        Note: this mapping intentionally ignores track width and uses
+        ``left = vx - omega`` and ``right = vx + omega`` before dividing by wheel
+        radius. This matches the project's side-command semantics for four
+        independent wheels.
         """
         r = self.wheel_radius
-        a = self.yaw_moment_arm
-        w1 = (vx_body - vy_body - a * omega) / r
-        w2 = (vx_body + vy_body + a * omega) / r
-        w3 = (vx_body + vy_body - a * omega) / r
-        w4 = (vx_body - vy_body + a * omega) / r
-        return float(w1), float(w2), float(w3), float(w4)
+        w_left = (vx_body - omega) / r
+        w_right = (vx_body + omega) / r
+        return float(w_left), float(w_right), float(w_left), float(w_right)
 
     def wheel_rates_to_body_twist(
         self,
         wheel_rates: Tuple[float, float, float, float],
     ) -> Tuple[float, float, float]:
-        """
-        Convert wheel rates to body twist using the paper's pseudoinverse form.
-
-        This implements Eq. (36), which is also exact when the compatibility
-        relation ``φ̇1 + φ̇2 = φ̇3 + φ̇4`` holds.
-        """
-        w1, w2, w3, w4 = (float(w) for w in wheel_rates)
+        """Convert 4-wheel side commands back to body-command space."""
+        w_lf, w_rf, w_lr, w_rr = (float(w) for w in wheel_rates)
         r = self.wheel_radius
-        a = self.yaw_moment_arm
-        vx_body = 0.25 * r * (w1 + w2 + w3 + w4)
-        vy_body = 0.25 * r * (-w1 + w2 + w3 - w4)
-        omega = 0.25 * r * (-w1 + w2 - w3 + w4) / a
-        return float(vx_body), float(vy_body), float(omega)
+        w_left = 0.5 * (w_lf + w_lr)
+        w_right = 0.5 * (w_rf + w_rr)
+        vx_body = 0.5 * r * (w_left + w_right)
+        omega = 0.5 * r * (w_right - w_left)
+        return float(vx_body), 0.0, float(omega)
 
     def compute(
         self,
         state: MapPoseVelocity,
         goal: Waypoint,
-    ) -> MecanumCommand:
+        *,
+        final_pose_mode: bool = False,
+    ) -> DifferentialDriveCommand:
         """
-        Return a Mecanum body-twist + wheel-rate command.
+        Return a differential-drive body-twist + wheel-rate command.
 
         Parameters
         ----------
@@ -154,30 +145,49 @@ class CascadedWaypointController:
         alpha = wrap_to_pi(float(np.arctan2(ey_body, ex_body))) if rho > 1e-9 else 0.0
         e_psi = wrap_to_pi(goal.heading - state.heading)
 
-        vx_ref = self.k_rho * ex_body
-        vy_ref = self.k_rho * ey_body
+        if final_pose_mode:
+            # Final pose regulator: first approach the goal position, then settle
+            # precisely onto the desired terminal heading once the robot is close.
+            final_pos_radius = 0.08
+            final_heading_radius = 0.03
 
-        if rho < 1e-9:
-            vx_ref = 0.0
-            vy_ref = 0.0
+            if rho <= final_heading_radius:
+                vx_ref = 0.0
+                omega_ref = self.k_heading * e_psi
+            else:
+                vx_ref = self.k_rho * ex_body
+                if rho <= final_pos_radius:
+                    vx_ref *= rho / final_pos_radius
+                if abs(alpha) > self.align_turn_thresh:
+                    vx_ref = 0.0
+                    omega_ref = self.k_alpha * alpha
+                else:
+                    omega_ref = self.k_alpha * alpha
+                    if rho <= final_pos_radius:
+                        omega_ref += self.k_heading * e_psi
+        else:
+            vx_ref = self.k_rho * ex_body
 
-        # If the waypoint lies far off the current body x-axis, allow the robot
-        # to exploit lateral motion rather than forcing a unicycle-style turn-in-place.
-        # The heading controller still aligns the body to the waypoint heading.
-        omega_ref = self.k_alpha * alpha + self.k_heading * e_psi
+            # Differential drive cannot translate laterally. If the waypoint lies
+            # far off the body x-axis, prioritize turning in place before driving.
+            if abs(alpha) > self.align_turn_thresh:
+                vx_ref = 0.0
+
+            omega_ref = self.k_alpha * alpha + self.k_heading * e_psi
+
+        vx_ref = float(np.clip(vx_ref, -self.v_max, self.v_max))
         omega_ref = float(np.clip(omega_ref, -self.omega_max, self.omega_max))
 
-        vx_meas, vy_meas = state.body_velocity()
+        vx_meas, _ = state.body_velocity()
         omega_meas = state.heading_rate
 
         vx_cmd = vx_ref + self.kv_inner * (vx_ref - vx_meas)
-        vy_cmd = vy_ref + self.ky_inner * (vy_ref - vy_meas)
         omega_cmd = omega_ref + self.komega_inner * (omega_ref - omega_meas)
 
-        # vx_cmd, vy_cmd = self._scale_planar_speed(vx_cmd, vy_cmd, self.v_max)
+        vx_cmd = float(np.clip(vx_cmd, -self.v_max, self.v_max))
         omega_cmd = float(np.clip(omega_cmd, -self.omega_max, self.omega_max))
 
-        wheel_rates = self.body_twist_to_wheel_rates(vx_cmd, vy_cmd, omega_cmd)
-        return MecanumCommand(
-            vx=vx_cmd, vy=vy_cmd, omega=omega_cmd, wheel_rates=wheel_rates
+        wheel_rates = self.body_twist_to_wheel_rates(vx_cmd, omega_cmd)
+        return DifferentialDriveCommand(
+            vx=vx_cmd, vy=0.0, omega=omega_cmd, wheel_rates=wheel_rates
         )

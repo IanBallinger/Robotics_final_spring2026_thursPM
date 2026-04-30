@@ -43,6 +43,14 @@ class IMUReading:
     gz: float
 
 
+@dataclass(frozen=True)
+class EncoderReading:
+    w1: float
+    w2: float
+    w3: float
+    w4: float
+
+
 def deserialize_imu(line: str) -> Optional[IMUReading]:
     """
     Parse ``IMU,<ax>,<ay>,<az>,<gx>,<gy>,<gz>`` (optional trailing whitespace).
@@ -61,14 +69,31 @@ def deserialize_imu(line: str) -> Optional[IMUReading]:
     return IMUReading(ax=ax, ay=ay, az=az, gx=gx, gy=gy, gz=gz)
 
 
-def parse_mcu_line(line: str) -> Optional[IMUReading]:
-    return deserialize_imu(line)
+def deserialize_encoder(line: str) -> Optional[EncoderReading]:
+    """Parse ``ENC,<w1>,<w2>,<w3>,<w4>`` into measured wheel angular rates."""
+    s = line.strip()
+    if not s.startswith("ENC,"):
+        return None
+    parts = s.split(",")
+    if len(parts) != 5:
+        return None
+    try:
+        w1, w2, w3, w4 = (float(parts[i]) for i in range(1, 5))
+    except ValueError:
+        return None
+    return EncoderReading(w1=w1, w2=w2, w3=w3, w4=w4)
+
+
+def parse_mcu_line(line: str) -> Optional[Union[IMUReading, EncoderReading]]:
+    return deserialize_imu(line) or deserialize_encoder(line)
 
 
 __all__ = [
+    "EncoderReading",
     "IMUReading",
     "serialize_arm_cmd",
     "serialize_wheel_cmd",
+    "deserialize_encoder",
     "deserialize_imu",
     "parse_mcu_line",
 ]
