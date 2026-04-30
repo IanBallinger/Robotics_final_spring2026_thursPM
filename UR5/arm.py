@@ -25,10 +25,10 @@ class UR5Arm:
 
     # Default arm configuration
     # TODO we should tune these
-    DEFAULT_JOINT_SPEED = pi/20                         # rad/s   see examples/move_until_contact
-    DEFAULT_JOINT_ACCELERATION = DEFAULT_JOINT_SPEED/20 # rad/s^2 arbitrary default
-    DEFAULT_TOOL_SPEED = 0.3                           # m/s     arbitrary small ddefault
-    DEFAULT_TOOL_ACCELERATION = 10.0   # m/s^2   arbitrary default
+    DEFAULT_JOINT_SPEED = pi/4                         # rad/s   see examples/move_until_contact
+    DEFAULT_JOINT_ACCELERATION = 1.0 # rad/s^2 arbitrary default
+    DEFAULT_TOOL_SPEED = 0.1                           # m/s     arbitrary small ddefault
+    DEFAULT_TOOL_ACCELERATION = 1.0   # m/s^2   arbitrary default
 
     def __init__(self, ip_address, frequency=500.0, verbose=False):
         """
@@ -101,6 +101,20 @@ class UR5Arm:
 
     # ========== MOVEMENT PRIMITIVES ==========
 
+    @staticmethod
+    def _parse_waypoint_dict(waypoint):
+        if not isinstance(waypoint, dict):
+            return None, None
+
+        tcp_position = waypoint.get("tcp_position")
+        q_position = waypoint.get("q_position")
+
+        # Backward-compatible alias used by older subtask loaders.
+        if tcp_position is None:
+            tcp_position = waypoint.get("pose")
+
+        return tcp_position, q_position
+
     def move_to_joint_position(self, joint_angles, speed=None, acceleration=None, 
                                asynchronous=False):
         """
@@ -118,16 +132,24 @@ class UR5Arm:
         Raises:
             ValueError: If joint_angles don't have exactly 6 elements
         """
-        if len(joint_angles) != 6:
+        tcp_position, q_position = self._parse_waypoint_dict(joint_angles)
+        if q_position is None and tcp_position is not None:
+            q_position = self.get_inverse_kinematics(tcp_position)
+            if q_position is None:
+                raise ValueError("Could not derive q_position from tcp_position waypoint")
+
+        target_joints = q_position if q_position is not None else joint_angles
+
+        if len(target_joints) != 6:
             raise ValueError("joint_angles must contain exactly 6 values")
         
         speed = speed or self.DEFAULT_JOINT_SPEED
         acceleration = acceleration or self.DEFAULT_JOINT_ACCELERATION
         
         try:
-            result = self.rtde_control.moveJ(joint_angles, speed, acceleration, asynchronous) #linearity not guaranteed
+            result = self.rtde_control.moveJ(target_joints, speed, acceleration, asynchronous) #linearity not guaranteed
             if self.verbose:
-                print(f"[MOVE_J] Target: {joint_angles}, Async: {asynchronous}")
+                print(f"[MOVE_J] Target: {target_joints}, Async: {asynchronous}")
             return result
         except Exception as e:
             print(f"[ERROR] moveJ failed: {str(e)}")
@@ -149,16 +171,24 @@ class UR5Arm:
         Raises:
             ValueError: If pose doesn't have exactly 6 elements
         """
-        if len(pose) != 6:
+        tcp_position, q_position = self._parse_waypoint_dict(pose)
+        if tcp_position is None and q_position is not None:
+            tcp_position = self.get_forward_kinematics(q_position)
+            if tcp_position is None:
+                raise ValueError("Could not derive tcp_position from q_position waypoint")
+
+        target_pose = tcp_position if tcp_position is not None else pose
+
+        if len(target_pose) != 6:
             raise ValueError("pose must contain exactly 6 values [x, y, z, rx, ry, rz]")
         
         speed = speed or self.DEFAULT_JOINT_SPEED
         acceleration = acceleration or self.DEFAULT_JOINT_ACCELERATION
         
         try:
-            result = self.rtde_control.moveJ_IK(pose, speed, acceleration, asynchronous) #linear in joint space
+            result = self.rtde_control.moveJ_IK(target_pose, speed, acceleration, asynchronous) #linear in joint space
             if self.verbose:
-                print(f"[MOVE_J_IK] Target pose: {pose}, Async: {asynchronous}")
+                print(f"[MOVE_J_IK] Target pose: {target_pose}, Async: {asynchronous}")
             return result
         except Exception as e:
             print(f"[ERROR] moveJ_IK failed: {str(e)}")
@@ -181,16 +211,24 @@ class UR5Arm:
         Raises:
             ValueError: If pose doesn't have exactly 6 elements
         """
-        if len(pose) != 6:
+        tcp_position, q_position = self._parse_waypoint_dict(pose)
+        if tcp_position is None and q_position is not None:
+            tcp_position = self.get_forward_kinematics(q_position)
+            if tcp_position is None:
+                raise ValueError("Could not derive tcp_position from q_position waypoint")
+
+        target_pose = tcp_position if tcp_position is not None else pose
+
+        if len(target_pose) != 6:
             raise ValueError("pose must contain exactly 6 values [x, y, z, rx, ry, rz]")
         
         speed = speed or self.DEFAULT_TOOL_SPEED
         acceleration = acceleration or self.DEFAULT_TOOL_ACCELERATION
         
         try:
-            result = self.rtde_control.moveL(pose, speed, acceleration, asynchronous)
+            result = self.rtde_control.moveL(target_pose, speed, acceleration, asynchronous)
             if self.verbose:
-                print(f"[MOVE_L] Target pose: {pose}, Async: {asynchronous}")
+                print(f"[MOVE_L] Target pose: {target_pose}, Async: {asynchronous}")
             return result
         except Exception as e:
             print(f"[ERROR] moveL failed: {str(e)}")

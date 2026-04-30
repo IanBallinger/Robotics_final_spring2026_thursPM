@@ -518,16 +518,27 @@ def main(args):
             right_timestamp = rtde_r_right.getTimestamp()
             left_pose = rtde_r_left.getActualTCPPose()
             right_pose = rtde_r_right.getActualTCPPose()
+            left_q = rtde_r_left.getActualQ()
+            right_q = rtde_r_right.getActualQ()
+
+            with gripper_state_lock:
+                curr_gripper_state_L = bool(gripper_state_L)
+                curr_gripper_state_R = bool(gripper_state_R)
 
             if udp_socket and udp_target:
                 packet = {
                     # Backward compatibility: keep original key as LEFT arm pose.
                     "timestamp": left_timestamp,
                     "actual_TCP_pose": left_pose,
+                    "actual_q": left_q,
                     "left_timestamp": left_timestamp,
                     "right_timestamp": right_timestamp,
                     "left_actual_TCP_pose": left_pose,
                     "right_actual_TCP_pose": right_pose,
+                    "left_actual_q": left_q,
+                    "right_actual_q": right_q,
+                    "left_gripper_open": curr_gripper_state_L,
+                    "right_gripper_open": curr_gripper_state_R,
                 }
                 with udp_send_lock:
                     udp_socket.sendto(json.dumps(packet).encode("utf-8"), udp_target)
@@ -560,6 +571,10 @@ def main(args):
                     "dependent_item_seen_time": dependent_snapshot.get("timestamp") if dependent_snapshot else None,
                     "left_actual_TCP_pose": left_pose,
                     "right_actual_TCP_pose": right_pose,
+                    "left_actual_q": left_q,
+                    "right_actual_q": right_q,
+                    "left_gripper_open": curr_gripper_state_L,
+                    "right_gripper_open": curr_gripper_state_R,
                     "left_distance_to_dependent_m": left_distance,
                     "right_distance_to_dependent_m": right_distance,
                     "left_offset_to_dependent_xyz": left_offset,
@@ -576,10 +591,6 @@ def main(args):
                 )
 
             # Update gripper states if they changed
-            with gripper_state_lock:
-                curr_gripper_state_L = gripper_state_L
-                curr_gripper_state_R = gripper_state_R
-            
             if gripper_L is not None and curr_gripper_state_L != prev_gripper_state_L:
                 if curr_gripper_state_L:
                     gripper_L.open()

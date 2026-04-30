@@ -101,7 +101,11 @@
         "target_label": "microwavable_bowl",
         "acquire_context": "microwave_bowl",
         "requires_resource_available_for": "microwave_slot",
-        "requires_resource_item": "microwavable_bowl"
+        "requires_resource_item": "microwavable_bowl",
+        "pose_trace_csv_left": "UR5/traces/acquire_bowl_left.csv",
+        "pose_trace_csv_right": "UR5/traces/acquire_bowl_right.csv",
+        "named_waypoints_csv": "UR5/waypoints_acquire_bowl.csv",
+        "dependent_item_label": "microwavable_bowl"
       }
     },
     {

@@ -56,6 +56,74 @@ def _decimate_records(records, target_hz):
     return records[::step], step, source_hz
 
 
+def _load_named_waypoints(csv_path: Path, task_id: str = "", arm_prefix: str = "right"):
+    def _try_float(row, key):
+        raw = row.get(key)
+        if raw is None:
+            return None
+        txt = str(raw).strip()
+        if txt == "" or txt.lower() == "nothing":
+            return None
+        try:
+            return float(txt)
+        except (ValueError, TypeError):
+            return None
+
+    def _extract_q_position(row):
+        candidate_sets = [
+            [f"{arm_prefix}_q_{i}" for i in range(6)],
+            [f"q_position_{i}" for i in range(6)],
+            [f"actual_q_{i}" for i in range(6)],
+            [f"q_{i}" for i in range(6)],
+        ]
+        for keys in candidate_sets:
+            values = [_try_float(row, key) for key in keys]
+            if all(v is not None for v in values):
+                return values
+        return None
+
+    waypoints = []
+    with csv_path.open("r", encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            row_task_id = str(row.get("task_id", "")).strip()
+            if task_id and row_task_id and row_task_id != task_id:
+                continue
+
+            try:
+                idx = int(float(row.get("waypoint_index", "0")))
+            except (ValueError, TypeError):
+                continue
+
+            tcp_position = [
+                _try_float(row, f"{arm_prefix}_x"),
+                _try_float(row, f"{arm_prefix}_y"),
+                _try_float(row, f"{arm_prefix}_z"),
+                _try_float(row, f"{arm_prefix}_rx"),
+                _try_float(row, f"{arm_prefix}_ry"),
+                _try_float(row, f"{arm_prefix}_rz"),
+            ]
+            if not all(v is not None for v in tcp_position):
+                tcp_position = None
+
+            q_position = _extract_q_position(row)
+
+            if tcp_position is None and q_position is None:
+                continue
+
+            waypoints.append(
+                {
+                    "index": idx,
+                    "name": str(row.get("waypoint_name", "")).strip(),
+                    "tcp_position": tcp_position,
+                    "q_position": q_position,
+                }
+            )
+
+    waypoints.sort(key=lambda item: item["index"])
+    return waypoints
+
+
 def register_subtasks(registry):
     """Register simple team-editable subtasks."""
 
@@ -68,6 +136,99 @@ def register_subtasks(registry):
     registry["example"] = {
         "description": "Minimal collaborative subtask template",
         "runner": _example,
+    }
+
+    def _run_named_waypoint_task(
+        supervisor,
+        params,
+        *,
+        task_name,
+        default_csv,
+        default_task_id,
+        arm_side,
+    ):
+        waypoints_csv = Path(params.get("named_waypoints_csv", default_csv))
+        task_id = str(params.get("task_id", default_task_id))
+        speed = params.get("speed", None)
+        acceleration = params.get("acceleration", None)
+
+        if not waypoints_csv.exists():
+            raise FileNotFoundError(f"Named waypoints CSV not found: {waypoints_csv}")
+
+        waypoints = _load_named_waypoints(waypoints_csv, task_id=task_id, arm_prefix=arm_side)
+        if not waypoints:
+            raise RuntimeError(
+                f"No valid {arm_side}-arm waypoints found in {waypoints_csv} for task_id={task_id}"
+            )
+
+        arm_ip = supervisor.right_ip if arm_side == "right" else supervisor.left_ip
+        arm = UR5Arm(arm_ip, verbose=False)
+        try:
+            print(f"[{task_name}] Replaying {len(waypoints)} waypoints from {waypoints_csv}")
+            for wp in waypoints:
+                ok = arm.move_to_joint_position(
+                    wp,
+                    speed=speed,
+                    acceleration=acceleration,
+                    asynchronous=False,
+                )
+                if not ok:
+                    raise RuntimeError(
+                        f"Failed at waypoint index={wp['index']} name={wp['name'] or '<unnamed>'}"
+                    )
+
+            arm.stop_arm(use_linear=False)
+            print(f"[{task_name}] Waypoint replay complete")
+            return True
+        finally:
+            arm.disconnect()
+
+    def _acquire_bowl(supervisor, params):
+        """Execute acquire_bowl using recorded right-arm named waypoints."""
+        return _run_named_waypoint_task(
+            supervisor,
+            params,
+            task_name="acquire_bowl",
+            default_csv="UR5/waypoints_acquire_bowl.csv",
+            default_task_id="acquire_bowl",
+            arm_side="right",
+        )
+
+    registry["acquire_bowl"] = {
+        "description": "Run right-arm acquire bowl sequence from named waypoints CSV",
+        "runner": _acquire_bowl,
+    }
+
+    def _open_microwave_door(supervisor, params):
+        """Execute open_microwave_door using recorded left-arm named waypoints."""
+        return _run_named_waypoint_task(
+            supervisor,
+            params,
+            task_name="open_microwave_door",
+            default_csv="UR5/waypoints_open_microwave_door.csv",
+            default_task_id="open_microwave_door",
+            arm_side="left",
+        )
+
+    registry["open_microwave_door"] = {
+        "description": "Run left-arm open microwave door sequence from named waypoints CSV",
+        "runner": _open_microwave_door,
+    }
+
+    def _close_microwave_door(supervisor, params):
+        """Execute close_microwave_door using recorded left-arm named waypoints."""
+        return _run_named_waypoint_task(
+            supervisor,
+            params,
+            task_name="close_microwave_door",
+            default_csv="UR5/waypoints_close_microwave_door.csv",
+            default_task_id="close_microwave_door",
+            arm_side="left",
+        )
+
+    registry["close_microwave_door"] = {
+        "description": "Run left-arm close microwave door sequence from named waypoints CSV",
+        "runner": _close_microwave_door,
     }
 
     def _total_replay(supervisor, params):

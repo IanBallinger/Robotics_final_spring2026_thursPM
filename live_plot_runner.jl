@@ -59,10 +59,16 @@ function append_named_waypoint_row(path::String, row::Dict{String, Any})
         get(row, "task_id", ""),
         get(row, "task_name", ""),
         get(row, "dependent_item_label", ""),
+        get(row, "left_gripper_open", ""),
+        get(row, "right_gripper_open", ""),
         get(row, "left_x", ""), get(row, "left_y", ""), get(row, "left_z", ""),
         get(row, "left_rx", ""), get(row, "left_ry", ""), get(row, "left_rz", ""),
+        get(row, "left_q_0", ""), get(row, "left_q_1", ""), get(row, "left_q_2", ""),
+        get(row, "left_q_3", ""), get(row, "left_q_4", ""), get(row, "left_q_5", ""),
         get(row, "right_x", ""), get(row, "right_y", ""), get(row, "right_z", ""),
         get(row, "right_rx", ""), get(row, "right_ry", ""), get(row, "right_rz", ""),
+        get(row, "right_q_0", ""), get(row, "right_q_1", ""), get(row, "right_q_2", ""),
+        get(row, "right_q_3", ""), get(row, "right_q_4", ""), get(row, "right_q_5", ""),
         get(row, "left_distance_to_dependent_m", ""),
         get(row, "right_distance_to_dependent_m", ""),
         get(row, "left_offset_dx", ""), get(row, "left_offset_dy", ""), get(row, "left_offset_dz", ""),
@@ -81,8 +87,11 @@ function ensure_named_waypoints_header(path::String)
     open(path, "w") do io
         println(io,
             "waypoint_index,waypoint_name,task_id,task_name,dependent_item_label," *
+            "left_gripper_open,right_gripper_open," *
             "left_x,left_y,left_z,left_rx,left_ry,left_rz," *
+            "left_q_0,left_q_1,left_q_2,left_q_3,left_q_4,left_q_5," *
             "right_x,right_y,right_z,right_rx,right_ry,right_rz," *
+            "right_q_0,right_q_1,right_q_2,right_q_3,right_q_4,right_q_5," *
             "left_distance_to_dependent_m,right_distance_to_dependent_m," *
             "left_offset_dx,left_offset_dy,left_offset_dz,right_offset_dx,right_offset_dy,right_offset_dz," *
             "waypoint_mark_time"
@@ -252,6 +261,8 @@ function main()
 
                         left_pose = haskey(pkt, :left_actual_TCP_pose) ? collect(Float64.(pkt.left_actual_TCP_pose)) : Float64[]
                         right_pose = haskey(pkt, :right_actual_TCP_pose) ? collect(Float64.(pkt.right_actual_TCP_pose)) : Float64[]
+                        left_q = haskey(pkt, :left_actual_q) ? collect(Float64.(pkt.left_actual_q)) : Float64[]
+                        right_q = haskey(pkt, :right_actual_q) ? collect(Float64.(pkt.right_actual_q)) : Float64[]
                         left_offset = haskey(pkt, :left_offset_to_dependent_xyz) && pkt.left_offset_to_dependent_xyz !== nothing ? collect(Float64.(pkt.left_offset_to_dependent_xyz)) : Float64[]
                         right_offset = haskey(pkt, :right_offset_to_dependent_xyz) && pkt.right_offset_to_dependent_xyz !== nothing ? collect(Float64.(pkt.right_offset_to_dependent_xyz)) : Float64[]
 
@@ -260,18 +271,32 @@ function main()
                             "task_id" => String(get(pkt, :task_id, "")),
                             "task_name" => String(get(pkt, :task_name, "")),
                             "dependent_item_label" => String(get(pkt, :dependent_item_label, "")),
+                            "left_gripper_open" => get(pkt, :left_gripper_open, ""),
+                            "right_gripper_open" => get(pkt, :right_gripper_open, ""),
                             "left_x" => length(left_pose) >= 1 ? left_pose[1] : "",
                             "left_y" => length(left_pose) >= 2 ? left_pose[2] : "",
                             "left_z" => length(left_pose) >= 3 ? left_pose[3] : "",
                             "left_rx" => length(left_pose) >= 4 ? left_pose[4] : "",
                             "left_ry" => length(left_pose) >= 5 ? left_pose[5] : "",
                             "left_rz" => length(left_pose) >= 6 ? left_pose[6] : "",
+                            "left_q_0" => length(left_q) >= 1 ? left_q[1] : "",
+                            "left_q_1" => length(left_q) >= 2 ? left_q[2] : "",
+                            "left_q_2" => length(left_q) >= 3 ? left_q[3] : "",
+                            "left_q_3" => length(left_q) >= 4 ? left_q[4] : "",
+                            "left_q_4" => length(left_q) >= 5 ? left_q[5] : "",
+                            "left_q_5" => length(left_q) >= 6 ? left_q[6] : "",
                             "right_x" => length(right_pose) >= 1 ? right_pose[1] : "",
                             "right_y" => length(right_pose) >= 2 ? right_pose[2] : "",
                             "right_z" => length(right_pose) >= 3 ? right_pose[3] : "",
                             "right_rx" => length(right_pose) >= 4 ? right_pose[4] : "",
                             "right_ry" => length(right_pose) >= 5 ? right_pose[5] : "",
                             "right_rz" => length(right_pose) >= 6 ? right_pose[6] : "",
+                            "right_q_0" => length(right_q) >= 1 ? right_q[1] : "",
+                            "right_q_1" => length(right_q) >= 2 ? right_q[2] : "",
+                            "right_q_2" => length(right_q) >= 3 ? right_q[3] : "",
+                            "right_q_3" => length(right_q) >= 4 ? right_q[4] : "",
+                            "right_q_4" => length(right_q) >= 5 ? right_q[5] : "",
+                            "right_q_5" => length(right_q) >= 6 ? right_q[6] : "",
                             "left_distance_to_dependent_m" => get(pkt, :left_distance_to_dependent_m, ""),
                             "right_distance_to_dependent_m" => get(pkt, :right_distance_to_dependent_m, ""),
                             "left_offset_dx" => length(left_offset) >= 1 ? left_offset[1] : "",
