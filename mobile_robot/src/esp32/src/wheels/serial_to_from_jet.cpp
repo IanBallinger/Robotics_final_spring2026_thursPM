@@ -164,6 +164,7 @@ bool handleWheelCommand(const String& line, DesiredWheelVel& des_wheel_spd) {
 
   // Match physical wheel polarity:
   // w1 = left_front, w2 = right_front, w3 = left_rear, w4 = right_rear.
+  des_wheel_spd.w1 *= -1.0f;
   des_wheel_spd.w2 *= -1.0f;
   des_wheel_spd.w4 *= -1.0f;
 
@@ -232,8 +233,8 @@ static void applyWheelCommand(const DesiredWheelVel& cmd) {
 
 static bool joystickToWheelCommand(const ControllerMessage& controller_msg,
                                   DesiredWheelVel& des_wheel_spd) {
-  const float forward_input = controller_msg.joystick1.y;
-  const float turn_input = controller_msg.joystick2.y;
+  const float forward_input = controller_msg.joystick2.y;
+  const float turn_input = controller_msg.joystick1.y;
 
   const float forward = fabs(forward_input) < JOYSTICK_DEADBAND
                             ? 0.0f
@@ -255,19 +256,19 @@ static bool joystickToWheelCommand(const ControllerMessage& controller_msg,
   //   joystick1.y -> forward/back
   //   joystick2.y -> turn in place
   // Wheel command order here is:
-  //   w1 = left_front
-  //   w2 = right_front
-  //   w3 = left_rear
+  //   w1 = left_rear
+  //   w2 = left_front
+  //   w3 = right_front
   //   w4 = right_rear
   const float left = forward - turn;
   const float right = forward + turn;
 
   String wheel_cmd_line = "WHL_CMD,";
+  wheel_cmd_line += String(-left, 4);
+  wheel_cmd_line += ",";
   wheel_cmd_line += String(left, 4);
   wheel_cmd_line += ",";
   wheel_cmd_line += String(right, 4);
-  wheel_cmd_line += ",";
-  wheel_cmd_line += String(left, 4);
   wheel_cmd_line += ",";
   wheel_cmd_line += String(right, 4);
 

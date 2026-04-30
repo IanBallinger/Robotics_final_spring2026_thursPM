@@ -10,7 +10,7 @@ void ControllerMessage::print() {
     Serial.printf("dPad:\n");  dPad.print(1);
     Serial.printf("buttonL: %s\n", buttonL);
     Serial.printf("buttonR: %s\n", buttonR);
-    Serial.printf("touchPoint:\n"); touchPoint.print(1);
+    Serial.printf("touchPoint:\n");  touchPoint.print(1);
 } 
 
 bool ControllerMessage::operator==(const ControllerMessage& other) {
