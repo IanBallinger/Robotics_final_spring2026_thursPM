@@ -265,17 +265,17 @@ static bool joystickToWheelCommand(const ControllerMessage& controller_msg,
   //   joystick2.y -> turn in place
   // Legend:
   // w1 = left_front (MOTOR 2), w2 = right_front (MOTOR 3), w3 = left_rear (MOTOR 1), w4 = right_rear (MOTOR 4).
-  const float left = forward - turn;
-  const float right = forward + turn;
+  const float left = forward + turn;
+  const float right = forward - turn;
 
   String wheel_cmd_line = "WHL_CMD,";
-  wheel_cmd_line += String(right, 4);
-  wheel_cmd_line += ",";
-  wheel_cmd_line += String(right, 4);
-  wheel_cmd_line += ",";
   wheel_cmd_line += String(left, 4);
   wheel_cmd_line += ",";
   wheel_cmd_line += String(left, 4);
+  wheel_cmd_line += ",";
+  wheel_cmd_line += String(right, 4);
+  wheel_cmd_line += ",";
+  wheel_cmd_line += String(right, 4);
 
   Serial.println(wheel_cmd_line);
 

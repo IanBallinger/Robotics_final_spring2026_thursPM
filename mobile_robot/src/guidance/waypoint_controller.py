@@ -33,7 +33,11 @@ class MapPoseVelocity:
 
 @dataclass(frozen=True)
 class DifferentialDriveCommand:
-    """Body twist plus wheel angular-rate command for a 4-wheel 2-side drive."""
+    """Body twist plus wheel angular-rate command.
+
+    Wheel-rate tuple uses canonical order matching the ESP32 wheel controller:
+    ``(w1, w2, w3, w4) = (left_front, right_front, left_rear, right_rear)``.
+    """
 
     vx: float
     vy: float
@@ -106,7 +110,7 @@ class CascadedWaypointController:
         # clamp wheel rates
         w_left = np.clip(float(w_left),-3.0,3.0)
         w_right = np.clip(float(w_right),-3.0,3.0)
-        return w_left, w_right, w_left, w_right
+        return w_left, w_left, w_right, w_right
 
     def wheel_rates_to_body_twist(
         self,
