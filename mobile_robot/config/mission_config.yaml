@@ -128,7 +128,7 @@ initial_state:
   position:
     x: 2.15
     y: 1.31
-  heading: -3.14
+  heading: 3.14
 localization:
   # Demo/local defaults: trust AprilTag and wheel odometry far more than raw IMU.
   filter: ekf
@@ -155,7 +155,7 @@ tasks:
       position:
         x: 1.5
         y: 1.31
-      heading: 0.0
+      heading: 3.14
     enter_conditions:
       - current_task == "drive_to_tray"
     completion_conditions:
