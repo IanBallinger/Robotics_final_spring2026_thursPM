@@ -896,7 +896,7 @@ class MissionRuntime:
                 self._update_live_map_plot(state)
 
                 print(
-                    f"tick={tick:04d} task={new_task} pos=({state.x:.3f}, {state.y:.3f}) "
+                    f"tick={tick:04d} dt={dt:04d} task={new_task} pos=({state.x:.3f}, {state.y:.3f}) "
                     f"yaw={state.heading:.3f} goal_err={goal_error:.3f} "
                     f"heading_err={heading_error:.3f} wheel_rates={tuple(round(v, 3) for v in cmd.wheel_rates)}"
                 )
