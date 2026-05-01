@@ -153,8 +153,8 @@ tasks:
     desired_elevator_height_m: 0.0
     goal:
       position:
-        x: 0.75
-        y: 0.15
+        x: 1.5
+        y: 1.31
       heading: 0.0
     enter_conditions:
       - current_task == "drive_to_tray"
@@ -162,29 +162,29 @@ tasks:
       - distance_to_goal <= 0.05
       - abs(heading_error) <= 0.10
       - abs(elevator_height_error_m) <= 0.01
-  - name: drive_to_zone
-    desired_elevator_height_m: 0.0
-    goal:
-      position:
-        x: 1.55
-        y: 0.55
-      heading: 1.57
-    enter_conditions:
-      - current_task == "drive_to_zone"
-    completion_conditions:
-      - distance_to_goal <= 0.08
-      - abs(heading_error) <= 0.12
-      - abs(elevator_height_error_m) <= 0.01
-  - name: drive_to_elevator
-    desired_elevator_height_m: 0.0
-    goal:
-      position:
-        x: 0.7
-        y: 1.4
-      heading: 1.57
-    enter_conditions:
-      - current_task == "drive_to_elevator"
-    completion_conditions:
-      - distance_to_goal <= 0.05
-      - abs(heading_error) <= 0.10
-      - abs(elevator_height_error_m) <= 0.01
+  # - name: drive_to_zone
+  #   desired_elevator_height_m: 0.0
+  #   goal:
+  #     position:
+  #       x: 1.55
+  #       y: 0.55
+  #     heading: 1.57
+  #   enter_conditions:
+  #     - current_task == "drive_to_zone"
+  #   completion_conditions:
+  #     - distance_to_goal <= 0.08
+  #     - abs(heading_error) <= 0.12
+  #     - abs(elevator_height_error_m) <= 0.01
+  # - name: drive_to_elevator
+  #   desired_elevator_height_m: 0.0
+  #   goal:
+  #     position:
+  #       x: 0.7
+  #       y: 1.4
+  #     heading: 1.57
+  #   enter_conditions:
+  #     - current_task == "drive_to_elevator"
+  #   completion_conditions:
+  #     - distance_to_goal <= 0.05
+  #     - abs(heading_error) <= 0.10
+  #     - abs(elevator_height_error_m) <= 0.01
