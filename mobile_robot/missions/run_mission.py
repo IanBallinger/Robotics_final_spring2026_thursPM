@@ -861,8 +861,8 @@ class MissionRuntime:
                 self._update_localization_from_imu(dt)
                 self._maybe_capture_wheel_debug_lines()
                 self._maybe_update_apriltag()
-                self._update_dynamic_person_obstacles()
-                self._update_elevator_from_serial(current_task)
+                #self._update_dynamic_person_obstacles()
+                #self._update_elevator_from_serial(current_task)
 
                 state = self._current_state_for_controller()
                 goal_wp, final_pose_mode = self._active_goal_waypoint(
@@ -871,16 +871,16 @@ class MissionRuntime:
                 cmd = self.controller.compute(
                     state, goal_wp, final_pose_mode=final_pose_mode
                 )
-                path_blocked = self._path_intersects_dynamic_obstacle(
-                    current_task, state
-                )
-                if path_blocked:
-                    cmd = self._zero_drive_command()
+                #path_blocked = self._path_intersects_dynamic_obstacle(
+                #    current_task, state
+                #)
+                #if path_blocked:
+                #    cmd = self._zero_drive_command()
                 
                 # cmd = self._zero_drive_command()
-                self.blackboard.set("obstacle_blocking_path", path_blocked)
-                self.serial.send_wheel_cmd(1,0,0,0)
-                # self.serial.send_wheel_cmd(*cmd.wheel_rates)
+                # self.blackboard.set("obstacle_blocking_path", path_blocked)
+                # self.serial.send_wheel_cmd(1,0,0,0)
+                self.serial.send_wheel_cmd(*cmd.wheel_rates)
                 self.serial.flush_tx()
 
                 goal_error, heading_error = self._update_blackboard(current_task)
@@ -893,10 +893,10 @@ class MissionRuntime:
                 self.tree.tick()
                 new_task = self.blackboard.get("current_task")
 
-                self._update_live_map_plot(state)
+                # self._update_live_map_plot(state)
 
                 print(
-                    f"tick={tick:04d} dt={dt:04d} task={new_task} pos=({state.x:.3f}, {state.y:.3f}) "
+                    f"tick={tick:04d} dt={dt:.3f} task={new_task} pos=({state.x:.3f}, {state.y:.3f}) "
                     f"yaw={state.heading:.3f} goal_err={goal_error:.3f} "
                     f"heading_err={heading_error:.3f} wheel_rates={tuple(round(v, 3) for v in cmd.wheel_rates)}"
                 )
