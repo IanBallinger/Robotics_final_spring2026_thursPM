@@ -252,6 +252,7 @@ class MissionRuntime:
 
         self._last_debug_cmd_line: Optional[str] = None
         self._last_debug_eff_line: Optional[str] = None
+        self._last_debug_enc_line: Optional[str] = None
 
         self.last_loop_time = time.monotonic()
         self.telemetry_host = telemetry_host
@@ -750,6 +751,8 @@ class MissionRuntime:
             self._last_debug_cmd_line = raw_line
         elif raw_line.startswith("EFF,"):
             self._last_debug_eff_line = raw_line
+        elif raw_line.startswith("ENC,"):
+            self._last_debug_enc_line = raw_line
 
     def _publish_telemetry(
         self,
@@ -901,6 +904,8 @@ class MissionRuntime:
                         print(f"  wheel_ack: {self._last_debug_cmd_line}")
                     if self._last_debug_eff_line is not None:
                         print(f"  wheel_eff: {self._last_debug_eff_line}")
+                    if self._last_debug_enc_line is not None:
+                        print(f"  wheel_enc: {self._last_debug_enc_line}")
 
                 tick += 1
                 sleep_dt = period - (time.monotonic() - now)
