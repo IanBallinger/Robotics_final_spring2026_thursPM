@@ -148,9 +148,17 @@ mission_runtime:
   waypoint_capture_radius: 0.05
   controller_v_max: 0.35
   controller_omega_max: 1.8
+  person_detection_period_s: 1.0
 tasks:
   - name: drive_to_tray
     desired_elevator_height_m: 0.0
+    # Optional planar arm waypoints, sent in order as ARM_CMD,x,y
+    # arm_waypoints:
+    #   - x: 0.12
+    #     y: 0.18
+    #   - x: 0.16
+    #     y: 0.22
+    # arm_point_dwell_s: 0.5
     goal:
       position:
         x: 1.5
@@ -159,7 +167,7 @@ tasks:
     enter_conditions:
       - current_task == "drive_to_tray"
     completion_conditions:
-      - distance_to_goal <= 0.05
+      - distance_to_goal <= 0.10
       - abs(heading_error) <= 0.10
       #- abs(elevator_height_error_m) <= 0.01
   # - name: drive_to_zone

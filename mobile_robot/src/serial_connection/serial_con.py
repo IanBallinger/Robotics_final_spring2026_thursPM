@@ -5,6 +5,12 @@ Default wire format:
 - host -> MCU: ``WHL_CMD,w1,w2,w3,w4\n``
 - MCU -> host: ``ACK,...`` / ``IMU,...`` / error lines
 
+Wheel ordering is canonical and matches the ESP32 wheel controller:
+- w1 = left_front  (MOTOR 2)
+- w2 = right_front (MOTOR 3)
+- w3 = left_rear   (MOTOR 1)
+- w4 = right_rear  (MOTOR 4)
+
 This transport intentionally rate-limits both directions:
 - outbound wheel commands are buffered and only the latest pending command is sent
   at ``tx_rate_hz``

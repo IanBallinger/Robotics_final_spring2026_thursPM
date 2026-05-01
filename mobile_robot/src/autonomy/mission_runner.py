@@ -36,6 +36,12 @@ class Pose2D:
 
 
 @dataclass(frozen=True)
+class ArmWaypoint:
+    x: float
+    y: float
+
+
+@dataclass(frozen=True)
 class Task:
     name: str
     start: Pose2D
@@ -43,6 +49,8 @@ class Task:
     desired_elevator_height_m: float
     enter_conditions: List[str]
     completion_conditions: List[str]
+    arm_waypoints: List[ArmWaypoint]
+    arm_point_dwell_s: float
 
 
 def default_tasks_path() -> Path:
@@ -79,6 +87,10 @@ def _load_pose(raw: Mapping[str, Any]) -> Pose2D:
 
 def _load_point(raw: Mapping[str, Any]) -> tuple[float, float]:
     return (float(raw["x"]), float(raw["y"]))
+
+
+def _load_arm_waypoint(raw: Mapping[str, Any]) -> ArmWaypoint:
+    return ArmWaypoint(x=float(raw["x"]), y=float(raw["y"]))
 
 
 def load_map(path: Path | str) -> Map:
@@ -143,6 +155,11 @@ def load_tasks(path: Path | str) -> List[Task]:
                 completion_conditions=[
                     str(x) for x in row.get("completion_conditions", [])
                 ],
+                arm_waypoints=[
+                    _load_arm_waypoint(point)
+                    for point in row.get("arm_waypoints", [])
+                ],
+                arm_point_dwell_s=float(row.get("arm_point_dwell_s", 0.5)),
             )
         )
         current_start = goal
@@ -250,6 +267,7 @@ class MissionRunner:
 
 
 __all__ = [
+    "ArmWaypoint",
     "MissionRunner",
     "Pose2D",
     "Task",

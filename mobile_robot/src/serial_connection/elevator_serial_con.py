@@ -12,12 +12,14 @@ try:
         parse_elevator_line,
         serialize_elevator_cmd,
     )
+    from .serialization import serialize_arm_cmd
 except ImportError:
     from elevator_serialization import (  # type: ignore[no-redef]
         ElevatorHeightReading,
         parse_elevator_line,
         serialize_elevator_cmd,
     )
+    from serialization import serialize_arm_cmd  # type: ignore[no-redef]
 
 
 class ElevatorSerialConnect:
@@ -44,6 +46,7 @@ class ElevatorSerialConnect:
         self._rx_buffer = b""
 
         self._pending_height_cmd: Optional[float] = None
+        self._pending_arm_cmd: Optional[tuple[float, float]] = None
         self._last_tx_time: Optional[float] = None
 
         self._latest_raw_line: Optional[str] = None
@@ -81,7 +84,8 @@ class ElevatorSerialConnect:
             print(f"[{tag}] dt={now - last:.6f}s")
 
     def _tx_due(self, now: float) -> bool:
-        return self._pending_height_cmd is not None and (
+        has_pending = self._pending_height_cmd is not None or self._pending_arm_cmd is not None
+        return has_pending and (
             self._tx_period <= 0.0
             or self._last_tx_time is None
             or (now - self._last_tx_time) >= self._tx_period
@@ -96,23 +100,40 @@ class ElevatorSerialConnect:
 
     def _write_pending_if_due(self, force: bool = False) -> bool:
         now = time.monotonic()
-        if self._pending_height_cmd is None:
+        if self._pending_height_cmd is None and self._pending_arm_cmd is None:
             return False
         if not force and not self._tx_due(now):
             return False
 
-        payload = serialize_elevator_cmd(self._pending_height_cmd)
-        self.ser.write(payload.encode("ascii"))
-        self.ser.flush()
-        self._debug_dt("TX ELV_CMD", now, self._last_tx_time)
-        if self.debug:
-            print(f"[TX ELV_CMD] {payload.strip()}")
-        self._last_tx_time = now
-        self._pending_height_cmd = None
-        return True
+        wrote_any = False
+        if self._pending_height_cmd is not None:
+            payload = serialize_elevator_cmd(self._pending_height_cmd)
+            self.ser.write(payload.encode("ascii"))
+            self._debug_dt("TX ELV_CMD", now, self._last_tx_time)
+            if self.debug:
+                print(f"[TX ELV_CMD] {payload.strip()}")
+            self._pending_height_cmd = None
+            wrote_any = True
+
+        if self._pending_arm_cmd is not None:
+            payload = serialize_arm_cmd(*self._pending_arm_cmd)
+            self.ser.write(payload.encode("ascii"))
+            if self.debug:
+                print(f"[TX ARM_CMD] {payload.strip()}")
+            self._pending_arm_cmd = None
+            wrote_any = True
+
+        if wrote_any:
+            self.ser.flush()
+            self._last_tx_time = now
+        return wrote_any
 
     def send_height_cmd(self, desired_height_m: float, force: bool = False) -> bool:
         self._pending_height_cmd = float(desired_height_m)
+        return self._write_pending_if_due(force=force)
+
+    def send_arm_cmd(self, x_m: float, y_m: float, force: bool = False) -> bool:
+        self._pending_arm_cmd = (float(x_m), float(y_m))
         return self._write_pending_if_due(force=force)
 
     def flush_tx(self, force: bool = False) -> bool:

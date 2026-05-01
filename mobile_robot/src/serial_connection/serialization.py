@@ -5,6 +5,12 @@ Host → MCU (one line, newline-terminated)::
 
     WHL_CMD,<w1>,<w2>,<w3>,<w4>
 
+Wheel ordering is canonical and must match the ESP32 wheel controller:
+- w1 = left_front  (MOTOR 2)
+- w2 = right_front (MOTOR 3)
+- w3 = left_rear   (MOTOR 1)
+- w4 = right_rear  (MOTOR 4)
+
 MCU → host::
 
     ACK,<w1>,<w2>,<w3>,<w4>     # after a valid WHL_CMD (echo of commanded setpoints)
@@ -21,7 +27,7 @@ from typing import Optional, Union
 
 
 def serialize_wheel_cmd(w1: float, w2: float, w3: float, w4: float) -> str:
-    """Same as ``serialize_whl`` with explicit wheel indices."""
+    """Serialize a wheel command in canonical order ``(LF, RF, LR, RR)``."""
     return f"WHL_CMD,{w1},{w2},{w3},{w4}\n"
 
 
@@ -45,6 +51,8 @@ class IMUReading:
 
 @dataclass(frozen=True)
 class EncoderReading:
+    # Canonical wheel order from the ESP32 wheel controller:
+    # w1 = left_front, w2 = right_front, w3 = left_rear, w4 = right_rear.
     w1: float
     w2: float
     w3: float

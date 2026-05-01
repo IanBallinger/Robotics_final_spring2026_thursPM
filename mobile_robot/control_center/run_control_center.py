@@ -16,6 +16,8 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from matplotlib.widgets import Button
+
 import numpy as np
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -127,6 +129,12 @@ def _apply_dynamic_obstacles(map_: Map, telemetry: dict[str, Any]) -> None:
 
 
 
+def _button_style(button: Button, *, active: bool, on_color: str, off_color: str) -> None:
+    button.color = on_color if active else off_color
+    button.hovercolor = button.color
+    button.ax.set_facecolor(button.color)
+
+
 def setup_plot(map_: Map, tasks: list[Any]):
     try:
         import matplotlib.pyplot as plt
@@ -134,6 +142,7 @@ def setup_plot(map_: Map, tasks: list[Any]):
         raise RuntimeError("matplotlib is required for visualization") from exc
 
     fig, ax = plt.subplots(figsize=(11, 7))
+    fig.subplots_adjust(bottom=0.14)
     draw_map_background(ax, map_)
     _draw_task_goals(ax, tasks)
 
@@ -149,8 +158,25 @@ def setup_plot(map_: Map, tasks: list[Any]):
     ax.set_aspect("equal", adjustable="box")
     ax.grid(True, alpha=0.25)
     ax.legend(loc="upper left", fontsize=8)
-    fig.tight_layout()
-    return plt, fig, ax, traj_line, robot_marker, cell_patch, status_text
+    deploy_ax = fig.add_axes([0.12, 0.03, 0.18, 0.07])
+    allstop_ax = fig.add_axes([0.34, 0.03, 0.18, 0.07])
+    deploy_button = Button(deploy_ax, "DEPLOY: OFF")
+    allstop_button = Button(allstop_ax, "ALLSTOP: OFF")
+    _button_style(deploy_button, active=False, on_color="tab:green", off_color="0.85")
+    _button_style(allstop_button, active=False, on_color="tab:red", off_color="0.85")
+
+    fig.tight_layout(rect=(0.0, 0.12, 1.0, 1.0))
+    return (
+        plt,
+        fig,
+        ax,
+        traj_line,
+        robot_marker,
+        cell_patch,
+        status_text,
+        deploy_button,
+        allstop_button,
+    )
 
 
 def update_visualization(
@@ -204,6 +230,9 @@ def update_visualization(
             f"distance_to_goal: {float(telemetry.get('distance_to_goal', float('nan'))):.3f}",
             f"heading_error: {float(telemetry.get('heading_error', float('nan'))):.3f}",
             f"localization_ok: {telemetry.get('localization_ok')}",
+            f"deploy: {telemetry.get('deploy')}",
+            f"allstop: {telemetry.get('allstop')}",
+            f"paused: {telemetry.get('paused')}",
             f"dynamic_obstacles: {len(telemetry.get('dynamic_obstacles', []))}",
         ]
     )
@@ -238,6 +267,12 @@ def main() -> None:
     parser.add_argument("--max-seconds", type=float, default=0.0, help="0 means run forever")
     parser.add_argument("--no-show", action="store_true")
     parser.add_argument(
+        "--control-host",
+        default=None,
+        help="UDP host/IP for deploy/allstop control packets; defaults to latest telemetry sender",
+    )
+    parser.add_argument("--control-port", type=int, default=8766)
+    parser.add_argument(
         "--save-path",
         default=os.path.join(os.path.dirname(__file__), "control_center_view.png"),
     )
@@ -245,7 +280,17 @@ def main() -> None:
 
     tasks = load_tasks(Path(args.tasks))
     map_ = load_map(Path(args.tasks))
-    plt, fig, ax, traj_line, robot_marker, cell_patch, status_text = setup_plot(map_, tasks)
+    (
+        plt,
+        fig,
+        ax,
+        traj_line,
+        robot_marker,
+        cell_patch,
+        status_text,
+        deploy_button,
+        allstop_button,
+    ) = setup_plot(map_, tasks)
     if not args.no_show:
         plt.ion()
         plt.show(block=False)
@@ -253,12 +298,64 @@ def main() -> None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((args.bind_host, args.port))
     sock.settimeout(args.timeout)
+    control_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     print(f"Listening for telemetry on udp://{args.bind_host}:{args.port}")
 
     traj_x: list[float] = []
     traj_y: list[float] = []
     latest: Optional[dict[str, Any]] = None
+    latest_sender_host: Optional[str] = None
+    control_state = {"deploy": False, "allstop": False}
     t0 = time.monotonic()
+
+    def control_target_host() -> Optional[str]:
+        return args.control_host or latest_sender_host
+
+    def send_control_state() -> None:
+        host = control_target_host()
+        if host is None:
+            print("control tx skipped: no target host yet")
+            return
+        payload = json.dumps(control_state).encode("utf-8")
+        control_sock.sendto(payload, (host, args.control_port))
+        print(
+            f"control tx {host}:{args.control_port} deploy={control_state['deploy']} allstop={control_state['allstop']}"
+        )
+
+    def refresh_buttons() -> None:
+        deploy_button.label.set_text(
+            f"DEPLOY: {'ON' if control_state['deploy'] else 'OFF'}"
+        )
+        allstop_button.label.set_text(
+            f"ALLSTOP: {'ON' if control_state['allstop'] else 'OFF'}"
+        )
+        _button_style(
+            deploy_button,
+            active=control_state['deploy'],
+            on_color="tab:green",
+            off_color="0.85",
+        )
+        _button_style(
+            allstop_button,
+            active=control_state['allstop'],
+            on_color="tab:red",
+            off_color="0.85",
+        )
+        fig.canvas.draw_idle()
+
+    def on_deploy(_event) -> None:
+        control_state["deploy"] = not control_state["deploy"]
+        refresh_buttons()
+        send_control_state()
+
+    def on_allstop(_event) -> None:
+        control_state["allstop"] = not control_state["allstop"]
+        refresh_buttons()
+        send_control_state()
+
+    deploy_button.on_clicked(on_deploy)
+    allstop_button.on_clicked(on_allstop)
+    refresh_buttons()
 
     try:
         while True:
@@ -267,8 +364,12 @@ def main() -> None:
             try:
                 payload, addr = sock.recvfrom(65535)
                 latest = json.loads(payload.decode("utf-8"))
+                latest_sender_host = addr[0]
                 traj_x.append(float(latest["x"]))
                 traj_y.append(float(latest["y"]))
+                control_state["deploy"] = bool(latest.get("deploy", control_state["deploy"]))
+                control_state["allstop"] = bool(latest.get("allstop", control_state["allstop"]))
+                refresh_buttons()
                 print(
                     f"rx {addr[0]}:{addr[1]} task={latest.get('current_task')} "
                     f"pose=({latest.get('x'):.3f}, {latest.get('y'):.3f}, {latest.get('yaw'):.3f}) cell={latest.get('cell')}"
@@ -291,6 +392,7 @@ def main() -> None:
         pass
     finally:
         sock.close()
+        control_sock.close()
 
     if args.no_show:
         fig.savefig(args.save_path, dpi=150)

@@ -116,11 +116,21 @@ class CascadedWaypointController:
         self,
         wheel_rates: Tuple[float, float, float, float],
     ) -> Tuple[float, float, float]:
-        """Convert 4-wheel side commands back to body-command space."""
-        w_lf, w_rf, w_lr, w_rr = (float(w) for w in wheel_rates)
+        """Convert ESP32-reported wheel rates back to body-command space.
+
+        Ground truth is ``serial_to_from_jet.cpp``:
+        - host TX uses ``WHL_CMD,left,left,right,right``
+        - the ESP32 flips signs internally on channels 2 and 3
+        - encoder/debug output is reported in the ESP32 wheel-index order
+
+        Therefore the measured tuple ``(w1, w2, w3, w4)`` should be interpreted as:
+        - left side command  ~= ``(w1 - w2) / 2``
+        - right side command ~= ``(w4 - w3) / 2``
+        """
+        w1, w2, w3, w4 = (float(w) for w in wheel_rates)
         r = self.wheel_radius
-        w_left = 0.5 * (w_lf + w_lr)
-        w_right = 0.5 * (w_rf + w_rr)
+        w_left = 0.5 * (w1 - w2)
+        w_right = 0.5 * (w4 - w3)
         vx_body = 0.5 * r * (w_left + w_right)
         omega = 0.5 * r * (w_right - w_left)
         return float(vx_body), 0.0, float(omega)

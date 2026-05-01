@@ -221,12 +221,6 @@ static DesiredWheelVel lowPassWheelCommand(const DesiredWheelVel& target,
   return latest_applied_cmd;
 }
 
-static void sampleWheelEncoders() {
-  for (uint8_t i = 0; i < num_wheels; ++i) {
-    measured_vel[i] = ENCODER_SIGN[i] * encoders[i].getVelocity();
-  }
-}
-
 static void applyWheelCommand(const DesiredWheelVel& cmd) {
   const float setpoints[num_wheels] = {cmd.w1, cmd.w2, cmd.w3, cmd.w4};
 
@@ -235,7 +229,8 @@ static void applyWheelCommand(const DesiredWheelVel& cmd) {
       wheels[i].drive(0.0f);
     }
     else{
-      control_effort[i] = pids[i].calculateParallel(measured_vel[i], setpoints[i]);
+      measured_vel = ENCODER_SIGN[i] * encoders[i].getVelocity();
+      control_effort[i] = pids[i].calculateParallel(measured_vel, setpoints[i]);
       wheels[i].drive(control_effort[i]);
     }
 
@@ -434,7 +429,6 @@ void loop() {
   }
 
   const unsigned long now = millis();
-  sampleWheelEncoders();
 
   if (autonomy_enabled) {
     if (now - last_cmd_rx_ms > CMD_TIMEOUT_MS) {

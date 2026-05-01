@@ -99,6 +99,7 @@ class RuntimeConfig:
     waypoint_capture_radius: float
     controller_v_max: float
     controller_omega_max: float
+    person_detection_period_s: float
 
 
 @dataclass
@@ -142,6 +143,9 @@ class TelemetryPacket:
     localization_ok: bool
     distance_to_goal: float
     heading_error: float
+    deploy: bool
+    allstop: bool
+    paused: bool
     dynamic_obstacles: list[DynamicObstaclePacket]
 
 
@@ -158,6 +162,8 @@ class MissionRuntime:
         telemetry_host: Optional[str],
         telemetry_port: int,
         telemetry_rate_hz: float,
+        control_host: str,
+        control_port: int,
     ):
         self.tasks_path = Path(tasks_cfg_path)
         self.localization_cfg_path = Path(localization_cfg_path)
@@ -203,6 +209,9 @@ class MissionRuntime:
                 "tray_released": False,
                 "gripper_closed": True,
                 "previous_task_complete": True,
+                "deploy": False,
+                "allstop": False,
+                "paused": True,
             },
         )
         self.tree = create_tree(self.tasks)
@@ -234,6 +243,10 @@ class MissionRuntime:
         self._warned_raw_apriltag = False
         self._person_obstacle_prefix = "person_"
         self._person_obstacle_radius_m = 0.35
+        self._person_detection_period_s = max(
+            0.0, float(self.runtime_config.person_detection_period_s)
+        )
+        self._last_person_detection_time = -float("inf")
         self._dynamic_obstacle_packets: list[DynamicObstaclePacket] = []
         if not disable_camera:
             self.shared_camera = RealSenseCamera()
@@ -253,8 +266,13 @@ class MissionRuntime:
         self._last_debug_cmd_line: Optional[str] = None
         self._last_debug_eff_line: Optional[str] = None
         self._last_debug_enc_line: Optional[str] = None
+        self._active_arm_task_name: Optional[str] = None
+        self._active_arm_waypoint_index = 0
+        self._last_arm_waypoint_send_time = -float("inf")
 
         self.last_loop_time = time.monotonic()
+        self.deploy = False
+        self.allstop = False
         self.telemetry_host = telemetry_host
         self.telemetry_port = telemetry_port
         self.telemetry_period = (
@@ -265,6 +283,14 @@ class MissionRuntime:
         if telemetry_host:
             self.telemetry_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             print(f"Telemetry UDP target: {telemetry_host}:{telemetry_port}")
+        self.control_host = control_host
+        self.control_port = control_port
+        self.control_sock: Optional[socket.socket] = None
+        if control_port > 0:
+            self.control_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.control_sock.bind((control_host, control_port))
+            self.control_sock.setblocking(False)
+            print(f"Control UDP listener: udp://{control_host}:{control_port}")
 
     @staticmethod
     def _plan_tasks(map_: Map, tasks: list[Task]) -> list[PlannedTask]:
@@ -346,6 +372,9 @@ class MissionRuntime:
             waypoint_capture_radius=float(runtime.get("waypoint_capture_radius", 0.05)),
             controller_v_max=float(runtime.get("controller_v_max", 0.35)),
             controller_omega_max=float(runtime.get("controller_omega_max", 1.8)),
+            person_detection_period_s=float(
+                runtime.get("person_detection_period_s", 1.0)
+            ),
         )
         cam = camera_raw.get("camera_to_robot", {})
         if "translation" in cam or "rotation_rpy" in cam:
@@ -626,8 +655,13 @@ class MissionRuntime:
         self.map_figure.canvas.draw_idle()
         self.map_figure.canvas.flush_events()
 
-    def _update_dynamic_person_obstacles(self) -> None:
+    def _update_dynamic_person_obstacles(self, *, now: Optional[float] = None) -> None:
         if self.person_detector is None:
+            return
+
+        if now is None:
+            now = time.monotonic()
+        if (now - self._last_person_detection_time) < self._person_detection_period_s:
             return
 
         est = self.localization_filter.get_state()
@@ -639,6 +673,7 @@ class MissionRuntime:
             print(f"WARN: person detection update failed: {exc}")
             return
 
+        self._last_person_detection_time = now
         self.map_.clear_obstacles_by_prefix(self._person_obstacle_prefix)
         self._dynamic_obstacle_packets = []
         recognized_people = 0
@@ -667,7 +702,10 @@ class MissionRuntime:
         self,
         task_name: str,
         state: MapPoseVelocity,
+        *,
+        now: Optional[float] = None,
     ) -> bool:
+        self._update_dynamic_person_obstacles(now=now)
         planned = self.planned_lookup[task_name]
         remaining_points = [(state.x, state.y)] + [
             wp.xy for wp in planned.waypoints[planned.waypoint_index :]
@@ -727,6 +765,8 @@ class MissionRuntime:
 
         if encoder_packets:
             enc = encoder_packets[-1]
+            # Canonical ESP32 wheel order:
+            #   w1 = left_front, w2 = right_front, w3 = left_rear, w4 = right_rear.
             vx_body, vy_body, omega = self.controller.wheel_rates_to_body_twist(
                 (enc.w1, enc.w2, enc.w3, enc.w4)
             )
@@ -785,13 +825,49 @@ class MissionRuntime:
             localization_ok=True,
             distance_to_goal=float(distance_to_goal),
             heading_error=float(heading_error),
+            deploy=bool(self.deploy),
+            allstop=bool(self.allstop),
+            paused=bool((not self.deploy) or self.allstop),
             dynamic_obstacles=list(self._dynamic_obstacle_packets),
         )
         payload = json.dumps(asdict(packet)).encode("utf-8")
         self.telemetry_sock.sendto(payload, (self.telemetry_host, self.telemetry_port))
         self.last_telemetry_time = now
 
-    def _update_elevator_from_serial(self, current_task_name: str) -> None:
+    def _poll_control_socket(self) -> None:
+        if self.control_sock is None:
+            return
+        while True:
+            try:
+                payload, addr = self.control_sock.recvfrom(4096)
+            except BlockingIOError:
+                break
+            except OSError:
+                break
+            try:
+                message = json.loads(payload.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                print(f"WARN: invalid control packet from {addr}: {exc}")
+                continue
+
+            if "deploy" in message:
+                self.deploy = bool(message["deploy"])
+            if "allstop" in message:
+                self.allstop = bool(message["allstop"])
+            self.blackboard.set("deploy", self.deploy)
+            self.blackboard.set("allstop", self.allstop)
+            self.blackboard.set("paused", (not self.deploy) or self.allstop)
+            print(
+                f"control rx {addr[0]}:{addr[1]} deploy={self.deploy} allstop={self.allstop}"
+            )
+
+    def _update_manipulator_from_serial(
+        self,
+        current_task_name: str,
+        *,
+        now: Optional[float] = None,
+        active: bool = True,
+    ) -> None:
         task = self.task_lookup[current_task_name]
         self.blackboard.set(
             "desired_elevator_height_m", float(task.desired_elevator_height_m)
@@ -800,8 +876,31 @@ class MissionRuntime:
         if self.elevator_serial is None:
             return
 
-        self.elevator_serial.send_height_cmd(task.desired_elevator_height_m)
-        self.elevator_serial.flush_tx()
+        if now is None:
+            now = time.monotonic()
+
+        if self._active_arm_task_name != current_task_name:
+            self._active_arm_task_name = current_task_name
+            self._active_arm_waypoint_index = 0
+            self._last_arm_waypoint_send_time = -float("inf")
+
+        if active:
+            self.elevator_serial.send_height_cmd(task.desired_elevator_height_m)
+
+            if task.arm_waypoints and (
+                (now - self._last_arm_waypoint_send_time)
+                >= max(0.0, task.arm_point_dwell_s)
+            ):
+                waypoint = task.arm_waypoints[
+                    min(self._active_arm_waypoint_index, len(task.arm_waypoints) - 1)
+                ]
+                self.elevator_serial.send_arm_cmd(waypoint.x, waypoint.y)
+                self._last_arm_waypoint_send_time = now
+                if self._active_arm_waypoint_index < len(task.arm_waypoints) - 1:
+                    self._active_arm_waypoint_index += 1
+
+            self.elevator_serial.flush_tx()
+
         for msg in self.elevator_serial.read_parsed(max_lines=32):
             self.blackboard.set("current_elevator_height_m", float(msg.height_m))
 
@@ -861,25 +960,36 @@ class MissionRuntime:
                 self._update_localization_from_imu(dt)
                 self._maybe_capture_wheel_debug_lines()
                 self._maybe_update_apriltag()
-                #self._update_dynamic_person_obstacles()
-                #self._update_elevator_from_serial(current_task)
+                self._poll_control_socket()
+                self.blackboard.set("deploy", self.deploy)
+                self.blackboard.set("allstop", self.allstop)
+                self.blackboard.set("paused", (not self.deploy) or self.allstop)
+                # Person detection is intentionally lazy: it runs only when we
+                # actually need dynamic-obstacle information for path blocking.
+                self._update_manipulator_from_serial(
+                    current_task,
+                    now=now,
+                    active=self.deploy and not self.allstop,
+                )
 
                 state = self._current_state_for_controller()
-                goal_wp, final_pose_mode = self._active_goal_waypoint(
-                    current_task, state
-                )
-                cmd = self.controller.compute(
-                    state, goal_wp, final_pose_mode=final_pose_mode
-                )
-                #path_blocked = self._path_intersects_dynamic_obstacle(
-                #    current_task, state
-                #)
-                #if path_blocked:
-                #    cmd = self._zero_drive_command()
-                
-                # cmd = self._zero_drive_command()
-                # self.blackboard.set("obstacle_blocking_path", path_blocked)
-                # self.serial.send_wheel_cmd(1,0,0,0)
+                if self.deploy and not self.allstop:
+                    goal_wp, final_pose_mode = self._active_goal_waypoint(
+                        current_task, state
+                    )
+                    cmd = self.controller.compute(
+                        state, goal_wp, final_pose_mode=final_pose_mode
+                    )
+                else:
+                    cmd = self._zero_drive_command()
+                path_blocked = self._path_intersects_dynamic_obstacle(
+                    current_task, state, now=now
+                ) if self.deploy and not self.allstop else False
+                if path_blocked:
+                    cmd = self._zero_drive_command()
+
+                # wheel_rates are in canonical ESP32 order:
+                # (w1, w2, w3, w4) = (left_front, right_front, left_rear, right_rear)
                 self.serial.send_wheel_cmd(*cmd.wheel_rates)
                 self.serial.flush_tx()
 
@@ -890,7 +1000,8 @@ class MissionRuntime:
                     distance_to_goal=goal_error,
                     heading_error=heading_error,
                 )
-                self.tree.tick()
+                if self.deploy and not self.allstop:
+                    self.tree.tick()
                 new_task = self.blackboard.get("current_task")
 
                 # self._update_live_map_plot(state)
@@ -898,8 +1009,9 @@ class MissionRuntime:
                 print(
                     f"tick={tick:04d} dt={dt:.3f} task={new_task} pos=({state.x:.3f}, {state.y:.3f}) "
                     f"yaw={state.heading:.3f} goal_err={goal_error:.3f} "
-                    f"heading_err={heading_error:.3f} wheel_rates={tuple(round(v, 3) for v in cmd.wheel_rates)}"
-                    f"vx_cmd={cmd.vx_cmd:.3f} omega_cmd={cmd.omega_cmd:.3f}"
+                    f"heading_err={heading_error:.3f} deploy={self.deploy} allstop={self.allstop} "
+                    f"wheel_rates={tuple(round(v, 3) for v in cmd.wheel_rates)}"
+                    f" vx_cmd={cmd.vx:.3f} omega_cmd={cmd.omega:.3f}"
                 )
                 if DEBUG_WHEEL_ACKS:
                     if self._last_debug_cmd_line is not None:
@@ -928,6 +1040,8 @@ class MissionRuntime:
                 self.shared_camera.close()
             if self.telemetry_sock is not None:
                 self.telemetry_sock.close()
+            if self.control_sock is not None:
+                self.control_sock.close()
 
 
 def main() -> None:
@@ -959,6 +1073,12 @@ def main() -> None:
     )
     parser.add_argument("--telemetry-port", type=int, default=8765)
     parser.add_argument("--telemetry-rate-hz", type=float, default=10.0)
+    parser.add_argument(
+        "--control-host",
+        default="0.0.0.0",
+        help="UDP bind host/IP for deploy/allstop control packets",
+    )
+    parser.add_argument("--control-port", type=int, default=8766)
     args = parser.parse_args()
 
     runtime = MissionRuntime(
@@ -972,6 +1092,8 @@ def main() -> None:
         telemetry_host=args.telemetry_host,
         telemetry_port=args.telemetry_port,
         telemetry_rate_hz=args.telemetry_rate_hz,
+        control_host=args.control_host,
+        control_port=args.control_port,
     )
     runtime.run(max_ticks=args.max_ticks)
 
