@@ -231,8 +231,14 @@ static void applyWheelCommand(const DesiredWheelVel& cmd) {
   const float setpoints[num_wheels] = {cmd.w1, cmd.w2, cmd.w3, cmd.w4};
 
   for (uint8_t i = 0; i < num_wheels; ++i) {
-    control_effort[i] = pids[i].calculateParallel(measured_vel[i], setpoints[i]);
-    wheels[i].drive(control_effort[i]);
+    if (setpoints[i] == 0.0){
+      wheels[i].drive(0.0f);
+    }
+    else{
+      control_effort[i] = pids[i].calculateParallel(measured_vel[i], setpoints[i]);
+      wheels[i].drive(control_effort[i]);
+    }
+
   }
 }
 
