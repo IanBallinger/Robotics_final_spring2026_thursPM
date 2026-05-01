@@ -12,6 +12,8 @@ import threading
 import cv2
 import numpy as np
 import os
+import re
+import shutil
 
 left_arm_ip = "192.168.1.101"
 right_arm_ip = "192.168.1.102"
@@ -201,7 +203,7 @@ def parse_args(args):
         "-o",
         "--output",
         dest="output",
-        help="data output (.csv) file to write to (default is \"robot_data.csv\"",
+        help="DEPRECATED: output file argument is ignored; trace names are derived from task name",
         type=str,
         default="robot_data.csv",
         metavar="<data output file>")
@@ -277,6 +279,17 @@ def parse_args(args):
         help="write trace/waypoint CSV labels back into selected task params in graph")
 
     return parser.parse_args(args)
+
+
+def _safe_task_name_for_filename(task_name, fallback_task_id=""):
+    raw = str(task_name or "").strip()
+    if not raw:
+        raw = str(fallback_task_id or "").strip()
+    if not raw:
+        raw = "unnamed_task"
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw)
+    safe = safe.strip("._-")
+    return safe or "unnamed_task"
 
 
 def load_task_context(task_graph_file, task_id):
@@ -397,6 +410,8 @@ def main(args):
     args = parse_args(args)
     dt = 1 / args.frequency
     task_context = load_task_context(args.task_graph_file, args.task_id)
+    if args.output and args.output != "robot_data.csv":
+        print("Warning: --output is deprecated and ignored. Using task-name-derived trace filenames.")
     target_coloring = task_context.get("target_coloring", {})
     color_to_target_label = {str(v): str(k) for k, v in target_coloring.items()}
     dependent_item_label = str(task_context.get("dependent_item_label", ""))
@@ -479,11 +494,15 @@ def main(args):
     listener = Listener(on_press=on_press, on_release=on_release)
     listener.start()
 
-    output_base, output_ext = os.path.splitext(args.output)
-    if not output_ext:
-        output_ext = ".csv"
-    left_output = f"{output_base}_left{output_ext}"
-    right_output = f"{output_base}_right{output_ext}"
+    safe_task_name = _safe_task_name_for_filename(task_context.get("task_name", ""), args.task_id)
+    trace_base_name = f"trace_{safe_task_name}"
+    left_output = f"{trace_base_name}_left.csv"
+    right_output = f"{trace_base_name}_right.csv"
+
+    traces_dir = os.path.join(".", "traces")
+    os.makedirs(traces_dir, exist_ok=True)
+    left_output_copy = os.path.join(traces_dir, f"{trace_base_name}_left.csv")
+    right_output_copy = os.path.join(traces_dir, f"{trace_base_name}_right.csv")
 
     if args.write_task_graph_labels:
         write_graph_task_labels(
@@ -506,6 +525,8 @@ def main(args):
         print("Data recording started, press [Ctrl-C] or Delete to end recording.")
     print(f"Saving LEFT arm to: {left_output}")
     print(f"Saving RIGHT arm to: {right_output}")
+    print(f"Will copy LEFT trace to: {left_output_copy}")
+    print(f"Will copy RIGHT trace to: {right_output_copy}")
     i = 0
     prev_gripper_state_L = gripper_state_L
     prev_gripper_state_R = gripper_state_R
@@ -636,6 +657,19 @@ def main(args):
             camera_thread.join(timeout=2)
         if udp_socket:
             udp_socket.close()
+
+        try:
+            shutil.copy2(left_output, left_output_copy)
+            print(f"Copied LEFT trace -> {left_output_copy}")
+        except Exception as exc:
+            print(f"Warning: could not copy LEFT trace to {left_output_copy}: {exc}")
+
+        try:
+            shutil.copy2(right_output, right_output_copy)
+            print(f"Copied RIGHT trace -> {right_output_copy}")
+        except Exception as exc:
+            print(f"Warning: could not copy RIGHT trace to {right_output_copy}: {exc}")
+
         print("\nData recording stopped.")
 
 

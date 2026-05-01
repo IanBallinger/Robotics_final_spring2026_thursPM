@@ -5,6 +5,11 @@ from pathlib import Path #filesystem, not robot point paths
 
 from arm import UR5Arm
 
+try:
+    from robotiq_gripper_control import RobotiqGripper
+except Exception:
+    RobotiqGripper = None
+
 
 def _load_joint_trace(csv_path: Path):
     records = []
@@ -82,6 +87,19 @@ def _load_named_waypoints(csv_path: Path, task_id: str = "", arm_prefix: str = "
                 return values
         return None
 
+    def _try_bool(row, key):
+        raw = row.get(key)
+        if raw is None:
+            return None
+        txt = str(raw).strip().lower()
+        if txt == "" or txt == "nothing":
+            return None
+        if txt in {"true", "1", "yes", "y", "open"}:
+            return True
+        if txt in {"false", "0", "no", "n", "closed", "close"}:
+            return False
+        return None
+
     waypoints = []
     with csv_path.open("r", encoding="utf-8", newline="") as fh:
         reader = csv.DictReader(fh)
@@ -117,6 +135,7 @@ def _load_named_waypoints(csv_path: Path, task_id: str = "", arm_prefix: str = "
                     "name": str(row.get("waypoint_name", "")).strip(),
                     "tcp_position": tcp_position,
                     "q_position": q_position,
+                    "gripper_open": _try_bool(row, f"{arm_prefix}_gripper_open"),
                 }
             )
 
@@ -163,9 +182,38 @@ def register_subtasks(registry):
 
         arm_ip = supervisor.right_ip if arm_side == "right" else supervisor.left_ip
         arm = UR5Arm(arm_ip, verbose=False)
+        gripper = None
+        gripper_force = int(params.get("gripper_force", 50))
+        gripper_speed = int(params.get("gripper_speed", 100))
+        gripper_settle_s = float(params.get("gripper_settle_s", 0.15))
+        current_gripper_open = None
+
+        if RobotiqGripper is None:
+            print(f"[{task_name}] robotiq_gripper_control not available; gripper waypoint safeguards disabled")
+        else:
+            try:
+                gripper = RobotiqGripper(arm.rtde_control)
+                gripper.activate()
+                gripper.set_force(gripper_force)
+                gripper.set_speed(gripper_speed)
+                print(f"[{task_name}] Gripper controller ready (force={gripper_force}, speed={gripper_speed})")
+            except Exception as exc:
+                print(f"[{task_name}] Warning: failed to initialize gripper controller: {exc}")
+                gripper = None
+
         try:
             print(f"[{task_name}] Replaying {len(waypoints)} waypoints from {waypoints_csv}")
             for wp in waypoints:
+                target_gripper_open = wp.get("gripper_open", None)
+
+                # Safeguard semantics:
+                # - Release when moving away: open before motion.
+                if gripper is not None and target_gripper_open is True and current_gripper_open is not True:
+                    gripper.open()
+                    current_gripper_open = True
+                    if gripper_settle_s > 0:
+                        time.sleep(gripper_settle_s)
+
                 ok = arm.move_to_joint_position(
                     wp,
                     speed=speed,
@@ -177,59 +225,77 @@ def register_subtasks(registry):
                         f"Failed at waypoint index={wp['index']} name={wp['name'] or '<unnamed>'}"
                     )
 
+                # - Grasp when arriving: close after motion.
+                if gripper is not None and target_gripper_open is False and current_gripper_open is not False:
+                    gripper.close()
+                    current_gripper_open = False
+                    if gripper_settle_s > 0:
+                        time.sleep(gripper_settle_s)
+
             arm.stop_arm(use_linear=False)
             print(f"[{task_name}] Waypoint replay complete")
             return True
         finally:
             arm.disconnect()
 
-    def _acquire_bowl(supervisor, params):
-        """Execute acquire_bowl using recorded right-arm named waypoints."""
-        return _run_named_waypoint_task(
-            supervisor,
-            params,
-            task_name="acquire_bowl",
-            default_csv="UR5/waypoints_acquire_bowl.csv",
-            default_task_id="acquire_bowl",
-            arm_side="right",
-        )
+    def _register_stub_task(task_name, arm_side="right", default_csv=None):
+        """Register a lightweight runner for graph tasks not fully implemented yet.
 
-    registry["acquire_bowl"] = {
-        "description": "Run right-arm acquire bowl sequence from named waypoints CSV",
-        "runner": _acquire_bowl,
-    }
+        Behavior:
+        - If a matching waypoint CSV exists (or is supplied via params), replay it.
+        - Otherwise, log a no-op stub execution and return success.
+        """
 
-    def _open_microwave_door(supervisor, params):
-        """Execute open_microwave_door using recorded left-arm named waypoints."""
-        return _run_named_waypoint_task(
-            supervisor,
-            params,
-            task_name="open_microwave_door",
-            default_csv="UR5/waypoints_open_microwave_door.csv",
-            default_task_id="open_microwave_door",
-            arm_side="left",
-        )
+        def _runner(supervisor, params):
+            params = params or {}
+            resolved_default_csv = default_csv or f"UR5/waypoints_{task_name}.csv"
+            csv_path = Path(params.get("named_waypoints_csv", resolved_default_csv))
 
-    registry["open_microwave_door"] = {
-        "description": "Run left-arm open microwave door sequence from named waypoints CSV",
-        "runner": _open_microwave_door,
-    }
+            # Allow explicit task_id override while using task_name as default.
+            task_id = str(params.get("task_id", task_name))
 
-    def _close_microwave_door(supervisor, params):
-        """Execute close_microwave_door using recorded left-arm named waypoints."""
-        return _run_named_waypoint_task(
-            supervisor,
-            params,
-            task_name="close_microwave_door",
-            default_csv="UR5/waypoints_close_microwave_door.csv",
-            default_task_id="close_microwave_door",
-            arm_side="left",
-        )
+            if csv_path.exists():
+                print(f"[{task_name}] Using waypoint replay from {csv_path}")
+                return _run_named_waypoint_task(
+                    supervisor,
+                    dict(params, named_waypoints_csv=str(csv_path), task_id=task_id),
+                    task_name=task_name,
+                    default_csv=str(csv_path),
+                    default_task_id=task_id,
+                    arm_side=str(params.get("arm_side", arm_side)),
+                )
 
-    registry["close_microwave_door"] = {
-        "description": "Run left-arm close microwave door sequence from named waypoints CSV",
-        "runner": _close_microwave_door,
-    }
+            print(
+                f"[{task_name}] STUB runner: no waypoint CSV found at {csv_path}. "
+                "Returning success (no-op)."
+            )
+            return True
+
+        registry[task_name] = {
+            "description": f"Stub runner for {task_name}; replays waypoints if CSV exists, else no-op success",
+            "runner": _runner,
+        }
+
+    # Task names observed in simulator output (UR5/subtasks/Untitled-1.txt).
+    # Includes existing acquire/open/close flows so all task runners are list-registered.
+    for _task_name, _arm_side, _default_csv in [
+        ("acquire_bowl", "right", "UR5/waypoints_acquire_bowl.csv"),
+        ("open_microwave_door", "left", "UR5/waypoints_open_microwave_door.csv"),
+        ("close_microwave_door", "left", "UR5/waypoints_close_microwave_door.csv"),
+        ("place_bowl_in_microwave", "right", "UR5/waypoints_place_bowl_in_microwave.csv"),
+        ("right_arm_safe_retract", "right", "UR5/waypoints_right_arm_safe_retract.csv"),
+        ("press_microwave_stop", "right", "UR5/waypoints_press_microwave_stop.csv"),
+        ("take_bowl_out_to_tray", "right", "UR5/waypoints_take_bowl_out_to_tray.csv"),
+        ("acquire_plate", "right", "UR5/waypoints_acquire_plate.csv"),
+        ("place_plate_in_microwave", "right", "UR5/waypoints_place_plate_in_microwave.csv"),
+        ("take_plate_out_to_tray", "right", "UR5/waypoints_take_plate_out_to_tray.csv"),
+        ("acquire_cup", "right", "UR5/waypoints_acquire_cup.csv"),
+        ("acquire_bottle", "right", "UR5/waypoints_acquire_bottle.csv"),
+        ("pour_drink_into_cup", "right", "UR5/waypoints_pour_drink_into_cup.csv"),
+        ("place_cup_on_tray", "right", "UR5/waypoints_place_cup_on_tray.csv"),
+    ]:
+        if _task_name not in registry:
+            _register_stub_task(_task_name, arm_side=_arm_side, default_csv=_default_csv)
 
     def _total_replay(supervisor, params):
         """Replay full dual-arm joint traces by stepping point-by-point (default 10 Hz)."""

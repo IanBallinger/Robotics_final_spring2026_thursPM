@@ -23,6 +23,16 @@ using Colors
 using JLD2
 using Dates
 
+function safe_task_name_for_filename(task_name::AbstractString, fallback::AbstractString = "unnamed_task")
+    raw = strip(task_name)
+    if isempty(raw)
+        raw = fallback
+    end
+    safe = replace(raw, r"[^A-Za-z0-9_.-]+" => "_")
+    safe = strip(safe, ['.', '_', '-'])
+    return isempty(safe) ? "unnamed_task" : safe
+end
+
 function arg_value(flag::String, default)
     idx = findfirst(==(flag), ARGS)
     if idx === nothing || idx == length(ARGS)
@@ -113,14 +123,68 @@ function norm01(v::Float64, lo::Float64, hi::Float64)
     return hi == lo ? 0.5 : (v - lo) / (hi - lo)
 end
 
+function mat_vec_mul_row(v::NTuple{3, Float64}, m::Matrix{Float64})
+    # Row-vector multiply: [x y z] * M
+    return (
+        v[1] * m[1, 1] + v[2] * m[2, 1] + v[3] * m[3, 1],
+        v[1] * m[1, 2] + v[2] * m[2, 2] + v[3] * m[3, 2],
+        v[1] * m[1, 3] + v[2] * m[2, 3] + v[3] * m[3, 3],
+    )
+end
+
+function base_to_global_task_xyz(base_xyz::NTuple{3, Float64}, arm::Symbol)
+    # Mirrors Supervisor.compute_task_frames() constants and orientation.
+    dy_t = 0.225 / 2 + 0.540 / 2
+    dz_t = -0.753
+
+    if arm == :left
+        dx_t = 0.090 / 2 + 0.010 + 0.110
+        r_task_to_base = Float64[
+            0.707 0.0 -0.707;
+            0.0 -1.0 0.0;
+            -0.707 0.0 -0.707;
+        ]
+        trans_base_to_task = mat_vec_mul_row((dx_t, dy_t, dz_t), r_task_to_base)
+        p_rel = (
+            base_xyz[1] - trans_base_to_task[1],
+            base_xyz[2] - trans_base_to_task[2],
+            base_xyz[3] - trans_base_to_task[3],
+        )
+        # Inverse of row-vector transform p_base = p_task * R + t is p_task = (p_base - t) * R'.
+        p_task = mat_vec_mul_row(p_rel, transpose(r_task_to_base))
+        return p_task
+    elseif arm == :right
+        dx_t = -(0.090 / 2 + 0.010 + 0.110)
+        r_task_to_base = Float64[
+            0.707 0.0 0.707;
+            0.0 -1.0 0.0;
+            0.707 0.0 -0.707;
+        ]
+        trans_base_to_task = mat_vec_mul_row((dx_t, dy_t, dz_t), r_task_to_base)
+        p_rel = (
+            base_xyz[1] - trans_base_to_task[1],
+            base_xyz[2] - trans_base_to_task[2],
+            base_xyz[3] - trans_base_to_task[3],
+        )
+        p_task = mat_vec_mul_row(p_rel, transpose(r_task_to_base))
+        return p_task
+    else
+        return base_xyz
+    end
+end
+
 function main()
     host = arg_host("127.0.0.1")
     port = arg_int("--port", 9999)
     max_points = arg_int("--max-points", 400000000)
     refresh_every = arg_int("--refresh-every", 5)
     output_path = arg_value("--jld2-file", arg_value("--output", ""))
+    if !isempty(output_path)
+        println("Warning: --jld2-file/--output is deprecated and ignored. JLD2 name is derived from task name and saved in ./traces.")
+    end
     named_waypoints_csv = arg_value("--named-waypoints-csv", "named_waypoints.csv")
     active_named_waypoints_csv = named_waypoints_csv
+    active_task_name = ""
 
     GLMakie.activate!()
 
@@ -130,7 +194,7 @@ function main()
         xlabel = "X [m]",
         ylabel = "Y [m]",
         zlabel = "Z [m]",
-        title = "Live Left/Right TCP (XYZ) & Camera Vision Poses"
+        title = "Live Left/Right TCP (Global Task XYZ) & Camera Vision Poses"
     )
 
     Label(fig[2, 1], "Waypoint Name (press Enter to assign to oldest pending mark):", halign = :left)
@@ -167,8 +231,10 @@ function main()
 
     ensure_named_waypoints_header(active_named_waypoints_csv)
 
-    # Left TCP pose data
+    # Left TCP pose data (arm/base frame)
     left_tcp_xs = Float32[];  left_tcp_ys = Float32[];  left_tcp_zs = Float32[]
+    # Left TCP pose data (shared global task frame)
+    left_tcp_global_xs = Float32[];  left_tcp_global_ys = Float32[];  left_tcp_global_zs = Float32[]
     left_tcp_rxs = Float64[]; left_tcp_rys = Float64[]; left_tcp_rzs = Float64[]
     left_tcp_timestamps = Float64[]
     left_tcp_cols = RGBf[]
@@ -177,8 +243,10 @@ function main()
     left_tcp_rz_min = Inf;  left_tcp_rz_max = -Inf
     left_tcp_packet_count = 0
 
-    # Right TCP pose data
+    # Right TCP pose data (arm/base frame)
     right_tcp_xs = Float32[];  right_tcp_ys = Float32[];  right_tcp_zs = Float32[]
+    # Right TCP pose data (shared global task frame)
+    right_tcp_global_xs = Float32[];  right_tcp_global_ys = Float32[];  right_tcp_global_zs = Float32[]
     right_tcp_rxs = Float64[]; right_tcp_rys = Float64[]; right_tcp_rzs = Float64[]
     right_tcp_timestamps = Float64[]
     right_tcp_cols = RGBf[]
@@ -252,6 +320,11 @@ function main()
                 if pkt !== nothing
                     # --- Waypoint mark packet ---
                     if haskey(pkt, :packet_type) && String(pkt.packet_type) == "waypoint_mark"
+                        packet_task_name = String(get(pkt, :task_name, ""))
+                        if !isempty(packet_task_name)
+                            active_task_name = packet_task_name
+                        end
+
                         packet_waypoint_csv = String(get(pkt, :named_waypoints_csv, active_named_waypoints_csv))
                         if !isempty(packet_waypoint_csv) && packet_waypoint_csv != active_named_waypoints_csv
                             active_named_waypoints_csv = packet_waypoint_csv
@@ -315,11 +388,14 @@ function main()
                         if haskey(pkt, :left_actual_TCP_pose) || haskey(pkt, :actual_TCP_pose)
                             left_pose = haskey(pkt, :left_actual_TCP_pose) ? pkt.left_actual_TCP_pose : pkt.actual_TCP_pose
                             if length(left_pose) >= 6
-                                x, y, z = Float32(left_pose[1]), Float32(left_pose[2]), Float32(left_pose[3])
+                                x_arm, y_arm, z_arm = Float32(left_pose[1]), Float32(left_pose[2]), Float32(left_pose[3])
+                                gx, gy, gz = base_to_global_task_xyz((Float64(x_arm), Float64(y_arm), Float64(z_arm)), :left)
+                                x, y, z = Float32(gx), Float32(gy), Float32(gz)
                                 rx, ry, rz = Float64(left_pose[4]), Float64(left_pose[5]), Float64(left_pose[6])
 
-                                if isfinite(x) && isfinite(y) && isfinite(z)
-                                    push!(left_tcp_xs, x); push!(left_tcp_ys, y); push!(left_tcp_zs, z)
+                                if isfinite(x_arm) && isfinite(y_arm) && isfinite(z_arm) && isfinite(x) && isfinite(y) && isfinite(z)
+                                    push!(left_tcp_xs, x_arm); push!(left_tcp_ys, y_arm); push!(left_tcp_zs, z_arm)
+                                    push!(left_tcp_global_xs, x); push!(left_tcp_global_ys, y); push!(left_tcp_global_zs, z)
                                     push!(left_tcp_rxs, rx); push!(left_tcp_rys, ry); push!(left_tcp_rzs, rz)
                                     ts = Float64(get(pkt, :left_timestamp, get(pkt, :timestamp, 0.0)))
                                     push!(left_tcp_timestamps, ts)
@@ -336,6 +412,7 @@ function main()
 
                                     if length(left_tcp_xs) > max_points
                                         popfirst!(left_tcp_xs); popfirst!(left_tcp_ys); popfirst!(left_tcp_zs); popfirst!(left_tcp_cols)
+                                        popfirst!(left_tcp_global_xs); popfirst!(left_tcp_global_ys); popfirst!(left_tcp_global_zs)
                                         popfirst!(left_tcp_rxs); popfirst!(left_tcp_rys); popfirst!(left_tcp_rzs)
                                         popfirst!(left_tcp_timestamps)
                                     end
@@ -348,7 +425,7 @@ function main()
                                         println("First LEFT TCP pose received.")
                                     end
                                     if left_tcp_packet_count % refresh_every == 0 || !first_left_tcp_logged
-                                        left_tcp_data_obs[] = (Point3f.(left_tcp_xs, left_tcp_ys, left_tcp_zs), copy(left_tcp_cols))
+                                        left_tcp_data_obs[] = (Point3f.(left_tcp_global_xs, left_tcp_global_ys, left_tcp_global_zs), copy(left_tcp_cols))
                                         autolimits!(ax)
                                     end
                                 end
@@ -358,11 +435,14 @@ function main()
                         if haskey(pkt, :right_actual_TCP_pose)
                             right_pose = pkt.right_actual_TCP_pose
                             if length(right_pose) >= 6
-                                x, y, z = Float32(right_pose[1]), Float32(right_pose[2]), Float32(right_pose[3])
+                                x_arm, y_arm, z_arm = Float32(right_pose[1]), Float32(right_pose[2]), Float32(right_pose[3])
+                                gx, gy, gz = base_to_global_task_xyz((Float64(x_arm), Float64(y_arm), Float64(z_arm)), :right)
+                                x, y, z = Float32(gx), Float32(gy), Float32(gz)
                                 rx, ry, rz = Float64(right_pose[4]), Float64(right_pose[5]), Float64(right_pose[6])
 
-                                if isfinite(x) && isfinite(y) && isfinite(z)
-                                    push!(right_tcp_xs, x); push!(right_tcp_ys, y); push!(right_tcp_zs, z)
+                                if isfinite(x_arm) && isfinite(y_arm) && isfinite(z_arm) && isfinite(x) && isfinite(y) && isfinite(z)
+                                    push!(right_tcp_xs, x_arm); push!(right_tcp_ys, y_arm); push!(right_tcp_zs, z_arm)
+                                    push!(right_tcp_global_xs, x); push!(right_tcp_global_ys, y); push!(right_tcp_global_zs, z)
                                     push!(right_tcp_rxs, rx); push!(right_tcp_rys, ry); push!(right_tcp_rzs, rz)
                                     ts = Float64(get(pkt, :right_timestamp, get(pkt, :timestamp, 0.0)))
                                     push!(right_tcp_timestamps, ts)
@@ -379,6 +459,7 @@ function main()
 
                                     if length(right_tcp_xs) > max_points
                                         popfirst!(right_tcp_xs); popfirst!(right_tcp_ys); popfirst!(right_tcp_zs); popfirst!(right_tcp_cols)
+                                        popfirst!(right_tcp_global_xs); popfirst!(right_tcp_global_ys); popfirst!(right_tcp_global_zs)
                                         popfirst!(right_tcp_rxs); popfirst!(right_tcp_rys); popfirst!(right_tcp_rzs)
                                         popfirst!(right_tcp_timestamps)
                                     end
@@ -391,7 +472,7 @@ function main()
                                         println("First RIGHT TCP pose received.")
                                     end
                                     if right_tcp_packet_count % refresh_every == 0 || !first_right_tcp_logged
-                                        right_tcp_data_obs[] = (Point3f.(right_tcp_xs, right_tcp_ys, right_tcp_zs), copy(right_tcp_cols))
+                                        right_tcp_data_obs[] = (Point3f.(right_tcp_global_xs, right_tcp_global_ys, right_tcp_global_zs), copy(right_tcp_cols))
                                         autolimits!(ax)
                                     end
                                 end
@@ -448,22 +529,29 @@ function main()
         Base.exit_on_sigint(true)
 
         # Save recorded data to JLD2
-        save_path = if isempty(output_path)
-            ts = replace(string(now()), ":" => "-", "." => "-")
-            "live_plot_$(ts).jld2"
-        else
-            output_path
+        traces_dir = "traces"
+        try
+            mkpath(traces_dir)
+        catch e
+            println("WARNING: could not create traces directory '$traces_dir': $e")
         end
+
+        task_slug = safe_task_name_for_filename(active_task_name)
+        save_path = joinpath(traces_dir, "trace_$(task_slug).jld2")
         try
             jldsave(save_path;
+                # Existing keys preserved as arm/base-frame coordinates for backward compatibility.
                 left_tcp_x = left_tcp_xs, left_tcp_y = left_tcp_ys, left_tcp_z = left_tcp_zs,
+                left_tcp_global_x = left_tcp_global_xs, left_tcp_global_y = left_tcp_global_ys, left_tcp_global_z = left_tcp_global_zs,
                 left_tcp_rx = left_tcp_rxs, left_tcp_ry = left_tcp_rys, left_tcp_rz = left_tcp_rzs,
                 left_tcp_timestamp = left_tcp_timestamps,
                 right_tcp_x = right_tcp_xs, right_tcp_y = right_tcp_ys, right_tcp_z = right_tcp_zs,
+                right_tcp_global_x = right_tcp_global_xs, right_tcp_global_y = right_tcp_global_ys, right_tcp_global_z = right_tcp_global_zs,
                 right_tcp_rx = right_tcp_rxs, right_tcp_ry = right_tcp_rys, right_tcp_rz = right_tcp_rzs,
                 right_tcp_timestamp = right_tcp_timestamps,
                 # Backward-compat aliases for older readers expecting tcp_* keys.
                 tcp_x = left_tcp_xs, tcp_y = left_tcp_ys, tcp_z = left_tcp_zs,
+                tcp_global_x = left_tcp_global_xs, tcp_global_y = left_tcp_global_ys, tcp_global_z = left_tcp_global_zs,
                 tcp_rx = left_tcp_rxs, tcp_ry = left_tcp_rys, tcp_rz = left_tcp_rzs,
                 tcp_timestamp = left_tcp_timestamps,
                 vision_x = vision_xs, vision_y = vision_ys, vision_z = vision_zs,
