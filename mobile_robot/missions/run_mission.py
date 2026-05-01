@@ -914,8 +914,13 @@ class MissionRuntime:
                 if sleep_dt > 0.0:
                     time.sleep(sleep_dt)
         finally:
-            self.serial.send_wheel_cmd(0.0, 0.0, 0.0, 0.0, force=True)
-            self.serial.flush_tx(force=True)
+            # Send a few explicit all-zero wheel commands before shutdown so the
+            # wheel controller reliably receives a stop request even if one TX is
+            # dropped or the MCU is between control ticks.
+            for _ in range(5):
+                self.serial.send_wheel_cmd(0.0, 0.0, 0.0, 0.0, force=True)
+                self.serial.flush_tx(force=True)
+                time.sleep(0.02)
             self.serial.close()
             if self.elevator_serial is not None:
                 self.elevator_serial.close()
