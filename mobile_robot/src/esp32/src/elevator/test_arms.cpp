@@ -1,8 +1,8 @@
 #include <ESP32Servo.h>
 
-// P1 41, D2 40, P2 42
+// P1 7, D2 3, P2 6
 
-constexpr int ARM_SHOULDER_SERVO_PIN = 40;
+constexpr int ARM_SHOULDER_SERVO_PIN = 3;
 constexpr int ARM_ELBOW_SERVO_PIN = 41;
 constexpr int SERVO_MIN_US = 544;
 constexpr int SERVO_MAX_US = 2400;
