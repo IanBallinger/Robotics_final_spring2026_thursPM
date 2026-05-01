@@ -899,6 +899,7 @@ class MissionRuntime:
                     f"tick={tick:04d} dt={dt:.3f} task={new_task} pos=({state.x:.3f}, {state.y:.3f}) "
                     f"yaw={state.heading:.3f} goal_err={goal_error:.3f} "
                     f"heading_err={heading_error:.3f} wheel_rates={tuple(round(v, 3) for v in cmd.wheel_rates)}"
+                    f"vx_cmd={cmd.vx_cmd:.3f} omega_cmd={cmd.omega_cmd:.3f}"
                 )
                 if DEBUG_WHEEL_ACKS:
                     if self._last_debug_cmd_line is not None:
