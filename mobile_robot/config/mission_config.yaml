@@ -144,7 +144,7 @@ localization:
     - [1.5]
   use_imu_accel_in_prediction: false
 mission_runtime:
-  control_rate_hz: 20.0
+  control_rate_hz: 40.0
   waypoint_capture_radius: 0.05
   controller_v_max: 0.35
   controller_omega_max: 1.8
