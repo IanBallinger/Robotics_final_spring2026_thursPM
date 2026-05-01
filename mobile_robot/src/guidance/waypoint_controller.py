@@ -104,8 +104,8 @@ class CascadedWaypointController:
         w_right = (vx_body + omega) / r
 
         # clamp wheel rates
-        w_left = np.clip(float(w_left),-1.0,1.0)
-        w_right = np.clip(float(w_right),-1.0,1.0)
+        w_left = np.clip(float(w_left),-3.0,3.0)
+        w_right = np.clip(float(w_right),-3.0,3.0)
         return w_left, w_right, w_left, w_right
 
     def wheel_rates_to_body_twist(
