@@ -70,7 +70,7 @@ map:
       position:
         x: 3.855
         y: 2.865
-      heading: 0
+      heading: 3.14
     - name: back_wall
       id: 0
       position:
