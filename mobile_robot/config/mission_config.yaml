@@ -58,7 +58,7 @@ map:
       position:
         x: 4.655
         y: 1.53
-      heading: 0
+      heading: 3.14
     - name: table_tray
       id: 1
       position:
