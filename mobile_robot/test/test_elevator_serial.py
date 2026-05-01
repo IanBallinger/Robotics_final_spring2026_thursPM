@@ -130,7 +130,7 @@ def main() -> None:
     next_tx_t = start_t
 
     # arm_targets_m = ((0.20, 0.10), (0.12, 0.18))
-    arm_targets_m = ((0.0, 0.0), (np.pi/2, 0.0))
+    arm_targets_m = ((0.0, 0.0), (np.pi/2, np.pi/2))
     arm_target_index = 0
     current_arm_target = arm_targets_m[arm_target_index]
     last_arm_switch_t = start_t
