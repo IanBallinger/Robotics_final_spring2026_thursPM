@@ -51,14 +51,14 @@ constexpr float JOYSTICK_MAX_FORWARD = 6.0f;
 constexpr float JOYSTICK_MAX_TURN = 3.0f;
 
 // User-defined serial/control rates.
-constexpr unsigned long CMD_APPLY_PERIOD_MS = 10;   // latest buffered wheel cmd -> motors
+constexpr unsigned long CMD_APPLY_PERIOD_MS = 5;   // latest buffered wheel cmd -> motors
 constexpr unsigned long ACK_PUBLISH_PERIOD_MS = 10; // latest applied wheel cmd -> host
 constexpr unsigned long IMU_PUBLISH_PERIOD_MS = 50; // latest IMU sample -> host
 constexpr unsigned long CMD_TIMEOUT_MS = 250;       // stop motors if host goes silent
 constexpr unsigned long JOYSTICK_APPLY_PERIOD_MS = 50;
 constexpr unsigned long BUTTON_DEBOUNCE_MS = 50;
 constexpr unsigned long CONTROLLER_TIMEOUT_MS = 250;
-constexpr float WHEEL_CMD_FILTER_TAU_S = 0.03f;
+constexpr float WHEEL_CMD_FILTER_TAU_S = 0.1f;
 constexpr float IMU_ACCEL_FILTER_TAU_S = 0.5f;
 constexpr bool SERIAL_DEBUG_TIMING = true;
 
