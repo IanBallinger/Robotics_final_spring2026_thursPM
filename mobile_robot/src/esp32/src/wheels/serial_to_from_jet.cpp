@@ -71,7 +71,7 @@ MotorDriver wheels[num_wheels] = {
 
 float kp[num_wheels] = {0.1f, 0.1f, 0.1f, 0.1f};
 float ki[num_wheels] = {0.05f, 0.05f, 0.05f, 0.05f}; // old integral: 0.4f
-float kd[num_wheels] = {0.0f, 0.0f, 0.0f, 0.0f};
+float kd[num_wheels] = {0.01f, 0.01f, 0.01f, 0.01f};
 
 EncoderVelocity encoders[num_wheels] = {
     {ENCODER2_A_PIN, ENCODER2_B_PIN, CPR_312_RPM, 0.5},
