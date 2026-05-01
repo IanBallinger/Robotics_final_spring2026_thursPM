@@ -29,7 +29,7 @@ class AprilTagPoseEst:
         self,
         *,
         realsense_camera: Optional[RealSenseCamera] = None,
-        tag_size_m: float = 0.12,
+        tag_size_m: float = 0.09,
         color_config: StreamConfig = StreamConfig(),
         depth_config: StreamConfig = StreamConfig(),
         align_depth_to_color: bool = True,
