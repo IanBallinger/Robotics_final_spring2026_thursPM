@@ -82,7 +82,7 @@ map:
       position:
         x: 0.97
         y: 0.06
-      heading: 0
+      heading: 1.57
   obstacles:
     - name: table
       boundary:

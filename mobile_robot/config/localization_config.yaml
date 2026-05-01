@@ -37,7 +37,7 @@ localization:
     - [0.0, 0.0, 0.02]
   # Trust IMU gyro much less than encoder/apriltag corrections.
   gyro_measurement_noise:
-    - [1.5]
+    - [0.15]
   # Trust wheel-derived body twist strongly.
   wheel_twist_measurement_noise:
     - [0.005, 0.0, 0.0]
