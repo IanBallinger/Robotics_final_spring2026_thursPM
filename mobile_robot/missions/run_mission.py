@@ -69,6 +69,10 @@ from serial_connection.serial_con import SerialConnect  # noqa: E402
 from serial_connection.serialization import EncoderReading, IMUReading  # noqa: E402
 
 
+# TEMP DEBUG: set to False (or delete this block) once wheel-controller bring-up is done.
+DEBUG_WHEEL_ACKS = True
+
+
 @dataclass
 class PlannedTask:
     task: Task
@@ -245,6 +249,9 @@ class MissionRuntime:
         self.map_figure = None
         self.map_axes = None
         self._setup_live_map_plot()
+
+        self._last_debug_cmd_line: Optional[str] = None
+        self._last_debug_eff_line: Optional[str] = None
 
         self.last_loop_time = time.monotonic()
         self.telemetry_host = telemetry_host
@@ -726,6 +733,24 @@ class MissionRuntime:
                 WheelTwistMeasurement(vx=vx_body, vy=vy_body, wz=omega)
             )
 
+    def _maybe_capture_wheel_debug_lines(self) -> None:
+        """TEMP DEBUG helper for wheel-controller CMD/EFF text lines.
+
+        This intentionally uses the latest raw serial line already drained by the
+        shared SerialConnect transport, so it is easy to remove later without
+        touching the serial protocol/parsers.
+        """
+        if not DEBUG_WHEEL_ACKS:
+            return
+
+        raw_line = getattr(self.serial, "_latest_raw_line", None)
+        if not raw_line:
+            return
+        if raw_line.startswith("CMD,"):
+            self._last_debug_cmd_line = raw_line
+        elif raw_line.startswith("EFF,"):
+            self._last_debug_eff_line = raw_line
+
     def _publish_telemetry(
         self,
         *,
@@ -831,6 +856,7 @@ class MissionRuntime:
                     break
 
                 self._update_localization_from_imu(dt)
+                self._maybe_capture_wheel_debug_lines()
                 self._maybe_update_apriltag()
                 self._update_dynamic_person_obstacles()
                 self._update_elevator_from_serial(current_task)
@@ -870,6 +896,11 @@ class MissionRuntime:
                     f"yaw={state.heading:.3f} goal_err={goal_error:.3f} "
                     f"heading_err={heading_error:.3f} wheel_rates={tuple(round(v, 3) for v in cmd.wheel_rates)}"
                 )
+                if DEBUG_WHEEL_ACKS:
+                    if self._last_debug_cmd_line is not None:
+                        print(f"  wheel_ack: {self._last_debug_cmd_line}")
+                    if self._last_debug_eff_line is not None:
+                        print(f"  wheel_eff: {self._last_debug_eff_line}")
 
                 tick += 1
                 sleep_dt = period - (time.monotonic() - now)
