@@ -155,11 +155,11 @@ def main() -> None:
             if args.duration_s > 0.0 and elapsed >= args.duration_s:
                 break
 
-            if now - last_switch_t >= args.switch_period_s:
-                setpoint_index = (setpoint_index + 1) % len(setpoints_m)
-                current_setpoint_m = setpoints_m[setpoint_index]
-                last_switch_t = now
-                print(f"Switched setpoint -> {current_setpoint_m:.3f} m")
+            # if now - last_switch_t >= args.switch_period_s:
+            #     setpoint_index = (setpoint_index + 1) % len(setpoints_m)
+            #     current_setpoint_m = setpoints_m[setpoint_index]
+            #     last_switch_t = now
+            #     print(f"Switched setpoint -> {current_setpoint_m:.3f} m")
 
             if args.arm_test and now - last_arm_switch_t >= args.arm_switch_period_s:
                 arm_target_index = (arm_target_index + 1) % len(arm_targets_m)
@@ -168,9 +168,9 @@ def main() -> None:
                 print(f"Switched arm target -> {current_arm_target}")
 
             if now >= next_tx_t:
-                payload = serialize_elevator_cmd(current_setpoint_m)
-                ser.write(payload.encode("ascii"))
-                print(f"TX {payload.strip()}")
+                # payload = serialize_elevator_cmd(current_setpoint_m)
+                # ser.write(payload.encode("ascii"))
+                # print(f"TX {payload.strip()}")
 
                 if args.arm_test:
                     arm_payload = serialize_arm_cmd(*current_arm_target)
