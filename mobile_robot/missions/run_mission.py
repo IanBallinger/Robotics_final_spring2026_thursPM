@@ -847,8 +847,10 @@ class MissionRuntime:
                 )
                 if path_blocked:
                     cmd = self._zero_drive_command()
+                
+                cmd = self._zero_drive_command()
                 self.blackboard.set("obstacle_blocking_path", path_blocked)
-                # self.serial.send_wheel_cmd(*cmd.wheel_rates)
+                self.serial.send_wheel_cmd(*cmd.wheel_rates)
                 self.serial.flush_tx()
 
                 goal_error, heading_error = self._update_blackboard(current_task)
