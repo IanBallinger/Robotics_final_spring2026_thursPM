@@ -161,7 +161,7 @@ tasks:
     completion_conditions:
       - distance_to_goal <= 0.05
       - abs(heading_error) <= 0.10
-      - abs(elevator_height_error_m) <= 0.01
+      #- abs(elevator_height_error_m) <= 0.01
   # - name: drive_to_zone
   #   desired_elevator_height_m: 0.0
   #   goal:
