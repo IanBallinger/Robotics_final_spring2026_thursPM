@@ -1,3 +1,4 @@
+import argparse
 import time
 from collections import deque
 
@@ -6,20 +7,20 @@ import serial
 from matplotlib.animation import FuncAnimation
 
 
-PORT = "/dev/tty.usbmodem2101"
-BAUD = 115200
+DEFAULT_PORT = "/dev/tty.usbmodem2101"
+DEFAULT_BAUD = 115200
 CMD_DT = 0.05
 WINDOW_SEC = 10.0
 MAX_SAMPLES = 5000
 NUM_WHEELS = 4
-CMD = [6.0, -6.0, 6.0, -6.0]
-PLOT = True
+DEFAULT_CMD = [3.0, 3.0, 3.0, 3.0]
 
 
 class WheelPIDPlotter:
-    def __init__(self, port: str, baud: int):
+    def __init__(self, port: str, baud: int, cmd: list[float]):
         self.ser = serial.Serial(port=port, baudrate=baud, timeout=0.01)
         time.sleep(2.0)
+        self.cmd = list(cmd)
 
         self.t0 = time.time()
         self.last_cmd_time = 0.0
@@ -41,7 +42,7 @@ class WheelPIDPlotter:
         if now - self.last_cmd_time < CMD_DT:
             return
 
-        line = f"WHL_CMD,{CMD[0]},{CMD[1]},{CMD[2]},{CMD[3]}\n"
+        line = f"WHL_CMD,{self.cmd[0]},{self.cmd[1]},{self.cmd[2]},{self.cmd[3]}\n"
         print(line)
         self.ser.write(line.encode("utf-8"))
         self.ser.flush()
@@ -50,7 +51,7 @@ class WheelPIDPlotter:
         t = self.now()
         self.t_cmd.append(t)
         for i in range(NUM_WHEELS):
-            self.des_hist[i].append(CMD[i])
+            self.des_hist[i].append(self.cmd[i])
 
     def read_serial(self):
         while self.ser.in_waiting:
@@ -62,7 +63,7 @@ class WheelPIDPlotter:
             tag = parts[0]
             t = self.now()
 
-            if tag == "ACK" and len(parts) == 5:
+            if tag in {"ACK", "CMD"} and len(parts) == 5:
                 vals = list(map(float, parts[1:5]))
                 self.t_ack.append(t)
                 for i in range(NUM_WHEELS):
@@ -73,7 +74,9 @@ class WheelPIDPlotter:
                 self.t_enc.append(t)
                 for i in range(NUM_WHEELS):
                     self.enc_hist[i].append(vals[i])
-            else:
+            elif tag == "MODE":
+                print(f"mode change: {line}")
+            elif not tag.startswith("DBG"):
                 print(line)
 
     def stop(self):
@@ -116,9 +119,9 @@ class WheelPIDPlotter:
         enc_lines = []
 
         for i, ax in enumerate(axes):
-            (desired_line,) = ax.plot([], [], label="desired")
-            (ack_line,) = ax.plot([], [], "--", label="ack")
-            (enc_line,) = ax.plot([], [], label="encoder")
+            (desired_line,) = ax.plot([], [], label="desired cmd")
+            (ack_line,) = ax.plot([], [], "--", label="applied cmd")
+            (enc_line,) = ax.plot([], [], label="encoder vel")
             desired_lines.append(desired_line)
             ack_lines.append(ack_line)
             enc_lines.append(enc_line)
@@ -149,7 +152,7 @@ class WheelPIDPlotter:
 
                 ax.set_xlim(t_min, t_min + WINDOW_SEC)
 
-                y_all = yd + ya + ye if (yd or ya or ye) else [0.0, CMD[i]]
+                y_all = yd + ya + ye if (yd or ya or ye) else [0.0, self.cmd[i]]
                 ymin = min(y_all)
                 ymax = max(y_all)
                 pad = max(0.5, 0.1 * max(abs(ymin), abs(ymax), 1.0))
@@ -175,14 +178,31 @@ class WheelPIDPlotter:
 
 
 def main():
-    print(f"Using port {PORT} @ {BAUD}")
-    print(f"Sending WHL_CMD,{CMD[0]},{CMD[1]},{CMD[2]},{CMD[3]}")
-    plotter = WheelPIDPlotter(PORT, BAUD)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--port", default=DEFAULT_PORT)
+    parser.add_argument("--baud", type=int, default=DEFAULT_BAUD)
+    parser.add_argument(
+        "--cmd",
+        type=float,
+        nargs=4,
+        metavar=("W1", "W2", "W3", "W4"),
+        default=DEFAULT_CMD,
+        help="wheel command step in rad/s for w1..w4",
+    )
+    parser.add_argument("--no-plot", action="store_true")
+    args = parser.parse_args()
+
+    print(f"Using port {args.port} @ {args.baud}")
+    print(
+        f"Sending WHL_CMD,{args.cmd[0]},{args.cmd[1]},{args.cmd[2]},{args.cmd[3]}"
+    )
+    print("Note: firmware publishes CMD as the applied-command/ack trace and ENC as measured wheel velocity.")
+    plotter = WheelPIDPlotter(args.port, args.baud, list(args.cmd))
     try:
-        if PLOT:
-            plotter.run_plot()
-        else:
+        if args.no_plot:
             plotter.run_no_plot()
+        else:
+            plotter.run_plot()
     except KeyboardInterrupt:
         plotter.stop()
 

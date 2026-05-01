@@ -10,6 +10,9 @@
 #include "util.h"
 #include "wireless.h"
 
+// Legend:
+// w1 = left_front (MOTOR 2), w2 = right_front (MOTOR 3), w3 = left_rear (MOTOR 1), w4 = right_rear (MOTOR 4).
+
 struct DesiredWheelVel {
   float w1;
   float w2;
@@ -48,8 +51,8 @@ constexpr float JOYSTICK_MAX_FORWARD = 6.0f;
 constexpr float JOYSTICK_MAX_TURN = 3.0f;
 
 // User-defined serial/control rates.
-constexpr unsigned long CMD_APPLY_PERIOD_MS = 50;   // latest buffered wheel cmd -> motors
-constexpr unsigned long ACK_PUBLISH_PERIOD_MS = 50; // latest applied wheel cmd -> host
+constexpr unsigned long CMD_APPLY_PERIOD_MS = 10;   // latest buffered wheel cmd -> motors
+constexpr unsigned long ACK_PUBLISH_PERIOD_MS = 10; // latest applied wheel cmd -> host
 constexpr unsigned long IMU_PUBLISH_PERIOD_MS = 50; // latest IMU sample -> host
 constexpr unsigned long CMD_TIMEOUT_MS = 250;       // stop motors if host goes silent
 constexpr unsigned long JOYSTICK_APPLY_PERIOD_MS = 50;
@@ -66,15 +69,15 @@ MotorDriver wheels[num_wheels] = {
     {B_DIR2, B_PWM2, 3}
 };
 
-float kp[num_wheels] = {0.4f, 0.38f, 0.4f, 0.4f};
-float ki[num_wheels] = {0.5f, 0.7f, 0.7f, 0.5f};
+float kp[num_wheels] = {0.1f, 0.1f, 0.1f, 0.1f};
+float ki[num_wheels] = {0.4f, 0.4f, 0.4f, 0.4f};
 float kd[num_wheels] = {0.0f, 0.0f, 0.0f, 0.0f};
 
 EncoderVelocity encoders[num_wheels] = {
-    {ENCODER2_A_PIN, ENCODER2_B_PIN, CPR_312_RPM, 0.2},
-    {ENCODER1_A_PIN, ENCODER1_B_PIN, CPR_312_RPM, 0.2},
-    {ENCODER3_A_PIN, ENCODER3_B_PIN, CPR_312_RPM, 0.2},
-    {ENCODER4_A_PIN, ENCODER4_B_PIN, CPR_312_RPM, 0.2},
+    {ENCODER2_A_PIN, ENCODER2_B_PIN, CPR_312_RPM, 0.5},
+    {ENCODER1_A_PIN, ENCODER1_B_PIN, CPR_312_RPM, 0.5},
+    {ENCODER3_A_PIN, ENCODER3_B_PIN, CPR_312_RPM, 0.5},
+    {ENCODER4_A_PIN, ENCODER4_B_PIN, CPR_312_RPM, 0.5},
 };
 
 PID pid1 = {kp[0], ki[0], kd[0], 0.0, PID_TAU, false};
@@ -164,9 +167,8 @@ bool handleWheelCommand(const String& line, DesiredWheelVel& des_wheel_spd) {
 
   // Match physical wheel polarity:
   // w1 = left_front, w2 = right_front, w3 = left_rear, w4 = right_rear.
-  des_wheel_spd.w1 *= -1.0f;
+  des_wheel_spd.w3 *= -1.0f;
   des_wheel_spd.w2 *= -1.0f;
-  des_wheel_spd.w4 *= -1.0f;
 
   return true;
 }
@@ -205,8 +207,6 @@ static DesiredWheelVel lowPassWheelCommand(const DesiredWheelVel& target,
                                            unsigned long now_ms) {
   if (last_wheel_cmd_filter_ms == 0) {
     last_wheel_cmd_filter_ms = now_ms;
-    latest_applied_cmd = target;
-    return latest_applied_cmd;
   }
 
   const float dt = (now_ms - last_wheel_cmd_filter_ms) / 1000.0f;
@@ -221,11 +221,16 @@ static DesiredWheelVel lowPassWheelCommand(const DesiredWheelVel& target,
   return latest_applied_cmd;
 }
 
+static void sampleWheelEncoders() {
+  for (uint8_t i = 0; i < num_wheels; ++i) {
+    measured_vel[i] = ENCODER_SIGN[i] * encoders[i].getVelocity();
+  }
+}
+
 static void applyWheelCommand(const DesiredWheelVel& cmd) {
   const float setpoints[num_wheels] = {cmd.w1, cmd.w2, cmd.w3, cmd.w4};
 
   for (uint8_t i = 0; i < num_wheels; ++i) {
-    measured_vel[i] = ENCODER_SIGN[i] * encoders[i].getVelocity();
     control_effort[i] = pids[i].calculateParallel(measured_vel[i], setpoints[i]);
     wheels[i].drive(control_effort[i]);
   }
@@ -233,8 +238,8 @@ static void applyWheelCommand(const DesiredWheelVel& cmd) {
 
 static bool joystickToWheelCommand(const ControllerMessage& controller_msg,
                                   DesiredWheelVel& des_wheel_spd) {
-  const float forward_input = controller_msg.joystick2.y;
-  const float turn_input = controller_msg.joystick1.y;
+  const float forward_input = controller_msg.joystick1.y;
+  const float turn_input = controller_msg.joystick2.x;
 
   const float forward = fabs(forward_input) < JOYSTICK_DEADBAND
                             ? 0.0f
@@ -252,25 +257,25 @@ static bool joystickToWheelCommand(const ControllerMessage& controller_msg,
   Serial.print(",turn,");
   Serial.println(turn);
 
+  // Legend:
+// w1 = left_front (MOTOR 2), w2 = right_front (MOTOR 3), w3 = left_rear (MOTOR 1), w4 = right_rear (MOTOR 4).
+
   // Differential/skid-steer mixing:
   //   joystick1.y -> forward/back
   //   joystick2.y -> turn in place
-  // Wheel command order here is:
-  //   w1 = left_rear
-  //   w2 = left_front
-  //   w3 = right_front
-  //   w4 = right_rear
+  // Legend:
+  // w1 = left_front (MOTOR 2), w2 = right_front (MOTOR 3), w3 = left_rear (MOTOR 1), w4 = right_rear (MOTOR 4).
   const float left = forward - turn;
   const float right = forward + turn;
 
   String wheel_cmd_line = "WHL_CMD,";
-  wheel_cmd_line += String(-left, 4);
+  wheel_cmd_line += String(right, 4);
+  wheel_cmd_line += ",";
+  wheel_cmd_line += String(right, 4);
   wheel_cmd_line += ",";
   wheel_cmd_line += String(left, 4);
   wheel_cmd_line += ",";
-  wheel_cmd_line += String(right, 4);
-  wheel_cmd_line += ",";
-  wheel_cmd_line += String(right, 4);
+  wheel_cmd_line += String(left, 4);
 
   Serial.println(wheel_cmd_line);
 
@@ -298,6 +303,8 @@ static void updateAutonomyToggle() {
 static void printWheelAck(const DesiredWheelVel& cmd) {
   printDebugTiming("ACK", last_ack_debug_ms);
 
+  Serial.println("DBG,CMD_IS_APPLIED_ACK");
+  Serial.println("DBG,WHEEL_ORDER,w1_left_rear,w2_left_front,w3_right_front,w4_right_rear");
   Serial.print("CMD,");
   Serial.print(cmd.w1);
   Serial.print(",");
@@ -404,6 +411,14 @@ void loop() {
         latest_rx_cmd = cmd;
         has_pending_cmd = true;
         last_cmd_rx_ms = millis();
+        if (!autonomy_enabled) {
+          autonomy_enabled = true;
+          stopMotors();
+          latest_rx_cmd = cmd;
+          has_pending_cmd = true;
+          last_cmd_rx_ms = millis();
+          Serial.println("MODE,AUTONOMY_SERIAL");
+        }
       }
 
       rx_line = "";
@@ -413,6 +428,7 @@ void loop() {
   }
 
   const unsigned long now = millis();
+  sampleWheelEncoders();
 
   if (autonomy_enabled) {
     if (now - last_cmd_rx_ms > CMD_TIMEOUT_MS) {
@@ -425,7 +441,8 @@ void loop() {
       has_pending_cmd = false;
       last_cmd_apply_ms = now;
     }
-  } else if (now - last_joystick_apply_ms >= JOYSTICK_APPLY_PERIOD_MS) {
+  } 
+  else if (now - last_joystick_apply_ms >= JOYSTICK_APPLY_PERIOD_MS) {
     if (now - last_controller_rx_ms > CONTROLLER_TIMEOUT_MS) {
       stopMotors();
       Serial.println("ERR,CONTROLLER_TIMEOUT");
@@ -442,11 +459,11 @@ void loop() {
     last_joystick_apply_ms = now;
   }
 
-  // if (ack_dirty && (now - last_ack_publish_ms >= ACK_PUBLISH_PERIOD_MS)) {
-  //   printWheelAck(latest_applied_cmd);
-  //   ack_dirty = false;
-  //   last_ack_publish_ms = now;
-  // }
+  if (ack_dirty && (now - last_ack_publish_ms >= ACK_PUBLISH_PERIOD_MS)) {
+    printWheelAck(latest_applied_cmd);
+    ack_dirty = false;
+    last_ack_publish_ms = now;
+  }
 
   if (now - last_imu_publish_ms >= IMU_PUBLISH_PERIOD_MS) {
     sendIMU();

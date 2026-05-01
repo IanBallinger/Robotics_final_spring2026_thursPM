@@ -97,9 +97,9 @@ void loop() {
         // Differential-drive mapping:
         // - left-stick forward/back comes from joystick1.y
         // - right-stick up/down comes from joystick2.y and commands turn-in-place
-        controllerMessage.joystick1.x = 0.0f;
+        controllerMessage.joystick1.x = filteredLeftCommand.x;
         controllerMessage.joystick1.y = filteredLeftCommand.y;
-        controllerMessage.joystick2.x = 0.0f;
+        controllerMessage.joystick2.x = filteredRightCommand.x;
         controllerMessage.joystick2.y = filteredRightCommand.y;
 
         if (!(prevControllerMessage == controllerMessage)) {
