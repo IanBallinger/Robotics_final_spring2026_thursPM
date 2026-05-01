@@ -229,8 +229,8 @@ static void applyWheelCommand(const DesiredWheelVel& cmd) {
       wheels[i].drive(0.0f);
     }
     else{
-      measured_vel = ENCODER_SIGN[i] * encoders[i].getVelocity();
-      control_effort[i] = pids[i].calculateParallel(measured_vel, setpoints[i]);
+      measured_vel[i] = ENCODER_SIGN[i] * encoders[i].getVelocity();
+      control_effort[i] = pids[i].calculateParallel(measured_vel[i], setpoints[i]);
       wheels[i].drive(control_effort[i]);
     }
 
