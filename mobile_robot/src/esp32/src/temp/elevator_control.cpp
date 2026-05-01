@@ -58,8 +58,8 @@ constexpr float ELEVATOR_METERS_PER_RAD = 0.005f;
 // Servo Arm setup and constants
 constexpr int ARM_SHOULDER_SERVO_PIN = 7;
 constexpr int ARM_ELBOW_SERVO_PIN = 6;
-constexpr int SERVO_MIN_US = 500;
-constexpr int SERVO_MAX_US = 2500;
+constexpr int SERVO_MIN_US = 544;
+constexpr int SERVO_MAX_US = 2400;
 constexpr float RAD_TO_DEG_FACTOR = 180.0f / PI;
 constexpr float ARM_BASE_X_M = 0.0f;
 constexpr float ARM_BASE_Y_M = 0.0f;
