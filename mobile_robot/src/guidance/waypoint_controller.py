@@ -64,12 +64,12 @@ class CascadedWaypointController:
 
     def __init__(
         self,
-        k_rho: float = 1.5,
-        k_alpha: float = 2.5,
-        k_heading: float = 2.0,
+        k_rho: float = 0.1,
+        k_alpha: float = 0.1,
+        k_heading: float = 0.1,
         align_turn_thresh: float = 0.45,
         v_max: float = 0.35,
-        omega_max: float = 1.8,
+        omega_max: float = 0.5,
         kv_inner: float = 0.9,
         ky_inner: float = 0.9,
         komega_inner: float = 0.9,
