@@ -53,7 +53,8 @@ constexpr int ELEVATOR_ENCODER_B_PIN = 5;
 constexpr int ELEVATOR_ENCODER_CPR = CPR_312_RPM;
 constexpr float ELEVATOR_ENCODER_TAU_S = 0.05f;
 constexpr float ELEVATOR_ENCODER_SIGN = 1.0f;
-constexpr float ELEVATOR_METERS_PER_RAD = 0.005f;
+constexpr float ELEVATOR_METERS_PER_RAD = 0.018f;
+constexpr float ELEVATOR_METERS_BIAS = -0.02f;
 
 // Servo Arm setup and constants
 constexpr int ARM_SHOULDER_SERVO_PIN = 40;
@@ -63,12 +64,12 @@ constexpr int SERVO_MAX_US = 2400;
 constexpr float RAD_TO_DEG_FACTOR = 180.0f / PI;
 constexpr float ARM_BASE_X_M = 0.0f;
 constexpr float ARM_BASE_Y_M = 0.0f;
-constexpr float ARM_LINK_1_M = 0.31f;
-constexpr float ARM_LINK_2_M = 0.43f;
+constexpr float ARM_LINK_1_M = 0.26f;
+constexpr float ARM_LINK_2_M = 0.16f; // TODO: need to add length of end effector
 
-constexpr float SHOULDER_MIN_DEG = 0.0f;
-constexpr float SHOULDER_MAX_DEG = 90.0f;
-constexpr float ELBOW_MIN_DEG = 0.0f;
+constexpr float SHOULDER_MIN_DEG = -180.0f; //changed from 0-90 deg
+constexpr float SHOULDER_MAX_DEG = 180.0f;
+constexpr float ELBOW_MIN_DEG = -180.0f;
 constexpr float ELBOW_MAX_DEG = 180.0f;
 
 DesiredElevatorState latest_rx_cmd;
@@ -105,7 +106,9 @@ double integral_max = 1e6;
 
 PID pid = {Kp, Ki, Kd, 0.0, 0.1f, false};
 
-
+// For debugging
+double shoulder_ms = 0.0;
+double elbow_ms = 0.0;
 
 void tcaSelect(uint8_t channel) {
   if (channel > 7) {
@@ -157,7 +160,8 @@ static float convertElbowAngleToMicroseconds (const float elbow_angle){
   // 180 deg: 2287
 
   // elbow angle should be between 0 and 180
-  return 1090 + elbow_angle * (599.0/90.0);
+  // have to negate desired elbow angle to actual command
+  return 1090 - elbow_angle * (599.0/90.0);
 }
 
 static bool handleElevatorCommand(const String& line, DesiredElevatorState& cmd) {
@@ -212,7 +216,7 @@ static float readEncoderHeightMeters() {
     return NAN;
   }
   const float position_rad = ELEVATOR_ENCODER_SIGN * elevator_encoder.getPosition();
-  return encoder_zero_height_m +
+  return encoder_zero_height_m + ELEVATOR_METERS_BIAS +
          (position_rad - encoder_zero_position_rad) * ELEVATOR_METERS_PER_RAD;
 }
 
@@ -250,8 +254,8 @@ static bool moveArmToJointAngles(float theta1_rad, float theta2_rad) {
   shoulder_deg = clampFloat(shoulder_deg, SHOULDER_MIN_DEG, SHOULDER_MAX_DEG);
   elbow_deg = clampFloat(elbow_deg, ELBOW_MIN_DEG, ELBOW_MAX_DEG);
 
-  double shoulder_ms = convertShoulderAngleToMicroseconds(shoulder_deg);
-  double elbow_ms = convertElbowAngleToMicroseconds(elbow_deg);
+  shoulder_ms = convertShoulderAngleToMicroseconds(shoulder_deg);
+  elbow_ms = convertElbowAngleToMicroseconds(elbow_deg);
 
   shoulder_servo.writeMicroseconds(shoulder_ms);
   elbow_servo.writeMicroseconds(elbow_ms);
@@ -267,13 +271,13 @@ static bool moveArmToXY(const DesiredArmPosition& cmd) {
       ARM_LINK_1_M,
       ARM_LINK_2_M);
 
-  // if (isnan(joint_angles.first) || isnan(joint_angles.second)) {
-  //   Serial.println("ARM_UNREACHABLE");
-  //   return false;
-  // }
+  if (isnan(joint_angles.first) || isnan(joint_angles.second)) {
+    Serial.println("ARM_UNREACHABLE");
+    return false;
+  }
 
   // Hard-coding for debugging, change to joint_angles.first, joint_angles.second
-  moveArmToJointAngles(cmd.xE, cmd.yE);
+  moveArmToJointAngles(joint_angles.first, joint_angles.second);
   Serial.print("ARM_ACK,");
   Serial.print(cmd.xE, 4);
   Serial.print(",");
@@ -281,7 +285,11 @@ static bool moveArmToXY(const DesiredArmPosition& cmd) {
   Serial.print(",");
   Serial.print(joint_angles.first * RAD_TO_DEG_FACTOR, 2);
   Serial.print(",");
-  Serial.println(joint_angles.second * RAD_TO_DEG_FACTOR, 2);
+  Serial.print(joint_angles.second * RAD_TO_DEG_FACTOR, 2);
+  Serial.print(",");
+  Serial.print(shoulder_ms);
+  Serial.print(",");
+  Serial.println(elbow_ms);
   return true;
 }
 
@@ -380,22 +388,22 @@ void loop() {
     stopElevator();
   }
 
-  // if (has_pending_cmd && now - last_cmd_apply_ms >= CMD_APPLY_PERIOD_MS) {
-  //   if (!isnan(measured_height_m)) {
-  //     applyElevatorCommand(latest_rx_cmd, measured_height_m);
-  //   } else {
-  //     elevator_driver.drive(0.0);
-  //   }
-  //   ack_dirty = true;
-  //   has_pending_cmd = false;
-  //   last_cmd_apply_ms = now;
-  // }
+   if (has_pending_cmd && now - last_cmd_apply_ms >= CMD_APPLY_PERIOD_MS) {
+     if (!isnan(measured_height_m)) {
+       applyElevatorCommand(latest_rx_cmd, measured_height_m);
+     } else {
+       elevator_driver.drive(0.0);
+     }
+     ack_dirty = true;
+     has_pending_cmd = false;
+     last_cmd_apply_ms = now;
+   }
 
-  // if (ack_dirty && now - last_ack_publish_ms >= ACK_PUBLISH_PERIOD_MS) {
-  //   printElevatorAck(latest_applied_cmd);
-  //   ack_dirty = false;
-  //   last_ack_publish_ms = now;
-  // }
+  if (ack_dirty && now - last_ack_publish_ms >= ACK_PUBLISH_PERIOD_MS) {
+     printElevatorAck(latest_applied_cmd);
+     ack_dirty = false;
+     last_ack_publish_ms = now;
+  }
 
   if (!isnan(measured_height_m) && now - last_meas_publish_ms >= MEAS_PUBLISH_PERIOD_MS) {
     publishElevatorMeasurement(measured_height_m);
