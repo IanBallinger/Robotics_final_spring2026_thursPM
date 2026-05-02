@@ -397,8 +397,8 @@ void loop() {
   //   last_ack_publish_ms = now;
   // }
 
-  // if (!isnan(measured_height_m) && now - last_meas_publish_ms >= MEAS_PUBLISH_PERIOD_MS) {
-  //   publishElevatorMeasurement(measured_height_m);
-  //   last_meas_publish_ms = now;
-  // }
+  if (!isnan(measured_height_m) && now - last_meas_publish_ms >= MEAS_PUBLISH_PERIOD_MS) {
+    publishElevatorMeasurement(measured_height_m);
+    last_meas_publish_ms = now;
+  }
 }
