@@ -37,7 +37,7 @@ Adafruit_VL53L0X lox = Adafruit_VL53L0X();
 String rx_line = "";
 
 constexpr uint8_t TOF_MUX_CHANNEL = 0;
-constexpr unsigned long CMD_APPLY_PERIOD_MS = 50;
+constexpr unsigned long CMD_APPLY_PERIOD_MS = 10;
 constexpr unsigned long MEAS_PUBLISH_PERIOD_MS = 50;
 constexpr unsigned long ACK_PUBLISH_PERIOD_MS = 50;
 constexpr unsigned long CMD_TIMEOUT_MS = 250;
