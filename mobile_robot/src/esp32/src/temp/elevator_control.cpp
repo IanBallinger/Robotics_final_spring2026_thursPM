@@ -65,9 +65,8 @@ constexpr float ARM_BASE_X_M = 0.0f;
 constexpr float ARM_BASE_Y_M = 0.0f;
 constexpr float ARM_LINK_1_M = 0.31f;
 constexpr float ARM_LINK_2_M = 0.43f;
-constexpr float SHOULDER_ZERO_DEG = -90.0f;
-constexpr float ELBOW_ZERO_DEG = 0.0f;
-constexpr float SHOULDER_MIN_DEG = -90.0f;
+
+constexpr float SHOULDER_MIN_DEG = 0.0f;
 constexpr float SHOULDER_MAX_DEG = 90.0f;
 constexpr float ELBOW_MIN_DEG = 0.0f;
 constexpr float ELBOW_MAX_DEG = 180.0f;
@@ -84,6 +83,7 @@ unsigned long last_ack_publish_ms = 0;
 unsigned long last_ack_debug_ms = 0;
 unsigned long last_meas_debug_ms = 0;
 
+// TODO: need to update these pins
 MotorDriver elevator_driver {A_DIR1, A_PWM1, 0};
 EncoderVelocity elevator_encoder {ELEVATOR_ENCODER_A_PIN,
                                   ELEVATOR_ENCODER_B_PIN,
@@ -141,6 +141,23 @@ static float clampFloat(float value, float min_value, float max_value) {
     return max_value;
   }
   return value;
+}
+
+static float convertShoulderAngleToMilliseconds (const float shoulder_angle){
+  // 0 deg: 1360
+  // 90 deg: 1960
+
+  // shoulder angle should be between 0 and 90
+  return 1360 + shoulder_angle * (600.0/90.0)
+}
+
+static float convertElbowAngleToMilliseconds (const float elbow_angle){
+  // 0 deg: 1090
+  // 90 deg: 1691
+  // 180 deg: 2287
+
+  // elbow angle should be between 0 and 180
+  return 1090 + elbow_angle * (599.0/90.0)
 }
 
 static bool handleElevatorCommand(const String& line, DesiredElevatorState& cmd) {
@@ -227,14 +244,17 @@ static void printElevatorAck(const DesiredElevatorState& cmd) {
 }
 
 static bool moveArmToJointAngles(float theta1_rad, float theta2_rad) {
-  float shoulder_deg = SHOULDER_ZERO_DEG + theta1_rad * RAD_TO_DEG_FACTOR;
-  float elbow_deg = ELBOW_ZERO_DEG + theta2_rad * RAD_TO_DEG_FACTOR;
+  float shoulder_deg = theta1_rad * RAD_TO_DEG_FACTOR;
+  float elbow_deg = theta2_rad * RAD_TO_DEG_FACTOR;
 
   shoulder_deg = clampFloat(shoulder_deg, SHOULDER_MIN_DEG, SHOULDER_MAX_DEG);
   elbow_deg = clampFloat(elbow_deg, ELBOW_MIN_DEG, ELBOW_MAX_DEG);
 
-  shoulder_servo.write(shoulder_deg);
-  elbow_servo.write(elbow_deg);
+  double shoulder_ms = convertShoulderAngleToMilliseconds(shoulder_deg);
+  double elbow_ms = convertElbowAngleToMilliseconds(elbow_deg);
+
+  shoulder_servo.writeMilliseconds(shoulder_ms);
+  elbow_servo.writeMilliseconds(elbow_ms);
   return true;
 }
 
