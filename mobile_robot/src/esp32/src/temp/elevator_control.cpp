@@ -56,8 +56,8 @@ constexpr float ELEVATOR_ENCODER_SIGN = 1.0f;
 constexpr float ELEVATOR_METERS_PER_RAD = 0.005f;
 
 // Servo Arm setup and constants
-constexpr int ARM_SHOULDER_SERVO_PIN = 7;
-constexpr int ARM_ELBOW_SERVO_PIN = 6;
+constexpr int ARM_SHOULDER_SERVO_PIN = 40;
+constexpr int ARM_ELBOW_SERVO_PIN = 41;
 constexpr int SERVO_MIN_US = 544;
 constexpr int SERVO_MAX_US = 2400;
 constexpr float RAD_TO_DEG_FACTOR = 180.0f / PI;
@@ -333,7 +333,7 @@ void setup() {
   shoulder_servo.setPeriodHertz(50);
   Serial.println("SETUP_SHLDR");
   elbow_servo.setPeriodHertz(50);
-  // Serial.println("SETUP_ELBOW");
+  Serial.println("SETUP_ELBOW");
   shoulder_servo.attach(ARM_SHOULDER_SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
   elbow_servo.attach(ARM_ELBOW_SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
   moveArmToJointAngles(0.0f, 0.0f);
