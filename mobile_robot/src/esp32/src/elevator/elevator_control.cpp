@@ -97,7 +97,18 @@ bool encoder_height_initialized = false;
 float encoder_zero_height_m = 0.0f;
 float encoder_zero_position_rad = 0.0f;
 
+constexpr float ELEVATOR_ENCODER_MAX_SPEED_MPS = 1.0f;
+constexpr float ELEVATOR_ENCODER_JUMP_MARGIN_M = 0.01f;
+constexpr float ELEVATOR_TOF_CORRECTION_GAIN = 0.15f;
+constexpr float ELEVATOR_ENCODER_REANCHOR_GAIN = 0.05f;
+constexpr float ELEVATOR_ENCODER_REANCHOR_WINDOW_M = 0.03f;
+
+bool elevator_height_filter_initialized = false;
+bool last_encoder_height_valid = false;
+float fused_elevator_height_m = NAN;
+float last_encoder_height_m = NAN;
 float last_tof_height_m = NAN;
+unsigned long last_height_update_ms = 0;
 
 #define Kp 3.0f
 #define Ki 0.0f
@@ -223,18 +234,74 @@ static float readEncoderHeightMeters() {
 }
 
 static float readElevatorHeightMeters() {
+  const unsigned long now_ms = millis();
   const float tof_height_m = readTofElevatorHeightMeters();
   last_tof_height_m = tof_height_m;
+  maybeInitializeEncoderHeight(tof_height_m);
 
-  // Use the ToF sensor as the primary measurement, matching the behavior of
-  // the known-good implementation from commit 97aab57. The encoder is only
-  // used as a fallback when the ToF sample is temporarily invalid.
-  if (!isnan(tof_height_m)) {
-    maybeInitializeEncoderHeight(tof_height_m);
-    return tof_height_m;
+  const float encoder_height_m = readEncoderHeightMeters();
+
+  if (!elevator_height_filter_initialized) {
+    if (!isnan(tof_height_m)) {
+      fused_elevator_height_m = tof_height_m;
+      if (!isnan(encoder_height_m)) {
+        last_encoder_height_m = encoder_height_m;
+        last_encoder_height_valid = true;
+      }
+      elevator_height_filter_initialized = true;
+    } else if (!isnan(encoder_height_m)) {
+      fused_elevator_height_m = encoder_height_m;
+      last_encoder_height_m = encoder_height_m;
+      last_encoder_height_valid = true;
+      elevator_height_filter_initialized = true;
+    }
+    last_height_update_ms = now_ms;
+    return fused_elevator_height_m;
   }
 
-  return readEncoderHeightMeters();
+  const float dt_s = (last_height_update_ms == 0 || now_ms <= last_height_update_ms)
+                         ? 0.0f
+                         : (now_ms - last_height_update_ms) * 0.001f;
+  last_height_update_ms = now_ms;
+
+  float estimated_height_m = fused_elevator_height_m;
+
+  if (!isnan(encoder_height_m)) {
+    if (last_encoder_height_valid && dt_s > 0.0f) {
+      const float encoder_delta_m = encoder_height_m - last_encoder_height_m;
+      const float max_allowed_delta_m =
+          ELEVATOR_ENCODER_MAX_SPEED_MPS * dt_s + ELEVATOR_ENCODER_JUMP_MARGIN_M;
+      if (fabsf(encoder_delta_m) <= max_allowed_delta_m) {
+        estimated_height_m = fused_elevator_height_m + encoder_delta_m;
+      }
+    } else {
+      estimated_height_m = encoder_height_m;
+    }
+
+    last_encoder_height_m = encoder_height_m;
+    last_encoder_height_valid = true;
+  } else {
+    last_encoder_height_valid = false;
+  }
+
+  if (!isnan(tof_height_m)) {
+    if (isnan(estimated_height_m)) {
+      estimated_height_m = tof_height_m;
+    } else {
+      estimated_height_m +=
+          ELEVATOR_TOF_CORRECTION_GAIN * (tof_height_m - estimated_height_m);
+    }
+
+    if (!isnan(encoder_height_m) &&
+        fabsf(tof_height_m - encoder_height_m) <= ELEVATOR_ENCODER_REANCHOR_WINDOW_M) {
+      encoder_zero_height_m +=
+          ELEVATOR_ENCODER_REANCHOR_GAIN * (tof_height_m - encoder_height_m);
+      last_encoder_height_m = readEncoderHeightMeters();
+    }
+  }
+
+  fused_elevator_height_m = estimated_height_m;
+  return fused_elevator_height_m;
 }
 
 static void applyElevatorCommand(const DesiredElevatorState& cmd,
