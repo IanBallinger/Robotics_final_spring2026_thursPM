@@ -48,8 +48,8 @@ constexpr float MM_TO_M = 1.0f / 1000.0f;
 // By default this uses ENCODER1 on the elevator ESP32. Tune
 // ELEVATOR_METERS_PER_RAD and ELEVATOR_ENCODER_SIGN to match the pulley/lead
 // screw geometry and wiring direction.
-constexpr int ELEVATOR_ENCODER_A_PIN = ENCODER1_A_PIN;
-constexpr int ELEVATOR_ENCODER_B_PIN = ENCODER1_B_PIN;
+constexpr int ELEVATOR_ENCODER_A_PIN = 4;
+constexpr int ELEVATOR_ENCODER_B_PIN = 5;
 constexpr int ELEVATOR_ENCODER_CPR = CPR_312_RPM;
 constexpr float ELEVATOR_ENCODER_TAU_S = 0.05f;
 constexpr float ELEVATOR_ENCODER_SIGN = 1.0f;
@@ -84,7 +84,7 @@ unsigned long last_ack_debug_ms = 0;
 unsigned long last_meas_debug_ms = 0;
 
 // TODO: need to update these pins
-MotorDriver elevator_driver {A_DIR1, A_PWM1, 0};
+MotorDriver elevator_driver {B_DIR1, B_PWM1, 0};
 EncoderVelocity elevator_encoder {ELEVATOR_ENCODER_A_PIN,
                                   ELEVATOR_ENCODER_B_PIN,
                                   ELEVATOR_ENCODER_CPR,
