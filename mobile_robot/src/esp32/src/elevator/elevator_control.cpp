@@ -71,6 +71,10 @@ constexpr float SHOULDER_MIN_DEG = -180.0f; //changed from 0-90 deg
 constexpr float SHOULDER_MAX_DEG = 180.0f;
 constexpr float ELBOW_MIN_DEG = -180.0f;
 constexpr float ELBOW_MAX_DEG = 180.0f;
+constexpr unsigned long ARM_UPDATE_PERIOD_MS = 20;
+constexpr float ARM_SHOULDER_RATE_RAD_S = 1.2f;
+constexpr float ARM_ELBOW_RATE_RAD_S = 1.2f;
+constexpr float ARM_JOINT_REACHED_EPS_RAD = 0.01f;
 
 DesiredElevatorState latest_rx_cmd;
 DesiredElevatorState latest_applied_cmd;
@@ -83,6 +87,13 @@ unsigned long last_meas_publish_ms = 0;
 unsigned long last_ack_publish_ms = 0;
 unsigned long last_ack_debug_ms = 0;
 unsigned long last_meas_debug_ms = 0;
+unsigned long last_arm_update_ms = 0;
+
+bool has_valid_arm_target = false;
+float target_shoulder_rad = 0.0f;
+float target_elbow_rad = 0.0f;
+float applied_shoulder_rad = 0.0f;
+float applied_elbow_rad = 0.0f;
 
 // TODO: need to update these pins
 MotorDriver elevator_driver {B_DIR1, B_PWM1, 0};
@@ -335,6 +346,46 @@ static bool moveArmToJointAngles(float theta1_rad, float theta2_rad) {
   return true;
 }
 
+static float stepToward(float current_value, float target_value, float max_step) {
+  const float error = target_value - current_value;
+  if (fabsf(error) <= max_step) {
+    return target_value;
+  }
+  return current_value + copysignf(max_step, error);
+}
+
+static void updateArmMotion(unsigned long now_ms) {
+  if (!has_valid_arm_target) {
+    return;
+  }
+  if (last_arm_update_ms != 0 && now_ms - last_arm_update_ms < ARM_UPDATE_PERIOD_MS) {
+    return;
+  }
+
+  const float dt_s = (last_arm_update_ms == 0)
+                         ? (ARM_UPDATE_PERIOD_MS * 0.001f)
+                         : ((now_ms - last_arm_update_ms) * 0.001f);
+  last_arm_update_ms = now_ms;
+
+  applied_shoulder_rad = stepToward(
+      applied_shoulder_rad,
+      target_shoulder_rad,
+      ARM_SHOULDER_RATE_RAD_S * dt_s);
+  applied_elbow_rad = stepToward(
+      applied_elbow_rad,
+      target_elbow_rad,
+      ARM_ELBOW_RATE_RAD_S * dt_s);
+
+  moveArmToJointAngles(applied_shoulder_rad, applied_elbow_rad);
+
+  if (fabsf(target_shoulder_rad - applied_shoulder_rad) <= ARM_JOINT_REACHED_EPS_RAD &&
+      fabsf(target_elbow_rad - applied_elbow_rad) <= ARM_JOINT_REACHED_EPS_RAD) {
+    applied_shoulder_rad = target_shoulder_rad;
+    applied_elbow_rad = target_elbow_rad;
+    moveArmToJointAngles(applied_shoulder_rad, applied_elbow_rad);
+  }
+}
+
 static bool moveArmToXY(const DesiredArmPosition& cmd) {
   const auto joint_angles = inverseKinematics(
       cmd.xE,
@@ -349,20 +400,22 @@ static bool moveArmToXY(const DesiredArmPosition& cmd) {
     return false;
   }
 
-  // Hard-coding for debugging, change to joint_angles.first, joint_angles.second
-  moveArmToJointAngles(joint_angles.first, joint_angles.second);
+  target_shoulder_rad = joint_angles.first;
+  target_elbow_rad = joint_angles.second;
+  has_valid_arm_target = true;
+
   Serial.print("ARM_ACK,");
   Serial.print(cmd.xE, 4);
   Serial.print(",");
   Serial.print(cmd.yE, 4);
   Serial.print(",");
-  Serial.print(joint_angles.first * RAD_TO_DEG_FACTOR, 2);
+  Serial.print(target_shoulder_rad * RAD_TO_DEG_FACTOR, 2);
   Serial.print(",");
-  Serial.print(joint_angles.second * RAD_TO_DEG_FACTOR, 2);
+  Serial.print(target_elbow_rad * RAD_TO_DEG_FACTOR, 2);
   Serial.print(",");
-  Serial.print(shoulder_ms);
+  Serial.print(applied_shoulder_rad * RAD_TO_DEG_FACTOR, 2);
   Serial.print(",");
-  Serial.println(elbow_ms);
+  Serial.println(applied_elbow_rad * RAD_TO_DEG_FACTOR, 2);
   return true;
 }
 
@@ -424,12 +477,17 @@ void setup() {
   shoulder_servo.attach(ARM_SHOULDER_SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
   elbow_servo.attach(ARM_ELBOW_SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
   moveArmToJointAngles(0.0f, 0.0f);
+  applied_shoulder_rad = 0.0f;
+  applied_elbow_rad = 0.0f;
+  target_shoulder_rad = 0.0f;
+  target_elbow_rad = 0.0f;
 
   const unsigned long now = millis();
   last_cmd_rx_ms = now;
   last_cmd_apply_ms = now;
   last_meas_publish_ms = now;
   last_ack_publish_ms = now;
+  last_arm_update_ms = now;
 
   Serial.println("ELV_READY");
 }
@@ -461,6 +519,7 @@ void loop() {
   }
 
   const unsigned long now = millis();
+  updateArmMotion(now);
   const float measured_height_m = readElevatorHeightMeters();
 
   if (now - last_cmd_rx_ms > CMD_TIMEOUT_MS) {
