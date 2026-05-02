@@ -36,8 +36,8 @@ std::pair<float, float> inverseKinematics(
     const double cos_theta2 = (r2 - l1 * l1 - l2 * l2) / (2.0 * l1 * l2);
     const double clamped_cos_theta2 = std::max(-1.0, std::min(1.0, cos_theta2));
 
-    // Principal elbow-down branch.
-    const double sin_theta2 = std::sqrt(std::max(0.0, 1.0 - clamped_cos_theta2 * clamped_cos_theta2));
+    // Elbow-up branch.
+    const double sin_theta2 = -std::sqrt(std::max(0.0, 1.0 - clamped_cos_theta2 * clamped_cos_theta2));
     const double theta2 = std::atan2(sin_theta2, clamped_cos_theta2);
     const double theta1 = std::atan2(dy, dx) - std::atan2(l2 * sin_theta2, l1 + l2 * clamped_cos_theta2);
 

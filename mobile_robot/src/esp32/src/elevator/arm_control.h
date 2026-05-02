@@ -10,7 +10,7 @@
 // - (xE, yE) is the desired end-effector position
 // - l1 and l2 are the link lengths
 //
-// The returned solution uses the principal elbow-down branch.
+// The returned solution uses the elbow-up branch.
 // If the target is unreachable, both values are NAN.
 std::pair<float, float> inverseKinematics(
     double xE,
