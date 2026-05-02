@@ -143,21 +143,21 @@ static float clampFloat(float value, float min_value, float max_value) {
   return value;
 }
 
-static float convertShoulderAngleToMilliseconds (const float shoulder_angle){
+static float convertShoulderAngleToMicroseconds (const float shoulder_angle){
   // 0 deg: 1360
   // 90 deg: 1960
 
   // shoulder angle should be between 0 and 90
-  return 1360 + shoulder_angle * (600.0/90.0)
+  return 1360 + shoulder_angle * (600.0/90.0);
 }
 
-static float convertElbowAngleToMilliseconds (const float elbow_angle){
+static float convertElbowAngleToMicroseconds (const float elbow_angle){
   // 0 deg: 1090
   // 90 deg: 1691
   // 180 deg: 2287
 
   // elbow angle should be between 0 and 180
-  return 1090 + elbow_angle * (599.0/90.0)
+  return 1090 + elbow_angle * (599.0/90.0);
 }
 
 static bool handleElevatorCommand(const String& line, DesiredElevatorState& cmd) {
@@ -250,11 +250,11 @@ static bool moveArmToJointAngles(float theta1_rad, float theta2_rad) {
   shoulder_deg = clampFloat(shoulder_deg, SHOULDER_MIN_DEG, SHOULDER_MAX_DEG);
   elbow_deg = clampFloat(elbow_deg, ELBOW_MIN_DEG, ELBOW_MAX_DEG);
 
-  double shoulder_ms = convertShoulderAngleToMilliseconds(shoulder_deg);
-  double elbow_ms = convertElbowAngleToMilliseconds(elbow_deg);
+  double shoulder_ms = convertShoulderAngleToMicroseconds(shoulder_deg);
+  double elbow_ms = convertElbowAngleToMicroseconds(elbow_deg);
 
-  shoulder_servo.writeMilliseconds(shoulder_ms);
-  elbow_servo.writeMilliseconds(elbow_ms);
+  shoulder_servo.writeMicroseconds(shoulder_ms);
+  elbow_servo.writeMicroseconds(elbow_ms);
   return true;
 }
 
