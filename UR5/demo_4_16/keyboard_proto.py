@@ -171,13 +171,11 @@ with Listener(on_press = pressed, on_release = released) as listener:
     # rtde_c_L.moveJ(joint_q_L)
 
     gripper_L = RobotiqGripper(rtde_c_L)
-    gripper_L.activate()
     gripper_L.set_force(50)
     gripper_L.set_speed(100)
     gripper_L.open()
 
     # gripper_R = RobotiqGripper(rtde_c_R)
-    # gripper_R.activate()
     # gripper_R.set_force(50)
     # gripper_R.set_speed(100)
     # gripper_R.open()

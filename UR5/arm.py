@@ -12,6 +12,10 @@ from rtde_control import RTDEControlInterface as RTDEControl
 from rtde_receive import RTDEReceiveInterface as RTDEReceive
 from rtde_io import RTDEIOInterface as RTDEIO
 from math import pi as pi
+try:
+    from UR5.joint_limits import UR5_JOINT_LIMITS_RAD
+except Exception:
+    from joint_limits import UR5_JOINT_LIMITS_RAD
 
 class UR5Arm:
     """
@@ -29,6 +33,12 @@ class UR5Arm:
     DEFAULT_JOINT_ACCELERATION = 1.0 # rad/s^2 arbitrary default
     DEFAULT_TOOL_SPEED = 0.1                           # m/s     arbitrary small ddefault
     DEFAULT_TOOL_ACCELERATION = 1.0   # m/s^2   arbitrary default
+    DEFAULT_JOINT_LIMITS_RAD = UR5_JOINT_LIMITS_RAD
+
+    @staticmethod
+    def get_default_joint_limits_rad():
+        """Return configured joint limits [rad] for q0..q5."""
+        return list(UR5Arm.DEFAULT_JOINT_LIMITS_RAD)
 
     def __init__(self, ip_address, frequency=500.0, verbose=False):
         """

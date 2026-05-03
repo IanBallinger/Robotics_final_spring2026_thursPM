@@ -1,0 +1,117 @@
+{
+  "camera_spec_selection": {
+    "2": 0,
+    "3": 1
+  },
+  "item_settings": {
+    "blue microwave door handle": {
+      "close_iter": 3,
+      "h_hi": 103,
+      "h_lo": 95,
+      "kernel": 5,
+      "min_area": 500,
+      "open_iter": 3,
+      "s_hi": 255,
+      "s_lo": 105,
+      "v_hi": 255,
+      "v_lo": 158
+    },
+    "blue plate": {
+      "close_iter": 3,
+      "h_hi": 103,
+      "h_lo": 95,
+      "kernel": 5,
+      "min_area": 777,
+      "open_iter": 3,
+      "s_hi": 255,
+      "s_lo": 105,
+      "v_hi": 255,
+      "v_lo": 158
+    },
+    "blue plate edge": {
+      "close_iter": 3,
+      "h_hi": 103,
+      "h_lo": 95,
+      "kernel": 5,
+      "min_area": 500,
+      "open_iter": 3,
+      "s_hi": 255,
+      "s_lo": 105,
+      "v_hi": 255,
+      "v_lo": 158
+    },
+    "green bottle": {
+      "close_iter": 3,
+      "h_hi": 87,
+      "h_lo": 53,
+      "kernel": 5,
+      "min_area": 500,
+      "open_iter": 3,
+      "s_hi": 180,
+      "s_lo": 90,
+      "v_hi": 221,
+      "v_lo": 128
+    },
+    "purple cup": {
+      "close_iter": 3,
+      "h_hi": 180,
+      "h_lo": 156,
+      "kernel": 5,
+      "min_area": 500,
+      "open_iter": 3,
+      "s_hi": 176,
+      "s_lo": 83,
+      "v_hi": 143,
+      "v_lo": 0
+    },
+    "red bowl": {
+      "close_iter": 3,
+      "h_hi": 3,
+      "h_lo": 1,
+      "kernel": 5,
+      "min_area": 500,
+      "open_iter": 3,
+      "s_hi": 255,
+      "s_lo": 180,
+      "v_hi": 236,
+      "v_lo": 131
+    },
+    "red bowl edge": {
+      "close_iter": 3,
+      "h_hi": 3,
+      "h_lo": 1,
+      "kernel": 5,
+      "min_area": 500,
+      "open_iter": 3,
+      "s_hi": 255,
+      "s_lo": 180,
+      "v_hi": 236,
+      "v_lo": 131
+    },
+    "red stop button": {
+      "close_iter": 3,
+      "h_hi": 3,
+      "h_lo": 1,
+      "kernel": 5,
+      "min_area": 500,
+      "open_iter": 3,
+      "s_hi": 255,
+      "s_lo": 180,
+      "v_hi": 236,
+      "v_lo": 131
+    },
+    "yellow cup": {
+      "close_iter": 3,
+      "h_hi": 98,
+      "h_lo": 13,
+      "kernel": 5,
+      "min_area": 500,
+      "open_iter": 3,
+      "s_hi": 255,
+      "s_lo": 255,
+      "v_hi": 208,
+      "v_lo": 120
+    }
+  },
+  "version": 1
+}

@@ -347,7 +347,6 @@ class Supervisor:
             gripper_left = RobotiqGripper(rtde_c_left)
             gripper_right = RobotiqGripper(rtde_c_right)
             for g in (gripper_left, gripper_right):
-                g.activate()
                 g.set_force(50)
                 g.set_speed(100)
                 g.open()

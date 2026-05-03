@@ -29,6 +29,48 @@ waypoint_lock = threading.Lock()
 vision_targets_lock = threading.Lock()
 latest_target_positions = {}
 
+
+def _mat_vec_mul_row(v, m):
+    return (
+        v[0] * m[0][0] + v[1] * m[1][0] + v[2] * m[2][0],
+        v[0] * m[0][1] + v[1] * m[1][1] + v[2] * m[2][1],
+        v[0] * m[0][2] + v[1] * m[1][2] + v[2] * m[2][2],
+    )
+
+
+def base_to_global_task_xyz(base_xyz, arm_side):
+    """Mirror Supervisor/global task-frame transform for both arms."""
+    dy_t = 0.225 / 2 + 0.540 / 2
+    dz_t = -0.753
+
+    if arm_side == "left":
+        dx_t = 0.090 / 2 + 0.010 + 0.110
+        r_task_to_base = [
+            [0.707, 0.0, -0.707],
+            [0.0, -1.0, 0.0],
+            [-0.707, 0.0, -0.707],
+        ]
+    else:
+        dx_t = -(0.090 / 2 + 0.010 + 0.110)
+        r_task_to_base = [
+            [0.707, 0.0, 0.707],
+            [0.0, -1.0, 0.0],
+            [0.707, 0.0, -0.707],
+        ]
+
+    trans_base_to_task = _mat_vec_mul_row((dx_t, dy_t, dz_t), r_task_to_base)
+    p_rel = (
+        float(base_xyz[0]) - trans_base_to_task[0],
+        float(base_xyz[1]) - trans_base_to_task[1],
+        float(base_xyz[2]) - trans_base_to_task[2],
+    )
+    r_base_to_task = [
+        [r_task_to_base[0][0], r_task_to_base[1][0], r_task_to_base[2][0]],
+        [r_task_to_base[0][1], r_task_to_base[1][1], r_task_to_base[2][1]],
+        [r_task_to_base[0][2], r_task_to_base[1][2], r_task_to_base[2][2]],
+    ]
+    return _mat_vec_mul_row(p_rel, r_base_to_task)
+
 def on_press(key):
     """Handle keyboard press events for gripper control."""
     global gripper_state_L, gripper_state_R, recording_active, pending_waypoint_marks
@@ -128,6 +170,8 @@ def run_camera_detection(udp_socket, udp_target, stop_event, udp_send_lock, came
 
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
+            frame_detections = []
+
             for color_name, rng in CAMERA_COLORS.items():
                 mask = cv2.inRange(hsv, rng['lower'], rng['upper'])
                 opened  = cv2.morphologyEx(mask,   cv2.MORPH_OPEN,  kernel, iterations=iters)
@@ -143,27 +187,39 @@ def run_camera_detection(udp_socket, udp_target, stop_event, udp_send_lock, came
                     x_cm = (xc - CENTER_X) * CM_PIXEL
                     y_cm = (CENTER_Y - yc) * CM_PIXEL
 
-                    packet = {
-                        "position": [round(x_cm / 100.0, 4),
-                                     round(y_cm / 100.0, 4),
-                                     VISION_Z],
-                        "color": color_name,
-                        "x_cm": round(float(x_cm), 3),
-                        "y_cm": round(float(y_cm), 3),
-                    }
-                    try:
-                        with udp_send_lock:
-                            udp_socket.sendto(json.dumps(packet).encode("utf-8"), udp_target)
-                    except Exception as e:
-                        print(f"Vision UDP send error: {e}")
-
                     resolved_label = color_to_target_label.get(color_name, color_name) if color_to_target_label else color_name
-                    with vision_targets_lock:
-                        latest_target_positions[resolved_label] = {
-                            "position": [float(packet["position"][0]), float(packet["position"][1]), float(packet["position"][2])],
-                            "timestamp": time.time(),
+                    frame_detections.append(
+                        {
+                            "label": str(resolved_label),
                             "color": color_name,
+                            "position": [round(x_cm / 100.0, 4), round(y_cm / 100.0, 4), VISION_Z],
+                            "x_cm": round(float(x_cm), 3),
+                            "y_cm": round(float(y_cm), 3),
+                            "bbox_xywh": [int(x), int(y), int(w), int(h)],
                         }
+                    )
+
+            now_ts = time.time()
+            with vision_targets_lock:
+                latest_target_positions.clear()
+                for det in frame_detections:
+                    latest_target_positions[str(det["label"])] = {
+                        "position": [float(det["position"][0]), float(det["position"][1]), float(det["position"][2])],
+                        "timestamp": now_ts,
+                        "color": det["color"],
+                    }
+
+            if frame_detections:
+                packet = {
+                    "packet_type": "vision_frame",
+                    "timestamp": now_ts,
+                    "detections": frame_detections,
+                }
+                try:
+                    with udp_send_lock:
+                        udp_socket.sendto(json.dumps(packet).encode("utf-8"), udp_target)
+                except Exception as e:
+                    print(f"Vision UDP send error: {e}")
 
             cv2.imshow("Camera (record.py)", frame)
             cv2.waitKey(3)
@@ -475,9 +531,6 @@ def main(args):
         gripper_L = RobotiqGripper(rtde_c_L)
         gripper_R = RobotiqGripper(rtde_c_R)
         
-        # Activate grippers
-        gripper_L.activate()
-        gripper_R.activate()
         gripper_L.set_force(50)
         gripper_R.set_force(50)
         gripper_L.set_speed(100)
@@ -542,6 +595,8 @@ def main(args):
             right_pose = rtde_r_right.getActualTCPPose()
             left_q = rtde_r_left.getActualQ()
             right_q = rtde_r_right.getActualQ()
+            left_task_xyz = base_to_global_task_xyz(left_pose[:3], "left")
+            right_task_xyz = base_to_global_task_xyz(right_pose[:3], "right")
 
             with gripper_state_lock:
                 curr_gripper_state_L = bool(gripper_state_L)
@@ -559,6 +614,14 @@ def main(args):
                     "right_actual_TCP_pose": right_pose,
                     "left_actual_q": left_q,
                     "right_actual_q": right_q,
+                    # Arm/base coordinates (explicit aliases for downstream consumers)
+                    "left_base_xyz": [float(left_pose[0]), float(left_pose[1]), float(left_pose[2])],
+                    "right_base_xyz": [float(right_pose[0]), float(right_pose[1]), float(right_pose[2])],
+                    # Per-arm task/global coordinates used for moving-frame playback.
+                    "left_task_xyz": [float(left_task_xyz[0]), float(left_task_xyz[1]), float(left_task_xyz[2])],
+                    "right_task_xyz": [float(right_task_xyz[0]), float(right_task_xyz[1]), float(right_task_xyz[2])],
+                    "left_global_xyz": [float(left_task_xyz[0]), float(left_task_xyz[1]), float(left_task_xyz[2])],
+                    "right_global_xyz": [float(right_task_xyz[0]), float(right_task_xyz[1]), float(right_task_xyz[2])],
                     "left_gripper_open": curr_gripper_state_L,
                     "right_gripper_open": curr_gripper_state_R,
                 }
@@ -574,9 +637,24 @@ def main(args):
             for _ in range(marks_to_send):
                 waypoint_index += 1
                 dependent_snapshot = None
+                tracked_items_snapshot = []
                 if dependent_item_label:
                     with vision_targets_lock:
                         dependent_snapshot = latest_target_positions.get(dependent_item_label)
+                with vision_targets_lock:
+                    for label, data in latest_target_positions.items():
+                        tracked_items_snapshot.append(
+                            {
+                                "label": str(label),
+                                "position": [
+                                    float(data.get("position", [0.0, 0.0, 0.0])[0]),
+                                    float(data.get("position", [0.0, 0.0, 0.0])[1]),
+                                    float(data.get("position", [0.0, 0.0, 0.0])[2]),
+                                ],
+                                "timestamp": float(data.get("timestamp", 0.0)),
+                                "color": str(data.get("color", "")),
+                            }
+                        )
 
                 dependent_position = dependent_snapshot.get("position") if dependent_snapshot else None
                 left_offset, left_distance = _offset_and_distance(left_pose, dependent_position)
@@ -595,12 +673,17 @@ def main(args):
                     "right_actual_TCP_pose": right_pose,
                     "left_actual_q": left_q,
                     "right_actual_q": right_q,
+                    "left_task_xyz": [float(left_task_xyz[0]), float(left_task_xyz[1]), float(left_task_xyz[2])],
+                    "right_task_xyz": [float(right_task_xyz[0]), float(right_task_xyz[1]), float(right_task_xyz[2])],
+                    "left_global_xyz": [float(left_task_xyz[0]), float(left_task_xyz[1]), float(left_task_xyz[2])],
+                    "right_global_xyz": [float(right_task_xyz[0]), float(right_task_xyz[1]), float(right_task_xyz[2])],
                     "left_gripper_open": curr_gripper_state_L,
                     "right_gripper_open": curr_gripper_state_R,
                     "left_distance_to_dependent_m": left_distance,
                     "right_distance_to_dependent_m": right_distance,
                     "left_offset_to_dependent_xyz": left_offset,
                     "right_offset_to_dependent_xyz": right_offset,
+                    "tracked_items": tracked_items_snapshot,
                     "named_waypoints_csv": args.named_waypoints_csv,
                 }
                 if udp_socket and udp_target:

@@ -256,7 +256,6 @@ class JuliaReplayTask(UR5TaskInterface):
         try:
             self.gripper_control = RTDEControlInterface(self.robot_ip)
             self.gripper = RobotiqGripper(self.gripper_control)
-            self.gripper.activate()
             self.gripper.set_force(50)
             self.gripper.set_speed(100)
             print("[INFO] Gripper replay enabled")
