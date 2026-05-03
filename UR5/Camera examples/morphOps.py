@@ -61,6 +61,10 @@ def main():
         tu_hsv = np.array([ 56, 195, 255])
         rbl_hsv = np.array([  1, 180, 131])
         rbu_hsv = np.array([  3, 255, 236])
+        ml_hsv = np.array([93, 244,128])
+        mu_hsv = np.array([106, 255, 255])
+        mbl_hsv = np.array([0, 146, 53])
+        mbu_hsv = np.array([5, 240, 203])
 
         lower_bound_HSV = glb_hsv
         upper_bound_HSV = gup_hsv
