@@ -50,7 +50,6 @@ from camera import (  # noqa: E402
 from control_center.arm_visualizer import (  # noqa: E402
     ArmGeometry,
     EndEffectorTarget,
-    create_two_link_arm_figure,
     inverse_kinematics,
     parse_arm_ack_line,
 )
@@ -306,7 +305,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--depth-window-radius", type=int, default=2)
     parser.add_argument("--arm-x-axis", choices=("x", "y", "z"), default="x")
     parser.add_argument("--arm-y-axis", choices=("x", "y", "z"), default="y")
-    parser.add_argument("--visualize-arm", action="store_true")
     parser.add_argument("--link-1-m", type=float, default=0.18)
     parser.add_argument("--link-2-m", type=float, default=0.18)
     parser.add_argument("--debug", action="store_true")
@@ -328,19 +326,9 @@ def main() -> None:
     )
 
     geometry = ArmGeometry(link_1_m=args.link_1_m, link_2_m=args.link_2_m)
-    plotter = None
-    plt = None
-    fig = None
     latest_arm_ack = None
     latest_elevator_height_m = None
     latest_raw_line = None
-    if args.visualize_arm:
-        plt, fig, _, plotter = create_two_link_arm_figure(
-            geometry,
-            title=f"Tray arm serial ({args.arm_x_axis},{args.arm_y_axis}) plane",
-        )
-        plt.ion()
-        plt.show(block=False)
 
     start_t = time.monotonic()
     tx_period = 0.0 if args.rate_hz <= 0.0 else 1.0 / args.rate_hz
@@ -356,8 +344,6 @@ def main() -> None:
             while True:
                 now = time.monotonic()
                 if args.duration_s > 0.0 and (now - start_t) >= args.duration_s:
-                    break
-                if args.visualize_arm and plt is not None and fig is not None and not plt.fignum_exists(fig.number):
                     break
 
                 frame = camera.read()
@@ -461,19 +447,6 @@ def main() -> None:
                     cv2.imshow(WINDOW_MASK, blank)
                     cv2.imshow(WINDOW_MASKED, np.zeros_like(bgr))
                     cv2.imshow(WINDOW_TRAY, bgr)
-
-                if plotter is not None:
-                    cmd_a = current_target_xy[0] if current_target_xy is not None else None
-                    cmd_b = current_target_xy[1] if current_target_xy is not None else None
-                    plotter.update(
-                        command_space="xy",
-                        target_cmd_a=cmd_a,
-                        target_cmd_b=cmd_b,
-                        latest_ack=latest_arm_ack,
-                        latest_height_m=latest_elevator_height_m,
-                        latest_raw_line=latest_raw_line,
-                    )
-                    plt.pause(0.001)
 
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
