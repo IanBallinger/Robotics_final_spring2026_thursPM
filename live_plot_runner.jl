@@ -23,6 +23,15 @@ using Colors
 using JLD2
 using Dates
 
+# Frame transform helpers mirroring Supervisor.compute_task_frames().
+function mat_vec_mul_row(v::NTuple{3, Float64}, m::AbstractMatrix{<:Real})
+    return (
+        v[1] * m[1, 1] + v[2] * m[2, 1] + v[3] * m[3, 1],
+        v[1] * m[1, 2] + v[2] * m[2, 2] + v[3] * m[3, 2],
+        v[1] * m[1, 3] + v[2] * m[2, 3] + v[3] * m[3, 3],
+    )
+end
+
 function safe_task_name_for_filename(task_name::AbstractString, fallback::AbstractString = "unnamed_task")
     raw = strip(task_name)
     if isempty(raw)

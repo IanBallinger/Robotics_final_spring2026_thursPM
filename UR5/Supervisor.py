@@ -15,6 +15,7 @@ import argparse
 import heapq
 import importlib.util
 import json
+import queue
 import socket
 import sys
 import threading
@@ -80,11 +81,12 @@ DEFAULT_RTDE_VARIABLES = [
 ]
 
 CAMERA_COLORS = {
-    "purple": {"lower": np.array([156, 83, 0]), "upper": np.array([180, 176, 143])},
-    "yellow": {"lower": np.array([13, 255, 120]), "upper": np.array([98, 255, 208])},
-    "green": {"lower": np.array([53, 90, 128]), "upper": np.array([87, 180, 221])},
-    "tan": {"lower": np.array([40, 71, 139]), "upper": np.array([56, 195, 255])},
-    "red": {"lower": np.array([1, 180, 131]), "upper": np.array([3, 255, 236])},
+    'purple': {'lower': np.array([156,  83,   0]), 'upper': np.array([180, 176, 143])},
+    'yellow': {'lower': np.array([ 13, 255, 120]), 'upper': np.array([ 98, 255, 208])},
+    'green':  {'lower': np.array([ 53,  90, 128]), 'upper': np.array([ 87, 180, 221])},
+    'tan':    {'lower': np.array([ 40,  71, 139]), 'upper': np.array([ 56, 195, 255])},
+    'blue':   {'lower': np.array([ 95, 105, 158]), 'upper': np.array([103, 255, 255])},
+    'red':    {'lower': np.array([  1, 180, 131]), 'upper': np.array([  3, 255, 236])},
 }
 CM_PIXEL = 54.0 / 275
 CENTER_X = 337.5
@@ -154,6 +156,9 @@ class Supervisor:
         self._points_map: Dict[str, Dict[str, float]] = {}
         self._resource_constraints: Dict[str, dict] = {}
         self._resource_state: Dict[str, Dict[str, int]] = {}
+        self._grasped_object_by_arm: Dict[str, Optional[str]] = {"left": None, "right": None}
+        self._idle_wait_margin: float = 0.5
+        self._max_consecutive_idle_per_arm: int = 2
         self._score_counts: Dict[str, int] = {}
         self._earned_points_total: float = 0.0
         self.subtasks_dir = subtasks_dir or (_THIS_DIR / "subtasks")
@@ -506,6 +511,11 @@ class Supervisor:
 
     def run_subtask(self, name: str, params: Optional[dict] = None) -> bool:
         params = params or {}
+        if name == "_idle_wait":
+            wait_s = float(params.get("wait_s", 0.05))
+            if wait_s > 0.0:
+                time.sleep(wait_s)
+            return True
         if name not in self.subtasks:
             raise KeyError(f"Unknown subtask: {name}")
         return bool(self.subtasks[name].runner(self, params))
@@ -541,6 +551,100 @@ class Supervisor:
             return ["left", "right"]
         return []
 
+    @staticmethod
+    def _normalize_grasp_label(raw: Optional[str]) -> str:
+        if raw is None:
+            return ""
+        label = str(raw).strip().lower()
+        if not label:
+            return ""
+
+        mapping = {
+            "microwavable_bowl": "bowl",
+            "microwavable_plate": "plate",
+            "cup_for_drink": "cup",
+            "bottle_to_fill_cup": "bottle",
+            "cup_containing_stirrer": "stirrer",
+            "tray": "tray",
+            "microwave": "microwave",
+            "microwave_door": "microwave",
+            "door": "microwave",
+        }
+        return mapping.get(label, label)
+
+    def _infer_gripper_requirements(self, task: QueuedTask) -> dict:
+        """Infer per-arm grasp compatibility for known task patterns."""
+        params = task.params or {}
+        name = task.name
+
+        if name == "acquire_bowl":
+            return {"requires_empty": True, "set_object": "bowl"}
+        if name == "acquire_plate":
+            return {"requires_empty": True, "set_object": "plate"}
+        if name == "acquire_cup":
+            return {"requires_empty": True, "set_object": "cup"}
+        if name == "acquire_bottle":
+            return {"requires_empty": True, "set_object": "bottle"}
+        if name == "place_bowl_in_microwave":
+            return {"requires_object": "bowl", "clear_object": True}
+        if name == "place_plate_in_microwave":
+            return {"requires_object": "plate", "clear_object": True}
+        if name == "place_cup_on_tray":
+            return {"requires_object": "cup", "clear_object": True}
+        if name == "take_bowl_out_to_tray":
+            return {"requires_empty": True}
+        if name == "take_plate_out_to_tray":
+            return {"requires_empty": True}
+        if name == "pour_drink_into_cup":
+            return {"requires_object": "bottle"}
+        if name == "return_bottle":
+            return {"requires_object": "bottle", "clear_object": True}
+
+        explicit_required = self._normalize_grasp_label(params.get("requires_grasped_object"))
+        explicit_set = self._normalize_grasp_label(params.get("set_grasped_object"))
+        explicit_clear = bool(params.get("clear_grasped_object", False))
+        requires_empty = bool(params.get("requires_empty_gripper", False))
+
+        return {
+            "requires_object": explicit_required,
+            "set_object": explicit_set,
+            "clear_object": explicit_clear,
+            "requires_empty": requires_empty,
+        }
+
+    def _gripper_gate_allowed(self, task: QueuedTask) -> bool:
+        target_arms = self._task_target_arms(task)
+        if len(target_arms) != 1:
+            # Only single-arm tasks participate in grasp compatibility.
+            return True
+
+        arm = target_arms[0]
+        current = self._grasped_object_by_arm.get(arm)
+        rules = self._infer_gripper_requirements(task)
+        required = self._normalize_grasp_label(rules.get("requires_object"))
+        requires_empty = bool(rules.get("requires_empty", False))
+
+        if requires_empty and current is not None:
+            return False
+        if required and current != required:
+            return False
+        return True
+
+    def _apply_gripper_state(self, task: QueuedTask):
+        target_arms = self._task_target_arms(task)
+        if len(target_arms) != 1:
+            return
+
+        arm = target_arms[0]
+        rules = self._infer_gripper_requirements(task)
+        set_object = self._normalize_grasp_label(rules.get("set_object"))
+        clear_object = bool(rules.get("clear_object", False))
+
+        if clear_object:
+            self._grasped_object_by_arm[arm] = None
+        if set_object:
+            self._grasped_object_by_arm[arm] = set_object
+
     def _prerequisites_met(self, task: QueuedTask) -> bool:
         return all(token in self._completed_tokens for token in task.prerequisites)
 
@@ -553,6 +657,10 @@ class Supervisor:
         if not self._resource_gate_allowed(task):
             return 0.0
         if not self._arm_gate_allowed(task):
+            return 0.0
+        if not self._gripper_gate_allowed(task):
+            return 0.0
+        if self._close_defers_for_other_arm_only_branch(task):
             return 0.0
 
         bonus_points = 0.0
@@ -569,6 +677,142 @@ class Supervisor:
             return 0.0
 
         return float(dynamic_base_points) + bonus_points
+
+    @staticmethod
+    def _task_tokens(task: QueuedTask) -> Set[str]:
+        return {task.task_id, task.name}
+
+    @staticmethod
+    def _required_unblocked_arms(task: QueuedTask) -> Set[str]:
+        params = task.params or {}
+        raw = params.get("requires_arms_unblocked", [])
+        if not isinstance(raw, list):
+            return set()
+
+        required: Set[str] = set()
+        for arm in raw:
+            arm_name = str(arm).strip().lower()
+            if arm_name in {"left", "right"}:
+                required.add(arm_name)
+        return required
+
+    def _potential_points(self, task: QueuedTask) -> float:
+        """Potential score contribution for priority planning.
+
+        This intentionally ignores dynamic gates and prerequisite completion so we
+        can estimate long-horizon value currently blocked behind dependencies.
+        """
+        dynamic_base_points, max_score_count, from_points_map = self._score_config_for_task(task)
+        score_token = self._resolve_score_token(task)
+        if max_score_count > 0 and self._score_counts.get(score_token, 0) >= max_score_count:
+            if from_points_map:
+                return float(task.base_points)
+            return 0.0
+        return float(dynamic_base_points)
+
+    def _arm_interference_blocks_candidate(self, pending_task: QueuedTask, candidate: QueuedTask) -> bool:
+        arm_busy = {"left": False, "right": False}
+        dispatch = self._task_reserved_arms(pending_task, arm_busy)
+        if dispatch is None:
+            return False
+
+        _, reserved_arms = dispatch
+        for arm_name in reserved_arms:
+            arm_busy[arm_name] = True
+
+        if self._task_reserved_arms(candidate, arm_busy) is None:
+            return True
+
+        required_unblocked = self._required_unblocked_arms(candidate)
+        return any(arm in required_unblocked for arm in reserved_arms)
+
+    def _dependency_unlock_value(
+        self,
+        task: QueuedTask,
+        memo: Dict[int, float],
+        visiting: Set[int],
+    ) -> float:
+        seq = task.sequence
+        if seq in memo:
+            return memo[seq]
+        if seq in visiting:
+            return 0.0
+
+        visiting.add(seq)
+        value = self._potential_points(task)
+        tokens = self._task_tokens(task)
+
+        for candidate in self._task_heap:
+            if candidate.sequence == seq:
+                continue
+
+            remaining_prereqs = [
+                token for token in candidate.prerequisites if token not in self._completed_tokens
+            ]
+            if not remaining_prereqs:
+                continue
+
+            overlap = len(tokens.intersection(remaining_prereqs))
+            if overlap <= 0:
+                continue
+
+            child_value = self._dependency_unlock_value(candidate, memo, visiting)
+            if child_value <= 0.0:
+                continue
+
+            value += child_value * (float(overlap) / float(len(remaining_prereqs)))
+
+        visiting.remove(seq)
+        memo[seq] = value
+        return value
+
+    def _blocked_points_if_pending(self, task: QueuedTask) -> float:
+        """Estimate points blocked while task remains incomplete.
+
+        Includes:
+        - Prerequisite lockup (direct and transitive descendants).
+        - Arm-lane and requires_arms_unblocked interference while task runs.
+        """
+        blocked_points = 0.0
+        tokens = self._task_tokens(task)
+        memo: Dict[int, float] = {}
+
+        for candidate in self._task_heap:
+            if candidate.sequence == task.sequence:
+                continue
+
+            missing = self._missing_prerequisites(candidate)
+            overlap = len(tokens.intersection(missing))
+            if overlap > 0 and missing:
+                unlocked_value = self._dependency_unlock_value(candidate, memo, set())
+                if unlocked_value > 0.0:
+                    blocked_points += unlocked_value * (float(overlap) / float(len(missing)))
+                continue
+
+            # Candidate is prereq-ready; check if running this task would interfere.
+            if missing:
+                continue
+            if not self._arm_interference_blocks_candidate(task, candidate):
+                continue
+
+            interfered_value = self._dependency_unlock_value(candidate, memo, set())
+            if interfered_value > 0.0:
+                blocked_points += interfered_value
+
+        return blocked_points
+
+    def _priority_score(self, task: QueuedTask) -> float:
+        """Priority score combines immediate and unlockable downstream points."""
+        score = self._effective_points(task) + self._blocked_points_if_pending(task)
+        if (
+            self._is_microwave_close_task(task)
+            and not self._close_defers_for_other_arm_only_branch(task)
+            and self._is_task_runnable_core(task)
+        ):
+            # Prefer freeing shared resources when it does not cut off the
+            # other arm's only runnable branch.
+            score += 1.0
+        return score
 
     def _score_config_for_task(self, task: QueuedTask) -> Tuple[float, int, bool]:
         token = self._resolve_score_token(task)
@@ -787,7 +1031,23 @@ class Supervisor:
             else:
                 held[item] = current - 1
 
-    def _is_task_runnable(self, task: QueuedTask) -> bool:
+    @staticmethod
+    def _is_microwave_close_task(task: QueuedTask) -> bool:
+        return (
+            task.name == "close_microwave_door"
+            and task.resource_action == "release"
+            and task.resource == "table_area"
+            and task.resource_item == "microwave_open"
+        )
+
+    @staticmethod
+    def _task_requires_microwave_open(task: QueuedTask) -> bool:
+        params = task.params or {}
+        occupied = str(params.get("requires_resource_occupied_for", "")).strip()
+        item = str(params.get("requires_resource_item", params.get("target_label", ""))).strip()
+        return occupied == "table_area" and item == "microwave_open"
+
+    def _is_task_runnable_core(self, task: QueuedTask) -> bool:
         if not self._prerequisites_met(task):
             return False
 
@@ -800,11 +1060,296 @@ class Supervisor:
             return False
         if not self._arm_gate_allowed(task):
             return False
+        if not self._gripper_gate_allowed(task):
+            return False
         return True
+
+    def _close_defers_for_other_arm_only_branch(self, task: QueuedTask) -> bool:
+        """Delay close when it would block the other arm's only runnable branch."""
+        if not self._is_microwave_close_task(task):
+            return False
+
+        target_arms = self._task_target_arms(task)
+        if len(target_arms) != 1:
+            return False
+
+        close_arm = target_arms[0]
+        other_arm = self._other_arm(close_arm)
+
+        runnable_on_other: List[QueuedTask] = []
+        for candidate in self._task_heap:
+            if candidate.sequence == task.sequence:
+                continue
+            if not self._task_can_run_on_arm(candidate, other_arm):
+                continue
+            if self._is_task_runnable_core(candidate):
+                runnable_on_other.append(candidate)
+
+        if len(runnable_on_other) != 1:
+            return False
+
+        return self._task_requires_microwave_open(runnable_on_other[0])
+
+    def _is_task_runnable(self, task: QueuedTask) -> bool:
+        if not self._is_task_runnable_core(task):
+            return False
+        if self._close_defers_for_other_arm_only_branch(task):
+            return False
+        return True
+
+    @staticmethod
+    def _task_reserved_arms(task: QueuedTask, arm_busy: Dict[str, bool]) -> Optional[Tuple[str, List[str]]]:
+        """Return (dispatch_arm, reserved_arms) if task can be dispatched now, else None.
+
+        dispatch_arm indicates which worker thread executes the task.
+        reserved_arms indicates which arm lanes are occupied for the task duration.
+        """
+        if task.arm == "left":
+            if arm_busy.get("left", False):
+                return None
+            return ("left", ["left"])
+
+        if task.arm == "right":
+            if arm_busy.get("right", False):
+                return None
+            return ("right", ["right"])
+
+        if task.arm == "both":
+            if arm_busy.get("left", False) or arm_busy.get("right", False):
+                return None
+            # Execute bimanual task on one worker while reserving both arm lanes.
+            return ("left", ["left", "right"])
+
+        # task.arm == "any"
+        if not arm_busy.get("left", False):
+            return ("left", ["left"])
+        if not arm_busy.get("right", False):
+            return ("right", ["right"])
+        return None
+
+    @staticmethod
+    def _other_arm(arm_name: str) -> str:
+        return "right" if arm_name == "left" else "left"
+
+    @staticmethod
+    def _task_can_run_on_arm(task: QueuedTask, arm_name: str) -> bool:
+        if task.arm == "both":
+            return True
+        if task.arm == "any":
+            return True
+        return task.arm == arm_name
+
+    def _best_future_value_for_arm(self, arm_name: str) -> float:
+        memo: Dict[int, float] = {}
+        best = 0.0
+        for candidate in self._task_heap:
+            if not self._task_can_run_on_arm(candidate, arm_name):
+                continue
+            if self._is_task_runnable(candidate):
+                continue
+            value = self._dependency_unlock_value(candidate, memo, set())
+            if value > best:
+                best = value
+        return best
+
+    def _arm_has_runnable_work_now(self, arm_name: str, arm_busy: Dict[str, bool]) -> bool:
+        if arm_busy.get(arm_name, False):
+            return False
+
+        for candidate in self._task_heap:
+            if not self._is_task_runnable(candidate):
+                continue
+
+            dispatch = self._task_reserved_arms(candidate, arm_busy)
+            if dispatch is None:
+                continue
+
+            dispatch_arm, _ = dispatch
+            if dispatch_arm == arm_name:
+                return True
+
+        return False
+
+    def _runnable_tokens_for_dispatch_arm(self, arm_name: str, arm_busy: Dict[str, bool]) -> Set[str]:
+        tokens: Set[str] = set()
+        if arm_busy.get(arm_name, False):
+            return tokens
+
+        for candidate in self._task_heap:
+            if not self._is_task_runnable(candidate):
+                continue
+
+            dispatch = self._task_reserved_arms(candidate, dict(arm_busy))
+            if dispatch is None:
+                continue
+
+            dispatch_arm, _ = dispatch
+            if dispatch_arm != arm_name:
+                continue
+
+            tokens.update(self._task_tokens(candidate))
+
+        return tokens
+
+    def _imminent_cross_arm_unlock_conflict(
+        self,
+        arm_name: str,
+        candidate: QueuedTask,
+        arm_busy: Dict[str, bool],
+    ) -> bool:
+        """True when candidate should wait for near-term other-arm unlocks.
+
+        If candidate commits to a grasp object that would conflict with a same-arm
+        task likely to become runnable next (because its missing prerequisites can
+        all be satisfied by tasks runnable now on the other arm), prefer idling.
+        """
+        candidate_rules = self._infer_gripper_requirements(candidate)
+        candidate_set = self._normalize_grasp_label(candidate_rules.get("set_object"))
+        if not candidate_set:
+            return False
+
+        other_arm = self._other_arm(arm_name)
+        other_arm_tokens = self._runnable_tokens_for_dispatch_arm(other_arm, arm_busy)
+        if not other_arm_tokens:
+            return False
+
+        for future in self._task_heap:
+            if future.sequence == candidate.sequence:
+                continue
+            if not self._task_can_run_on_arm(future, arm_name):
+                continue
+
+            missing = self._missing_prerequisites(future)
+            if not missing:
+                continue
+            if not set(missing).issubset(other_arm_tokens):
+                continue
+
+            rules = self._infer_gripper_requirements(future)
+            requires_empty = bool(rules.get("requires_empty", False))
+            requires_object = self._normalize_grasp_label(rules.get("requires_object"))
+
+            conflict = requires_empty or (bool(requires_object) and requires_object != candidate_set)
+            if conflict:
+                return True
+
+        return False
+
+    def _build_idle_wait_task(self, arm_name: str, reason: str) -> QueuedTask:
+        task = QueuedTask(
+            queue_weight=0.0,
+            sequence=self._task_sequence,
+            name="_idle_wait",
+            task_id=f"idle_wait:{arm_name}:{self._task_sequence}",
+            base_points=0.0,
+            points_if_completed={},
+            prerequisites=[],
+            arm=arm_name,
+            blocks_arms=[],
+            unblocks_arms=[],
+            score_token="task:_idle_wait",
+            max_score_count=0,
+            resource_action="",
+            resource="",
+            resource_item="",
+            params={"wait_s": 0.05, "idle_reason": reason},
+        )
+        self._task_sequence += 1
+        return task
+
+    def _select_idle_arm_for_busy_partner(
+        self,
+        arm_busy: Dict[str, bool],
+        consecutive_idle_by_arm: Dict[str, int],
+    ) -> Optional[str]:
+        """Choose right arm to explicitly idle while left arm is busy.
+
+        This keeps idle insertion targeted to the asymmetric coordination use-case
+        where right should wait for left-side context actions.
+        """
+        if arm_busy.get("right", False):
+            return None
+        if consecutive_idle_by_arm.get("right", 0) >= self._max_consecutive_idle_per_arm:
+            return None
+        if arm_busy.get("left", False):
+            return "right"
+        return None
+
+    def _competing_grasp_branch_priority(self, arm_name: str, candidate: QueuedTask) -> float:
+        """Return best priority among competing grasp branches on same arm.
+
+        A competing branch is another currently-runnable task on the same arm
+        that would commit to a different held-object path.
+        """
+        candidate_rules = self._infer_gripper_requirements(candidate)
+        candidate_set = self._normalize_grasp_label(candidate_rules.get("set_object"))
+        if not candidate_set:
+            return 0.0
+
+        best_competitor = 0.0
+        for other in self._task_heap:
+            if other.sequence == candidate.sequence:
+                continue
+            if not self._task_can_run_on_arm(other, arm_name):
+                continue
+            if not self._is_task_runnable(other):
+                continue
+
+            other_rules = self._infer_gripper_requirements(other)
+            other_set = self._normalize_grasp_label(other_rules.get("set_object"))
+            other_requires_empty = bool(other_rules.get("requires_empty", False))
+            other_requires = self._normalize_grasp_label(other_rules.get("requires_object"))
+
+            conflict = False
+            if other_set and other_set != candidate_set:
+                conflict = True
+            elif other_requires_empty:
+                conflict = True
+            elif other_requires and other_requires != candidate_set:
+                conflict = True
+
+            if conflict:
+                best_competitor = max(best_competitor, self._priority_score(other))
+
+        return best_competitor
+
+    def _should_insert_idle_wait(
+        self,
+        arm_name: str,
+        candidate: QueuedTask,
+        arm_busy: Dict[str, bool],
+        consecutive_idle_by_arm: Dict[str, int],
+    ) -> bool:
+        if candidate.name == "_idle_wait":
+            return False
+
+        if consecutive_idle_by_arm.get(arm_name, 0) >= self._max_consecutive_idle_per_arm:
+            return False
+
+        other_arm = self._other_arm(arm_name)
+        other_arm_active = arm_busy.get(other_arm, False) or self._arm_has_runnable_work_now(
+            other_arm, arm_busy
+        )
+        candidate_priority = self._priority_score(candidate)
+        if other_arm_active:
+            future_value = self._best_future_value_for_arm(arm_name)
+            if future_value > (candidate_priority + self._idle_wait_margin):
+                return True
+
+        # Branch-commit ambiguity on the same arm can justify a short idle even
+        # before the other arm is technically busy.
+        competitor_priority = self._competing_grasp_branch_priority(arm_name, candidate)
+        if competitor_priority > 0.0 and competitor_priority >= (candidate_priority - 0.25):
+            return True
+
+        if self._imminent_cross_arm_unlock_conflict(arm_name, candidate, arm_busy):
+            return True
+
+        return False
 
     def _refresh_queue_weights(self):
         for queued in self._task_heap:
-            queued.queue_weight = -self._effective_points(queued)
+            queued.queue_weight = -self._priority_score(queued)
         heapq.heapify(self._task_heap)
 
     def queue_task(
@@ -888,8 +1433,8 @@ class Supervisor:
             params={
                 "close_force": 15,
                 "resource_action": "release",
-                "resource": "microwave_door",
-                "resource_item": "open",
+                "resource": "table_area",
+                "resource_item": "microwave_open",
             },
             prerequisites=prereqs,
             arm="left",
@@ -900,11 +1445,269 @@ class Supervisor:
             validate_subtask_exists=False,
         )
 
-    def run_autonomy(self, max_tasks: Optional[int] = None) -> List[Tuple[str, bool, float, str]]:
-        """Run tasks in descending points order until queue is empty or max_tasks reached."""
+    def _queue_has_microwave_close_task(self) -> bool:
+        for task in self._task_heap:
+            if self._is_microwave_close_task(task):
+                return True
+        return False
+
+    def _enqueue_close_for_resource_release(self, completed_task: QueuedTask):
+        """Queue close task whenever microwave_open is held and no close is queued.
+
+        This is resource-driven and not tied to any specific production task.
+        """
+        if self._is_microwave_close_task(completed_task):
+            return
+
+        held = self._resource_state.get("table_area", {})
+        if int(held.get("microwave_open", 0)) <= 0:
+            return
+
+        if self._queue_has_microwave_close_task():
+            return
+
+        # Keep microwave open while loading tasks are still pending.
+        pending_put_ids = {"put_bowl", "put_plate"}
+        if any(task_id not in self._completed_tokens for task_id in pending_put_ids):
+            return
+
+        self.queue_task(
+            name="close_microwave_door",
+            points=1.0,
+            params={
+                "close_force": 15,
+                "resource_action": "release",
+                "resource": "table_area",
+                "resource_item": "microwave_open",
+            },
+            task_id=f"close_microwave_for_resource#{self._task_sequence}",
+            prerequisites=[completed_task.task_id],
+            arm="left",
+            blocks_arms=[],
+            unblocks_arms=["left"],
+            score_token="close_microwave_door",
+            max_score_count=3,
+            validate_subtask_exists=False,
+        )
+
+    def _enqueue_dynamic_followups(self, completed_task: QueuedTask):
+        self._enqueue_close_after_open(completed_task)
+        self._enqueue_close_for_resource_release(completed_task)
+
+    def run_autonomy(
+        self,
+        max_tasks: Optional[int] = None,
+        parallel_arms: bool = True,
+    ) -> List[Tuple[str, bool, float, str]]:
+        """Run autonomy tasks with optional parallel per-arm execution.
+
+        When parallel_arms=True, a coordinator dispatches tasks to one worker thread
+        per arm. The same prerequisite/resource/blocking rules are respected.
+        """
+        if not parallel_arms:
+            return self._run_autonomy_sequential(max_tasks=max_tasks)
+
         self._completed_tokens = set()
         self._blocked_arms = {}
         self._resource_state = {resource: {} for resource in self._resource_constraints}
+        self._grasped_object_by_arm = {"left": None, "right": None}
+        self._score_counts = {}
+        self._earned_points_total = 0.0
+
+        results: List[Tuple[str, bool, float, str]] = []
+        dispatched = 0
+        completed = 0
+        arm_busy: Dict[str, bool] = {"left": False, "right": False}
+        consecutive_idle_by_arm: Dict[str, int] = {"left": 0, "right": 0}
+
+        work_queues = {
+            "left": queue.Queue(),
+            "right": queue.Queue(),
+        }
+        completion_queue: queue.Queue = queue.Queue()
+
+        def _worker(arm_name: str):
+            while True:
+                payload = work_queues[arm_name].get()
+                if payload is None:
+                    work_queues[arm_name].task_done()
+                    break
+
+                task, points, reserved_arms = payload
+                ok = False
+                err = None
+                try:
+                    ok = self.run_subtask(task.name, params=task.params)
+                except Exception as exc:
+                    err = exc
+
+                completion_queue.put((task, points, reserved_arms, ok, err))
+                work_queues[arm_name].task_done()
+
+        workers = {
+            arm: threading.Thread(target=_worker, args=(arm,), daemon=True)
+            for arm in ("left", "right")
+        }
+        for t in workers.values():
+            t.start()
+
+        pending_exception: Optional[Exception] = None
+        try:
+            while True:
+                # Drain completed task notifications first so gates can open promptly.
+                while True:
+                    try:
+                        task, current_points, reserved_arms, ok, err = completion_queue.get_nowait()
+                    except queue.Empty:
+                        break
+
+                    for arm_name in reserved_arms:
+                        arm_busy[arm_name] = False
+
+                    if err is not None:
+                        pending_exception = err
+                        break
+
+                    if ok:
+                        self._record_score_if_applicable(task, current_points)
+                        self._apply_resource_action(task)
+                        self._apply_gripper_state(task)
+                        if task.name != "_idle_wait":
+                            self._completed_tokens.add(task.task_id)
+                            self._completed_tokens.add(task.name)
+                            for arm in task.unblocks_arms:
+                                self._blocked_arms.pop(arm, None)
+                            for arm in task.blocks_arms:
+                                self._blocked_arms[arm] = task.task_id
+                            self._enqueue_dynamic_followups(task)
+
+                    results.append((task.name, ok, current_points, task.task_id))
+                    completed += 1
+
+                if pending_exception is not None:
+                    break
+
+                # Stop dispatching when max-tasks cap reached; allow in-flight tasks to finish.
+                dispatch_allowed = max_tasks is None or dispatched < max_tasks
+                dispatched_any = False
+
+                while dispatch_allowed and self._task_heap:
+                    self._refresh_queue_weights()
+                    deferred: List[QueuedTask] = []
+                    selected: Optional[QueuedTask] = None
+                    selected_dispatch: Optional[Tuple[str, List[str]]] = None
+
+                    while self._task_heap:
+                        candidate = heapq.heappop(self._task_heap)
+                        if self._is_task_runnable(candidate):
+                            dispatch_info = self._task_reserved_arms(candidate, arm_busy)
+                            if dispatch_info is not None:
+                                selected = candidate
+                                selected_dispatch = dispatch_info
+                                break
+                        deferred.append(candidate)
+
+                    for item in deferred:
+                        heapq.heappush(self._task_heap, item)
+
+                    if selected is None or selected_dispatch is None:
+                        idle_arm = self._select_idle_arm_for_busy_partner(
+                            arm_busy, consecutive_idle_by_arm
+                        )
+                        if idle_arm is not None:
+                            selected = self._build_idle_wait_task(
+                                idle_arm,
+                                reason="no runnable task while partner arm is active",
+                            )
+                            selected_dispatch = (idle_arm, [idle_arm])
+                        else:
+                            break
+
+                    if selected is None or selected_dispatch is None:
+                        break
+
+                    dispatch_arm, reserved_arms = selected_dispatch
+                    if self._should_insert_idle_wait(
+                        dispatch_arm,
+                        selected,
+                        arm_busy,
+                        consecutive_idle_by_arm,
+                    ):
+                        idle_reason = (
+                            "waiting for higher-value unlocks from other-arm progress"
+                        )
+                        heapq.heappush(self._task_heap, selected)
+                        selected = self._build_idle_wait_task(dispatch_arm, reason=idle_reason)
+                        reserved_arms = [dispatch_arm]
+
+                    for arm_name in reserved_arms:
+                        arm_busy[arm_name] = True
+
+                    current_points = self._effective_points(selected)
+                    work_queues[dispatch_arm].put((selected, current_points, reserved_arms))
+                    dispatched += 1
+                    dispatched_any = True
+
+                    if selected.name == "_idle_wait":
+                        consecutive_idle_by_arm[dispatch_arm] = (
+                            consecutive_idle_by_arm.get(dispatch_arm, 0) + 1
+                        )
+                    else:
+                        consecutive_idle_by_arm[dispatch_arm] = 0
+
+                    dispatch_allowed = max_tasks is None or dispatched < max_tasks
+
+                # Exit condition: no queued tasks and no running tasks.
+                running = any(arm_busy.values())
+                if not self._task_heap and not running:
+                    break
+
+                # Deadlock condition: queue still has tasks, nothing running, nothing dispatched.
+                if self._task_heap and not running and not dispatched_any:
+                    break
+
+                # Wait for at least one worker completion to avoid busy looping.
+                if any(arm_busy.values()):
+                    task, current_points, reserved_arms, ok, err = completion_queue.get()
+                    for arm_name in reserved_arms:
+                        arm_busy[arm_name] = False
+
+                    if err is not None:
+                        pending_exception = err
+                        break
+
+                    if ok:
+                        self._record_score_if_applicable(task, current_points)
+                        self._apply_resource_action(task)
+                        self._apply_gripper_state(task)
+                        if task.name != "_idle_wait":
+                            self._completed_tokens.add(task.task_id)
+                            self._completed_tokens.add(task.name)
+                            for arm in task.unblocks_arms:
+                                self._blocked_arms.pop(arm, None)
+                            for arm in task.blocks_arms:
+                                self._blocked_arms[arm] = task.task_id
+                            self._enqueue_dynamic_followups(task)
+
+                    results.append((task.name, ok, current_points, task.task_id))
+                    completed += 1
+
+            if pending_exception is not None:
+                raise pending_exception
+
+            return results
+        finally:
+            for arm in ("left", "right"):
+                work_queues[arm].put(None)
+            for t in workers.values():
+                t.join(timeout=1.0)
+
+    def _run_autonomy_sequential(self, max_tasks: Optional[int] = None) -> List[Tuple[str, bool, float, str]]:
+        """Original sequential autonomy loop."""
+        self._completed_tokens = set()
+        self._blocked_arms = {}
+        self._resource_state = {resource: {} for resource in self._resource_constraints}
+        self._grasped_object_by_arm = {"left": None, "right": None}
         self._score_counts = {}
         self._earned_points_total = 0.0
         results: List[Tuple[str, bool, float, str]] = []
@@ -936,13 +1739,14 @@ class Supervisor:
             if ok:
                 self._record_score_if_applicable(queued, current_points)
                 self._apply_resource_action(queued)
+                self._apply_gripper_state(queued)
                 self._completed_tokens.add(queued.task_id)
                 self._completed_tokens.add(queued.name)
                 for arm in queued.unblocks_arms:
                     self._blocked_arms.pop(arm, None)
                 for arm in queued.blocks_arms:
                     self._blocked_arms[arm] = queued.task_id
-                self._enqueue_close_after_open(queued)
+                self._enqueue_dynamic_followups(queued)
 
             results.append((queued.name, ok, current_points, queued.task_id))
             executed += 1
@@ -961,7 +1765,17 @@ class Supervisor:
             resource_blocked = not self._resource_action_allowed(task)
             resource_gate_blocked = not self._resource_gate_allowed(task)
             arm_gate_blocked = not self._arm_gate_allowed(task)
-            if missing or blocked_arms or resource_blocked or resource_gate_blocked or arm_gate_blocked:
+            gripper_gate_blocked = not self._gripper_gate_allowed(task)
+            blocked_points_if_pending = self._blocked_points_if_pending(task)
+            priority_score = self._priority_score(task)
+            if (
+                missing
+                or blocked_arms
+                or resource_blocked
+                or resource_gate_blocked
+                or arm_gate_blocked
+                or gripper_gate_blocked
+            ):
                 blockers.append(
                     {
                         "task_id": task.task_id,
@@ -971,19 +1785,169 @@ class Supervisor:
                         "resource_blocked": resource_blocked,
                         "resource_gate_blocked": resource_gate_blocked,
                         "arm_gate_blocked": arm_gate_blocked,
+                        "gripper_gate_blocked": gripper_gate_blocked,
+                        "grasped_by_arm": dict(self._grasped_object_by_arm),
+                        "blocked_points_if_pending": blocked_points_if_pending,
+                        "priority_score": priority_score,
                         "effective_points": self._effective_points(task),
                     }
                 )
         return blockers
 
-    def simulate_autonomy(self, max_tasks: Optional[int] = None) -> dict:
-        """Simulate scheduler progression without running any subtasks.
+    def simulate_autonomy(self, max_tasks: Optional[int] = None, parallel_arms: bool = True) -> dict:
+        """Simulate scheduler progression without running subtasks.
 
-        Returns a report containing execution order, deadlock status, and blockers.
+        When parallel_arms=True, simulation mirrors the coordinated two-lane
+        (left/right) dispatcher used by run_autonomy.
         """
+        if not parallel_arms:
+            return self._simulate_autonomy_sequential(max_tasks=max_tasks)
+
         self._completed_tokens = set()
         self._blocked_arms = {}
         self._resource_state = {resource: {} for resource in self._resource_constraints}
+        self._grasped_object_by_arm = {"left": None, "right": None}
+        self._score_counts = {}
+        self._earned_points_total = 0.0
+
+        progression: List[dict] = []
+        dispatched = 0
+        arm_busy: Dict[str, bool] = {"left": False, "right": False}
+        consecutive_idle_by_arm: Dict[str, int] = {"left": 0, "right": 0}
+        tick = 0
+
+        while self._task_heap or any(arm_busy.values()):
+            if max_tasks is not None and dispatched >= max_tasks:
+                break
+
+            launched: List[Tuple[QueuedTask, float, str, List[str]]] = []
+            dispatch_allowed = max_tasks is None or dispatched < max_tasks
+
+            while dispatch_allowed and self._task_heap:
+                self._refresh_queue_weights()
+                deferred: List[QueuedTask] = []
+                selected: Optional[QueuedTask] = None
+                selected_dispatch: Optional[Tuple[str, List[str]]] = None
+
+                while self._task_heap:
+                    candidate = heapq.heappop(self._task_heap)
+                    if self._is_task_runnable(candidate):
+                        dispatch_info = self._task_reserved_arms(candidate, arm_busy)
+                        if dispatch_info is not None:
+                            selected = candidate
+                            selected_dispatch = dispatch_info
+                            break
+                    deferred.append(candidate)
+
+                for item in deferred:
+                    heapq.heappush(self._task_heap, item)
+
+                if selected is None or selected_dispatch is None:
+                    idle_arm = self._select_idle_arm_for_busy_partner(
+                        arm_busy, consecutive_idle_by_arm
+                    )
+                    if idle_arm is not None:
+                        selected = self._build_idle_wait_task(
+                            idle_arm,
+                            reason="no runnable task while partner arm is active",
+                        )
+                        selected_dispatch = (idle_arm, [idle_arm])
+                    else:
+                        break
+
+                if selected is None or selected_dispatch is None:
+                    break
+
+                dispatch_arm, reserved_arms = selected_dispatch
+                if self._should_insert_idle_wait(
+                    dispatch_arm,
+                    selected,
+                    arm_busy,
+                    consecutive_idle_by_arm,
+                ):
+                    idle_reason = "waiting for higher-value unlocks from other-arm progress"
+                    heapq.heappush(self._task_heap, selected)
+                    selected = self._build_idle_wait_task(dispatch_arm, reason=idle_reason)
+                    reserved_arms = [dispatch_arm]
+
+                for arm_name in reserved_arms:
+                    arm_busy[arm_name] = True
+
+                current_points = self._effective_points(selected)
+                launched.append((selected, current_points, dispatch_arm, reserved_arms))
+                dispatched += 1
+                if selected.name == "_idle_wait":
+                    consecutive_idle_by_arm[dispatch_arm] = (
+                        consecutive_idle_by_arm.get(dispatch_arm, 0) + 1
+                    )
+                else:
+                    consecutive_idle_by_arm[dispatch_arm] = 0
+                dispatch_allowed = max_tasks is None or dispatched < max_tasks
+
+            if not launched and self._task_heap and not any(arm_busy.values()):
+                # Deadlock: tasks remain but none can be dispatched.
+                break
+
+            if launched:
+                tick += 1
+
+            # Complete all launched tasks for this simulation tick.
+            for queued, current_points, dispatch_arm, reserved_arms in launched:
+                self._record_score_if_applicable(queued, current_points)
+                self._apply_resource_action(queued)
+                self._apply_gripper_state(queued)
+                if queued.name != "_idle_wait":
+                    self._completed_tokens.add(queued.task_id)
+                    self._completed_tokens.add(queued.name)
+                    for arm in queued.unblocks_arms:
+                        self._blocked_arms.pop(arm, None)
+                    for arm in queued.blocks_arms:
+                        self._blocked_arms[arm] = queued.task_id
+                    self._enqueue_dynamic_followups(queued)
+
+                for arm_name in reserved_arms:
+                    arm_busy[arm_name] = False
+
+                progression.append(
+                    {
+                        "task_id": queued.task_id,
+                        "name": queued.name,
+                        "effective_points": current_points,
+                        "blocked_points_if_pending": self._blocked_points_if_pending(queued),
+                        "priority_score": self._priority_score(queued),
+                        "arm": queued.arm,
+                        "dispatch_arm": dispatch_arm,
+                        "reserved_arms": list(reserved_arms),
+                        "sim_tick": tick,
+                        "blocks_arms": list(queued.blocks_arms),
+                        "unblocks_arms": list(queued.unblocks_arms),
+                        "score_token": self._resolve_score_token(queued),
+                        "score_count": self._score_counts.get(self._resolve_score_token(queued), 0),
+                        "max_score_count": queued.max_score_count,
+                    }
+                )
+
+        pending = len(self._task_heap)
+        deadlocked = pending > 0
+        blockers = self._pending_blockers() if deadlocked else []
+        return {
+            "executed": progression,
+            "executed_count": len(progression),
+            "pending_count": pending,
+            "deadlocked": deadlocked,
+            "blocked_arms": dict(self._blocked_arms),
+            "grasped_by_arm": dict(self._grasped_object_by_arm),
+            "blockers": blockers,
+            "score_counts": dict(self._score_counts),
+            "earned_points_total": self._earned_points_total,
+        }
+
+    def _simulate_autonomy_sequential(self, max_tasks: Optional[int] = None) -> dict:
+        """Original sequential simulator semantics."""
+        self._completed_tokens = set()
+        self._blocked_arms = {}
+        self._resource_state = {resource: {} for resource in self._resource_constraints}
+        self._grasped_object_by_arm = {"left": None, "right": None}
         self._score_counts = {}
         self._earned_points_total = 0.0
 
@@ -1014,19 +1978,22 @@ class Supervisor:
             current_points = self._effective_points(queued)
             self._record_score_if_applicable(queued, current_points)
             self._apply_resource_action(queued)
+            self._apply_gripper_state(queued)
             self._completed_tokens.add(queued.task_id)
             self._completed_tokens.add(queued.name)
             for arm in queued.unblocks_arms:
                 self._blocked_arms.pop(arm, None)
             for arm in queued.blocks_arms:
                 self._blocked_arms[arm] = queued.task_id
-            self._enqueue_close_after_open(queued)
+            self._enqueue_dynamic_followups(queued)
 
             progression.append(
                 {
                     "task_id": queued.task_id,
                     "name": queued.name,
                     "effective_points": current_points,
+                    "blocked_points_if_pending": self._blocked_points_if_pending(queued),
+                    "priority_score": self._priority_score(queued),
                     "arm": queued.arm,
                     "blocks_arms": list(queued.blocks_arms),
                     "unblocks_arms": list(queued.unblocks_arms),
@@ -1046,6 +2013,7 @@ class Supervisor:
             "pending_count": pending,
             "deadlocked": deadlocked,
             "blocked_arms": dict(self._blocked_arms),
+            "grasped_by_arm": dict(self._grasped_object_by_arm),
             "blockers": blockers,
             "score_counts": dict(self._score_counts),
             "earned_points_total": self._earned_points_total,
@@ -1238,14 +2206,25 @@ def main(argv: Optional[List[str]] = None):
                 report = supervisor.simulate_autonomy(max_tasks=max_tasks)
                 print("autonomy simulation mode: no subtasks were executed")
                 for step_idx, step in enumerate(report["executed"], start=1):
+                    tick_info = f", tick={step['sim_tick']}" if "sim_tick" in step else ""
+                    dispatch_info = f", dispatch={step['dispatch_arm']}" if "dispatch_arm" in step else ""
+                    reserved_info = (
+                        f", reserved={step['reserved_arms']}" if "reserved_arms" in step else ""
+                    )
+                    blocked_info = (
+                        f", blocked_points={step.get('blocked_points_if_pending', 0.0)}"
+                    )
+                    priority_info = f", priority={step.get('priority_score', step['effective_points'])}"
                     print(
                         f"sim step {step_idx}: '{step['name']}' "
-                        f"(id={step['task_id']}, points={step['effective_points']}, arm={step['arm']})"
+                        f"(id={step['task_id']}, points={step['effective_points']}, arm={step['arm']}"
+                        f"{blocked_info}{priority_info}{tick_info}{dispatch_info}{reserved_info})"
                     )
                 if report["deadlocked"]:
                     print(
                         f"simulation deadlock detected: {report['pending_count']} pending task(s), "
-                        f"blocked_arms={report['blocked_arms']}"
+                        f"blocked_arms={report['blocked_arms']} "
+                        f"grasped_by_arm={report.get('grasped_by_arm', {})}"
                     )
                     for blocker in report["blockers"]:
                         print(
@@ -1255,12 +2234,17 @@ def main(argv: Optional[List[str]] = None):
                             f"resource_blocked={blocker['resource_blocked']} "
                             f"resource_gate_blocked={blocker['resource_gate_blocked']} "
                             f"arm_gate_blocked={blocker['arm_gate_blocked']} "
+                            f"gripper_gate_blocked={blocker.get('gripper_gate_blocked', False)} "
+                            f"grasped_by_arm={blocker.get('grasped_by_arm', {})} "
+                            f"blocked_points={blocker.get('blocked_points_if_pending', 0.0)} "
+                            f"priority={blocker.get('priority_score', blocker['effective_points'])} "
                             f"effective_points={blocker['effective_points']}"
                         )
                 else:
                     print(
                         f"simulation completed without deadlock: executed={report['executed_count']} "
-                        f"pending={report['pending_count']}"
+                        f"pending={report['pending_count']} "
+                        f"grasped_by_arm={report.get('grasped_by_arm', {})}"
                     )
                 print(
                     f"simulation scoring summary: total_points={report['earned_points_total']} "

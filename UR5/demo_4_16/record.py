@@ -103,6 +103,7 @@ CAMERA_COLORS = {
     'yellow': {'lower': np.array([ 13, 255, 120]), 'upper': np.array([ 98, 255, 208])},
     'green':  {'lower': np.array([ 53,  90, 128]), 'upper': np.array([ 87, 180, 221])},
     'tan':    {'lower': np.array([ 40,  71, 139]), 'upper': np.array([ 56, 195, 255])},
+    'blue':   {'lower': np.array([ 95, 105, 158]), 'upper': np.array([103, 255, 255])},
     'red':    {'lower': np.array([  1, 180, 131]), 'upper': np.array([  3, 255, 236])},
 }
 CM_PIXEL  = 54.0 / 275  # pixels -> cm

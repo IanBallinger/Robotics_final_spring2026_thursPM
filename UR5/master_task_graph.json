@@ -57,6 +57,14 @@
         "microwavable_bowl"
       ]
     },
+    "table_area": {
+      "capacity": 1,
+      "description": "Shared workspace: open microwave door and cup-filling cannot overlap.",
+      "mutex_items": [
+        "microwave_open",
+        "cup_filling"
+      ]
+    },
     "microwave_door": {
       "capacity": 1,
       "description": "Door state modeled as occupancy of item 'open'.",
@@ -81,10 +89,10 @@
     "params": {
       "door_handle_pose_source": "vision",
       "safe_approach_offset_m": 0.1,
-      "requires_resource_available_for": "microwave_door",
+      "requires_resource_available_for": "table_area",
       "resource_action": "acquire",
-      "resource": "microwave_door",
-      "resource_item": "open"
+      "resource": "table_area",
+      "resource_item": "microwave_open"
     }
   },
   "autonomy_queue": [
@@ -102,8 +110,8 @@
         "acquire_context": "microwave_bowl",
         "requires_resource_available_for": "microwave_slot",
         "requires_resource_item": "microwavable_bowl",
-        "pose_trace_csv_left": "UR5/traces/acquire_bowl_left.csv",
-        "pose_trace_csv_right": "UR5/traces/acquire_bowl_right.csv",
+        "pose_trace_csv_left": "trace_acquire_bowl_left.csv",
+        "pose_trace_csv_right": "trace_acquire_bowl_right.csv",
         "named_waypoints_csv": "UR5/waypoints_acquire_bowl.csv",
         "dependent_item_label": "microwavable_bowl"
       }
@@ -143,8 +151,8 @@
       },
       "params": {
         "placement_pose": "microwave_center",
-        "requires_resource_occupied_for": "microwave_door",
-        "requires_resource_item": "open",
+        "requires_resource_occupied_for": "table_area",
+        "requires_resource_item": "microwave_open",
         "resource_action": "acquire",
         "resource": "microwave_slot",
         "resource_item": "microwavable_bowl"
@@ -169,8 +177,8 @@
       },
       "params": {
         "placement_pose": "microwave_center",
-        "requires_resource_occupied_for": "microwave_door",
-        "requires_resource_item": "open",
+        "requires_resource_occupied_for": "table_area",
+        "requires_resource_item": "microwave_open",
         "resource_action": "acquire",
         "resource": "microwave_slot",
         "resource_item": "microwavable_plate"
@@ -196,8 +204,8 @@
       "params": {
         "close_force": 15,
         "resource_action": "release",
-        "resource": "microwave_door",
-        "resource_item": "open"
+        "resource": "table_area",
+        "resource_item": "microwave_open"
       }
     },
     {
@@ -216,8 +224,8 @@
       "params": {
         "button": "stop",
         "target_food": "microwavable_plate",
-        "requires_resource_available_for": "microwave_door",
-        "requires_resource_item": "open"
+        "requires_resource_available_for": "table_area",
+        "requires_resource_item": "microwave_open"
       }
     },
     {
@@ -239,8 +247,8 @@
       "params": {
         "button": "stop",
         "target_food": "microwavable_bowl",
-        "requires_resource_available_for": "microwave_door",
-        "requires_resource_item": "open"
+        "requires_resource_available_for": "table_area",
+        "requires_resource_item": "microwave_open"
       }
     },
     {
@@ -260,10 +268,10 @@
         "door_handle_pose_source": "vision",
         "safe_approach_offset_m": 0.1,
         "requires_resource_occupied_for": "microwave_slot",
-        "requires_resource_available_for": "microwave_door",
+        "requires_resource_available_for": "table_area",
         "resource_action": "acquire",
-        "resource": "microwave_door",
-        "resource_item": "open"
+        "resource": "table_area",
+        "resource_item": "microwave_open"
       }
     },
     {
@@ -283,10 +291,10 @@
         "door_handle_pose_source": "vision",
         "safe_approach_offset_m": 0.1,
         "requires_resource_occupied_for": "microwave_slot",
-        "requires_resource_available_for": "microwave_door",
+        "requires_resource_available_for": "table_area",
         "resource_action": "acquire",
-        "resource": "microwave_door",
-        "resource_item": "open"
+        "resource": "table_area",
+        "resource_item": "microwave_open"
       }
     },
     {
@@ -300,25 +308,38 @@
       "points_if_completed": {},
       "params": {
         "target_label": "cup_for_drink",
+        "resource_action": "acquire",
+        "resource": "table_area",
+        "resource_item": "cup_filling",
         "requires_arms_unblocked": [
           "left"
-        ]
+        ],
+        "pose_trace_csv_left": "trace_acquire_cup_left.csv",
+        "pose_trace_csv_right": "trace_acquire_cup_right.csv",
+        "named_waypoints_csv": "UR5/waypoints_acquire_cup.csv",
+        "dependent_item_label": "cup_for_drink"
       }
     },
     {
       "name": "acquire_bottle",
       "task_id": "acquire_bottle",
       "points": 0,
-      "arm": "right",
+      "arm": "left",
       "blocks_arms": [],
       "unblocks_arms": [],
       "prerequisites": [],
       "points_if_completed": {},
       "params": {
         "target_label": "bottle_to_fill_cup",
+        "requires_resource_occupied_for": "table_area",
+        "requires_resource_item": "cup_filling",
         "requires_arms_unblocked": [
           "left"
-        ]
+        ],
+        "pose_trace_csv_left": "trace_acquire_bottle_left.csv",
+        "pose_trace_csv_right": "trace_acquire_bottle_right.csv",
+        "named_waypoints_csv": "UR5/waypoints_acquire_bottle.csv",
+        "dependent_item_label": "bottle_to_fill_cup"
       }
     },
     {
@@ -327,7 +348,7 @@
       "points": 1,
       "score_token": "pour_drink_from_bottle_into_cup",
       "max_score_count": 1,
-      "arm": "right",
+      "arm": "left",
       "blocks_arms": [],
       "unblocks_arms": [],
       "prerequisites": [
@@ -337,7 +358,27 @@
       "points_if_completed": {},
       "params": {
         "source_label": "bottle_to_fill_cup",
-        "target_label": "cup_for_drink"
+        "target_label": "cup_for_drink",
+        "requires_resource_occupied_for": "table_area",
+        "requires_resource_item": "cup_filling"
+      }
+    },
+    {
+      "name": "return_bottle",
+      "task_id": "return_bottle",
+      "points": 0,
+      "arm": "left",
+      "blocks_arms": [],
+      "unblocks_arms": [],
+      "prerequisites": [
+        "pour_drink"
+      ],
+      "points_if_completed": {},
+      "params": {
+        "object_label": "bottle_to_fill_cup",
+        "destination_label": "table",
+        "requires_grasped_object": "bottle_to_fill_cup",
+        "clear_grasped_object": true
       }
     },
     {
@@ -350,12 +391,18 @@
       "blocks_arms": [],
       "unblocks_arms": [],
       "prerequisites": [
-        "pour_drink"
+        "pour_drink",
+        "return_bottle"
       ],
       "points_if_completed": {},
       "params": {
         "object_label": "cup_for_drink",
-        "destination_label": "tray"
+        "destination_label": "tray",
+        "requires_resource_occupied_for": "table_area",
+        "requires_resource_item": "cup_filling",
+        "resource_action": "release",
+        "resource": "table_area",
+        "resource_item": "cup_filling"
       }
     },
     {
@@ -376,8 +423,8 @@
       "params": {
         "object_label": "microwavable_plate",
         "destination_label": "tray",
-        "requires_resource_occupied_for": "microwave_door",
-        "requires_resource_item": "open",
+        "requires_resource_occupied_for": "table_area",
+        "requires_resource_item": "microwave_open",
         "resource_action": "release",
         "resource": "microwave_slot",
         "resource_item": "microwavable_plate"
@@ -401,8 +448,8 @@
       "params": {
         "object_label": "microwavable_bowl",
         "destination_label": "tray",
-        "requires_resource_occupied_for": "microwave_door",
-        "requires_resource_item": "open",
+        "requires_resource_occupied_for": "table_area",
+        "requires_resource_item": "microwave_open",
         "resource_action": "release",
         "resource": "microwave_slot",
         "resource_item": "microwavable_bowl"
