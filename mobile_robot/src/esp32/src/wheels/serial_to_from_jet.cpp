@@ -482,9 +482,9 @@ void loop() {
   const unsigned long now = millis();
 
   if (autonomy_enabled) {
-    if (now - last_cmd_rx_ms > CMD_TIMEOUT_MS) {
-      stopMotors();
-    }
+    // if (now - last_cmd_rx_ms > CMD_TIMEOUT_MS) {
+    //   stopMotors();
+    // }
 
     if (now - last_cmd_apply_ms >= CMD_APPLY_PERIOD_MS) {
       applyWheelCommand(lowPassWheelCommand(latest_rx_cmd, now));
