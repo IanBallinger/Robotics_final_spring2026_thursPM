@@ -51,7 +51,7 @@ constexpr float MM_TO_M = 1.0f / 1000.0f;
 constexpr int ELEVATOR_ENCODER_A_PIN = 4;
 constexpr int ELEVATOR_ENCODER_B_PIN = 5;
 constexpr int ELEVATOR_ENCODER_CPR = CPR_312_RPM;
-constexpr float ELEVATOR_ENCODER_TAU_S = 0.05f;
+constexpr float ELEVATOR_ENCODER_TAU_S = 0.5f;
 constexpr float ELEVATOR_ENCODER_SIGN = 1.0f;
 constexpr float ELEVATOR_METERS_PER_RAD = 0.018f;
 constexpr float ELEVATOR_METERS_BIAS = -0.02f;
@@ -121,8 +121,8 @@ float last_encoder_height_m = NAN;
 float last_tof_height_m = NAN;
 unsigned long last_height_update_ms = 0;
 
-#define Kp 3.0f
-#define Ki 0.0f
+#define Kp 3.5f
+#define Ki 0.1f
 #define Kd 0.0f
 
 double integral_min = -1e6;
