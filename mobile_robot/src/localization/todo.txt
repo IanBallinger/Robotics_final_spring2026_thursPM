@@ -1,0 +1,13 @@
+- create map class
+- measure out test area and transcribe into map area
+- april tag localization
+- rel position to april tag (0 to n) + odometry -> map grid position estimate
+- camera image -> occupancy grid for collision avoidance
+    - should only check against the grid cells immediately adjacent (?) and should ignore known landmarks
+    
+
+# 4/9/2026
+order of operations to test:
+ - run camera calibration
+ - validate april tag and realsense pose estimates
+ 
