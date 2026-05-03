@@ -37,6 +37,9 @@ CAMERA_DEFAULT_MIN_AREA = 500
 CAMERA_DEFAULT_KERNEL_SIZE = 5
 CAMERA_DEFAULT_OPEN_ITER = 3
 CAMERA_DEFAULT_CLOSE_ITER = 3
+VISION_CAMERA_SCAN_MAX_INDEX = 6
+VISION_EXCLUDED_CAMERA_INDICES = {0}
+VISION_FIRST_FRAME_TIMEOUT_S = 5.0
 
 CAMERA_TARGET_SPECS = {
     2: {
@@ -112,11 +115,18 @@ def _camera_point_from_pixel(xc, yc, axis_pair):
 
 
 class _DualCameraVisionFeeds:
-    def __init__(self):
+    def __init__(
+        self,
+        camera_indices=None,
+        max_camera_index=VISION_CAMERA_SCAN_MAX_INDEX,
+        excluded_camera_indices=None,
+    ):
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._threads = {}
         self._spec_keys = sorted(CAMERA_TARGET_SPECS.keys())
+        self._spec_choices = [None] + self._spec_keys
+        self._camera_enabled = {}
         self._camera_spec_selection = {}
         self._item_settings = {}
         self._window_names = {}
@@ -128,17 +138,32 @@ class _DualCameraVisionFeeds:
         self._last_settings_save_ts = 0.0
         self._settings_save_interval_s = 0.5
 
-        for camera_index in CAMERA_TARGET_SPECS:
+        self._excluded_camera_indices = set(VISION_EXCLUDED_CAMERA_INDICES)
+        if excluded_camera_indices is not None:
+            self._excluded_camera_indices = {int(v) for v in excluded_camera_indices}
+
+        self._available_camera_indices = list(camera_indices) if camera_indices else self._discover_available_camera_indices(max_camera_index)
+        self._available_camera_indices = [
+            idx for idx in self._available_camera_indices if idx not in self._excluded_camera_indices
+        ]
+        if not self._available_camera_indices:
+            self._available_camera_indices = sorted(CAMERA_TARGET_SPECS.keys())
+            print("[vision] Warning: no cameras discovered; using configured indices:", self._available_camera_indices)
+
+        for camera_index in self._available_camera_indices:
             if camera_index in self._spec_keys:
-                self._camera_spec_selection[camera_index] = self._spec_keys.index(camera_index)
+                self._camera_spec_selection[camera_index] = self._spec_choices.index(camera_index)
+                self._camera_enabled[camera_index] = 1
             else:
                 self._camera_spec_selection[camera_index] = 0
-            self._last_spec_for_camera[camera_index] = self._spec_keys[self._camera_spec_selection[camera_index]]
+                self._camera_enabled[camera_index] = 0
+            self._last_spec_for_camera[camera_index] = self._active_spec_key(camera_index)
             self._view_modes[camera_index] = "dashboard"
             self._window_names[camera_index] = f"vision_cam_{camera_index}"
             self._trackbar_ready[camera_index] = False
 
-            for color_name, target_label in self._iter_target_pairs_for_spec(CAMERA_TARGET_SPECS[camera_index]):
+        for spec in CAMERA_TARGET_SPECS.values():
+            for color_name, target_label in self._iter_target_pairs_for_spec(spec):
                 if target_label in self._item_settings:
                     continue
                 low_raw, high_raw = CAMERA_COLOR_THRESHOLDS.get(color_name, ((0, 0, 0), (255, 255, 255)))
@@ -158,12 +183,32 @@ class _DualCameraVisionFeeds:
         self._buffers = {
             idx: {
                 "timestamp": 0.0,
-                "axis_pair": CAMERA_TARGET_SPECS[idx]["axis_pair"],
-                "spec_key": idx,
+                "axis_pair": tuple(CAMERA_TARGET_SPECS.get(self._active_spec_key(idx), {}).get("axis_pair", ("x", "y"))),
+                "spec_key": self._active_spec_key(idx),
+                "enabled": int(self._camera_enabled.get(idx, 0)),
                 "targets": {},
             }
-            for idx in CAMERA_TARGET_SPECS
+            for idx in self._available_camera_indices
         }
+
+        print("[vision] Active camera indices:", self._available_camera_indices)
+
+    def _discover_available_camera_indices(self, max_camera_index):
+        discovered = []
+        max_idx = max(0, int(max_camera_index))
+        for camera_index in range(max_idx + 1):
+            if camera_index in self._excluded_camera_indices:
+                continue
+            cap = self._open_capture(camera_index)
+            is_open = bool(cap is not None and cap.isOpened())
+            if is_open:
+                discovered.append(camera_index)
+            try:
+                if cap is not None:
+                    cap.release()
+            except Exception:
+                pass
+        return discovered
 
     def configure_persistence(self, settings_file_path=None):
         if settings_file_path is None:
@@ -184,6 +229,11 @@ class _DualCameraVisionFeeds:
     def _settings_payload(self):
         return {
             "version": 1,
+            "available_cameras": list(self._available_camera_indices),
+            "camera_enabled": {
+                str(cam_idx): int(enabled)
+                for cam_idx, enabled in self._camera_enabled.items()
+            },
             "camera_spec_selection": {
                 str(cam_idx): int(sel)
                 for cam_idx, sel in self._camera_spec_selection.items()
@@ -229,7 +279,18 @@ class _DualCameraVisionFeeds:
                     continue
                 if cam_idx not in self._camera_spec_selection:
                     continue
-                self._camera_spec_selection[cam_idx] = max(0, min(sel_idx, max(0, len(self._spec_keys) - 1)))
+                self._camera_spec_selection[cam_idx] = max(0, min(sel_idx, max(0, len(self._spec_choices) - 1)))
+
+        raw_enabled = payload.get("camera_enabled", {})
+        if isinstance(raw_enabled, dict):
+            for cam_key, enabled in raw_enabled.items():
+                try:
+                    cam_idx = int(cam_key)
+                    enabled_int = 1 if int(enabled) > 0 else 0
+                except Exception:
+                    continue
+                if cam_idx in self._camera_enabled:
+                    self._camera_enabled[cam_idx] = enabled_int
 
         raw_items = payload.get("item_settings", {})
         if isinstance(raw_items, dict):
@@ -292,10 +353,10 @@ class _DualCameraVisionFeeds:
         sel = int(self._camera_spec_selection.get(camera_index, 0))
         if sel < 0:
             sel = 0
-        if sel >= len(self._spec_keys):
-            sel = len(self._spec_keys) - 1
+        if sel >= len(self._spec_choices):
+            sel = len(self._spec_choices) - 1
         self._camera_spec_selection[camera_index] = sel
-        return self._spec_keys[sel]
+        return self._spec_choices[sel]
 
     def _ensure_trackbars(self, camera_index):
         if self._trackbar_ready.get(camera_index):
@@ -303,7 +364,8 @@ class _DualCameraVisionFeeds:
 
         window_name = self._window_name(camera_index)
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-        cv2.createTrackbar("spec_idx", window_name, int(self._camera_spec_selection.get(camera_index, 0)), max(0, len(self._spec_keys) - 1), lambda _v: None)
+        cv2.createTrackbar("enabled", window_name, int(self._camera_enabled.get(camera_index, 0)), 1, lambda _v: None)
+        cv2.createTrackbar("spec_idx", window_name, int(self._camera_spec_selection.get(camera_index, 0)), max(0, len(self._spec_choices) - 1), lambda _v: None)
         cv2.createTrackbar("target_idx", window_name, 0, 10, lambda _v: None)
         cv2.createTrackbar("h_lo", window_name, 0, 255, lambda _v: None)
         cv2.createTrackbar("s_lo", window_name, 0, 255, lambda _v: None)
@@ -433,7 +495,7 @@ class _DualCameraVisionFeeds:
         if cv2 is None or np is None:
             print("[vision] OpenCV/numpy unavailable; camera-aware offsets disabled")
             return
-        for camera_index in CAMERA_TARGET_SPECS:
+        for camera_index in self._available_camera_indices:
             if camera_index in self._threads:
                 continue
             t = threading.Thread(target=self._run_camera_loop, args=(camera_index,), daemon=True)
@@ -444,7 +506,22 @@ class _DualCameraVisionFeeds:
         self._ensure_trackbars(camera_index)
         cap = self._open_capture(camera_index)
         if not cap.isOpened():
-            print(f"[vision] Warning: camera index {camera_index} unavailable")
+            print(f"[vision] Warning: camera index {camera_index} unavailable; terminating camera thread")
+            with self._lock:
+                self._camera_enabled[camera_index] = 0
+                self._settings_dirty = True
+                if camera_index in self._buffers:
+                    self._buffers[camera_index]["enabled"] = 0
+                    self._buffers[camera_index]["targets"] = {}
+                self._persist_settings_if_dirty(force=True)
+            try:
+                cap.release()
+            except Exception:
+                pass
+            return
+
+        first_frame_deadline = time.time() + VISION_FIRST_FRAME_TIMEOUT_S
+        got_any_frame = False
 
         last_selected_target_name = ""
 
@@ -452,15 +529,45 @@ class _DualCameraVisionFeeds:
             if not cap.isOpened():
                 cap.release()
                 cap = self._open_capture(camera_index)
+                if not cap.isOpened():
+                    print(f"[vision] Warning: camera index {camera_index} lost and failed to reinitialize; terminating camera thread")
+                    with self._lock:
+                        self._camera_enabled[camera_index] = 0
+                        self._settings_dirty = True
+                        if camera_index in self._buffers:
+                            self._buffers[camera_index]["enabled"] = 0
+                            self._buffers[camera_index]["targets"] = {}
+                        self._persist_settings_if_dirty(force=True)
+                    break
                 time.sleep(0.25)
                 continue
 
             ok, frame = cap.read()
             if not ok:
+                if not got_any_frame and time.time() > first_frame_deadline:
+                    print(
+                        f"[vision] Warning: camera index {camera_index} produced no frames "
+                        f"within {VISION_FIRST_FRAME_TIMEOUT_S:.1f}s; disabling and terminating thread"
+                    )
+                    with self._lock:
+                        self._camera_enabled[camera_index] = 0
+                        self._settings_dirty = True
+                        if camera_index in self._buffers:
+                            self._buffers[camera_index]["enabled"] = 0
+                            self._buffers[camera_index]["targets"] = {}
+                        self._persist_settings_if_dirty(force=True)
+                    break
                 time.sleep(0.02)
                 continue
 
-            spec_idx_max = max(0, len(self._spec_keys) - 1)
+            got_any_frame = True
+
+            enabled_now = 1 if self._safe_get_trackbar(camera_index, "enabled", self._camera_enabled.get(camera_index, 0)) > 0 else 0
+            if self._camera_enabled.get(camera_index, 0) != enabled_now:
+                self._camera_enabled[camera_index] = enabled_now
+                self._settings_dirty = True
+
+            spec_idx_max = max(0, len(self._spec_choices) - 1)
             selected_spec_idx = self._safe_get_trackbar(camera_index, "spec_idx", 0)
             if selected_spec_idx > spec_idx_max:
                 selected_spec_idx = spec_idx_max
@@ -472,15 +579,15 @@ class _DualCameraVisionFeeds:
                 self._camera_spec_selection[camera_index] = selected_spec_idx
 
             spec_key = self._active_spec_key(camera_index)
-            spec = CAMERA_TARGET_SPECS[spec_key]
+            spec = CAMERA_TARGET_SPECS.get(spec_key)
             if self._last_spec_for_camera.get(camera_index) != spec_key:
                 self._last_spec_for_camera[camera_index] = spec_key
-                print(f"[vision] camera {camera_index} now using target spec {spec_key}")
+                print(f"[vision] camera {camera_index} now using target spec {spec_key if spec_key is not None else 'none'}")
 
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
             overlay_frame = frame.copy()
 
-            target_pairs = list(self._iter_target_pairs_for_spec(spec))
+            target_pairs = list(self._iter_target_pairs_for_spec(spec)) if (enabled_now and spec is not None) else []
             target_idx_max = max(0, len(target_pairs) - 1)
             selected_target_idx = self._safe_get_trackbar(camera_index, "target_idx", 0)
             if selected_target_idx > target_idx_max:
@@ -579,8 +686,9 @@ class _DualCameraVisionFeeds:
 
             with self._lock:
                 self._buffers[camera_index]["timestamp"] = now_ts
-                self._buffers[camera_index]["axis_pair"] = spec["axis_pair"]
+                self._buffers[camera_index]["axis_pair"] = tuple(spec.get("axis_pair", ("x", "y"))) if spec is not None else ("x", "y")
                 self._buffers[camera_index]["spec_key"] = spec_key
+                self._buffers[camera_index]["enabled"] = int(enabled_now)
                 self._buffers[camera_index]["targets"] = targets
                 self._persist_settings_if_dirty(force=False)
 
@@ -591,6 +699,8 @@ class _DualCameraVisionFeeds:
             cv2.destroyWindow(self._window_name(camera_index))
         except Exception:
             pass
+        with self._lock:
+            self._threads.pop(camera_index, None)
 
     def _open_capture(self, camera_index):
         # On Windows laptops, built-in webcams often behave better with DirectShow.
@@ -657,9 +767,26 @@ def _resolve_vision_specs_path(params):
 def _get_or_start_vision_feeds(params=None):
     global _VISION_FEEDS
     with _VISION_FEEDS_LOCK:
+        params = params or {}
         settings_path = _resolve_vision_specs_path(params)
         if _VISION_FEEDS is None:
-            _VISION_FEEDS = _DualCameraVisionFeeds()
+            max_scan_index = int(params.get("vision_camera_scan_max_index", VISION_CAMERA_SCAN_MAX_INDEX))
+            excluded_raw = params.get("vision_excluded_camera_indices", None)
+            if excluded_raw is None:
+                excluded = set(VISION_EXCLUDED_CAMERA_INDICES)
+            elif isinstance(excluded_raw, (list, tuple, set)):
+                excluded = {int(v) for v in excluded_raw}
+            else:
+                excluded = {
+                    int(v.strip())
+                    for v in str(excluded_raw).split(",")
+                    if str(v).strip() != ""
+                }
+
+            _VISION_FEEDS = _DualCameraVisionFeeds(
+                max_camera_index=max_scan_index,
+                excluded_camera_indices=excluded,
+            )
             _VISION_FEEDS.configure_persistence(settings_path)
             _VISION_FEEDS.start()
         else:
