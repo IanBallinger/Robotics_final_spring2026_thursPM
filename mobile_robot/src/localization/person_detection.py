@@ -6,16 +6,17 @@ from typing import List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
-import yaml
 
-from autonomy.mission_runner import Pose2D, default_tasks_path
+from autonomy.mission_runner import Pose2D
 from camera import (
     CameraExtrinsics,
     RealSenseCamera,
     StreamConfig,
-    apply_extrinsics,
+    camera_to_robot_point,
     depth_pixel_to_camera_point,
     depth_to_meters,
+    load_camera_to_robot_extrinsics,
+    robot_point_to_world,
 )
 from camera.types import DepthFrame
 
@@ -250,84 +251,6 @@ class PersonDetector:
         if valid.size < self.config.min_valid_depth_pixels:
             return None
         return float(np.median(valid))
-
-
-def load_camera_to_robot_extrinsics(
-    mission_config_path: Optional[Path | str] = None,
-) -> CameraExtrinsics:
-    path = Path(mission_config_path) if mission_config_path is not None else default_tasks_path()
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    camera_raw = raw.get("camera_to_robot", {})
-
-    if "translation" in camera_raw or "rotation_rpy" in camera_raw:
-        translation_raw = camera_raw.get("translation", {})
-        rotation_raw = camera_raw.get("rotation_rpy", {})
-        tx = float(translation_raw.get("x", 0.0))
-        ty = float(translation_raw.get("y", 0.0))
-        tz = float(translation_raw.get("z", 0.0))
-        roll = float(rotation_raw.get("roll", 0.0))
-        pitch = float(rotation_raw.get("pitch", 0.0))
-        yaw = float(rotation_raw.get("yaw", 0.0))
-    else:
-        tx = float(camera_raw.get("x", 0.0))
-        ty = float(camera_raw.get("y", 0.0))
-        tz = float(camera_raw.get("z", 0.0))
-        roll = float(camera_raw.get("roll", 0.0))
-        pitch = float(camera_raw.get("pitch", 0.0))
-        yaw = float(camera_raw.get("yaw", 0.0))
-
-    rotation = rotation_matrix_from_rpy(roll=roll, pitch=pitch, yaw=yaw)
-    translation = np.array([tx, ty, tz], dtype=float)
-    return CameraExtrinsics(
-        rotation_camera_to_world=rotation,
-        translation_camera_to_world=translation,
-    )
-
-
-
-def camera_to_robot_point(point_camera: np.ndarray, extrinsics: CameraExtrinsics) -> np.ndarray:
-    """Transform a 3D point from the camera optical frame into the robot/body frame.
-
-    Optical-frame convention from the RGB-D / AprilTag stack is assumed to be:
-    - +x right
-    - +y down
-    - +z forward
-
-    Robot/body-frame convention used in this repo is assumed to be:
-    - +x forward
-    - +y left
-    - +z up
-
-    The configured extrinsics are interpreted as the pose of this nominal
-    forward/left/up camera frame in the robot frame.
-    """
-    p_c = np.asarray(point_camera, dtype=float).reshape(3)
-    point_camera_nominal = np.array([p_c[2], -p_c[0], -p_c[1]], dtype=float)
-    return apply_extrinsics(point_camera_nominal, extrinsics)
-
-
-
-
-
-def rotation_matrix_from_rpy(*, roll: float, pitch: float, yaw: float) -> np.ndarray:
-    cr, sr = np.cos(roll), np.sin(roll)
-    cp, sp = np.cos(pitch), np.sin(pitch)
-    cy, sy = np.cos(yaw), np.sin(yaw)
-
-    rx = np.array([[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]], dtype=float)
-    ry = np.array([[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]], dtype=float)
-    rz = np.array([[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]], dtype=float)
-    return rz @ ry @ rx
-
-
-
-def robot_point_to_world(point_robot: np.ndarray, robot_pose: Pose2D) -> np.ndarray:
-    x_r, y_r, z_r = np.asarray(point_robot, dtype=float).reshape(3)
-    c = float(np.cos(robot_pose.heading))
-    s = float(np.sin(robot_pose.heading))
-    x_w = robot_pose.x + c * x_r - s * y_r
-    y_w = robot_pose.y + s * x_r + c * y_r
-    return np.array([x_w, y_w, z_r], dtype=float)
 
 
 if __name__ == "__main__":
