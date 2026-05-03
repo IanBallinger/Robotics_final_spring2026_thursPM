@@ -11,8 +11,8 @@
 // - right X axis -> left/right turning
 #define POT_FORWARD_BACK_PIN JOYSTICK1_Y_PIN
 #define POT_TURN_PIN JOYSTICK2_X_PIN
-#define BUTTON_L_PIN 16
-#define BUTTON_R_PIN 39
+#define BUTTON_L_PIN 16 // This pin is most likely wrong
+#define BUTTON_R_PIN 13
 #define TFT_CS_PIN 12
 #define TFT_DC_PIN 13
 

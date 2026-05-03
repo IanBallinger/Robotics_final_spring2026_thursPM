@@ -66,7 +66,11 @@ from localization.map import Map  # noqa: E402
 from planning.a_star import AStar, waypoints_from_polyline  # noqa: E402
 from serial_connection.elevator_serial_con import ElevatorSerialConnect  # noqa: E402
 from serial_connection.serial_con import SerialConnect  # noqa: E402
-from serial_connection.serialization import EncoderReading, IMUReading  # noqa: E402
+from serial_connection.serialization import (  # noqa: E402
+    ArmXYCommand,
+    EncoderReading,
+    IMUReading,
+)
 
 
 # TEMP DEBUG: set to False (or delete this block) once wheel-controller bring-up is done.
@@ -266,9 +270,12 @@ class MissionRuntime:
         self._last_debug_cmd_line: Optional[str] = None
         self._last_debug_eff_line: Optional[str] = None
         self._last_debug_enc_line: Optional[str] = None
+        self._last_debug_arm_cmd_line: Optional[str] = None
+        self._last_debug_arm_js_line: Optional[str] = None
         self._active_arm_task_name: Optional[str] = None
         self._active_arm_waypoint_index = 0
         self._last_arm_waypoint_send_time = -float("inf")
+        self._pending_manual_arm_cmd: Optional[tuple[float, float]] = None
 
         self.last_loop_time = time.monotonic()
         self.deploy = False
@@ -748,6 +755,14 @@ class MissionRuntime:
         packets = self.serial.read_packets(max_lines=128)
         imu_packets = [msg for msg in packets if isinstance(msg, IMUReading)]
         encoder_packets = [msg for msg in packets if isinstance(msg, EncoderReading)]
+        arm_packets = [msg for msg in packets if isinstance(msg, ArmXYCommand)]
+
+        if arm_packets:
+            latest_arm = arm_packets[-1]
+            self._pending_manual_arm_cmd = (latest_arm.x_m, latest_arm.y_m)
+            self._last_debug_arm_cmd_line = (
+                f"ARM_CMD,{latest_arm.x_m:.4f},{latest_arm.y_m:.4f}"
+            )
 
         if not imu_packets:
             self.localization_filter.predict(IMUMeasurement(ax=0.0, ay=0.0, wz=0.0), dt)
@@ -793,6 +808,10 @@ class MissionRuntime:
             self._last_debug_eff_line = raw_line
         elif raw_line.startswith("ENC,"):
             self._last_debug_enc_line = raw_line
+        elif raw_line.startswith("ARM_CMD,"):
+            self._last_debug_arm_cmd_line = raw_line
+        elif raw_line.startswith("ARM_JS,"):
+            self._last_debug_arm_js_line = raw_line
 
     def _publish_telemetry(
         self,
@@ -900,6 +919,11 @@ class MissionRuntime:
                     self._active_arm_waypoint_index += 1
 
             self.elevator_serial.flush_tx()
+        elif self._pending_manual_arm_cmd is not None:
+            x_m, y_m = self._pending_manual_arm_cmd
+            self.elevator_serial.send_arm_cmd(x_m, y_m)
+            self.elevator_serial.flush_tx()
+            self._pending_manual_arm_cmd = None
 
         for msg in self.elevator_serial.read_parsed(max_lines=32):
             self.blackboard.set("current_elevator_height_m", float(msg.height_m))
@@ -1020,6 +1044,10 @@ class MissionRuntime:
                         print(f"  wheel_eff: {self._last_debug_eff_line}")
                     if self._last_debug_enc_line is not None:
                         print(f"  wheel_enc: {self._last_debug_enc_line}")
+                    if self._last_debug_arm_cmd_line is not None:
+                        print(f"  arm_cmd: {self._last_debug_arm_cmd_line}")
+                    if self._last_debug_arm_js_line is not None:
+                        print(f"  arm_js: {self._last_debug_arm_js_line}")
 
                 tick += 1
                 sleep_dt = period - (time.monotonic() - now)

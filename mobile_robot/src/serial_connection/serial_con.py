@@ -32,6 +32,7 @@ import serial
 
 try:
     from .serialization import (
+        ArmXYCommand,
         EncoderReading,
         IMUReading,
         parse_mcu_line,
@@ -39,6 +40,7 @@ try:
     )
 except ImportError:
     from serialization import (  # type: ignore[no-redef]
+        ArmXYCommand,
         EncoderReading,
         IMUReading,
         parse_mcu_line,
@@ -78,7 +80,7 @@ class SerialConnect:
         self._last_raw_publish_time: Optional[float] = None
         self._last_raw_debug_time: Optional[float] = None
 
-        self._pending_packets: List[Union[IMUReading, EncoderReading]] = []
+        self._pending_packets: List[Union[IMUReading, EncoderReading, ArmXYCommand]] = []
         self._latest_parsed_rx_time: Optional[float] = None
         self._last_parsed_publish_time: Optional[float] = None
         self._last_parsed_debug_time: Optional[float] = None
@@ -234,7 +236,7 @@ class SerialConnect:
         self._latest_raw_rx_time = None
         return [line]
 
-    def read_packets(self, max_lines: int = 256) -> List[Union[IMUReading, EncoderReading]]:
+    def read_packets(self, max_lines: int = 256) -> List[Union[IMUReading, EncoderReading, ArmXYCommand]]:
         """Drain the RX buffer and publish parsed IMU/encoder packets."""
         self.poll(max_lines=max_lines)
         if not self._pending_packets or self._latest_parsed_rx_time is None:

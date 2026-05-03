@@ -36,6 +36,13 @@ constexpr float ENCODER_SIGN[num_wheels] = {1.0f, -1.0f, 1.0f, -1.0f};
 constexpr float JOYSTICK_DEADBAND = 0.1f;
 constexpr float JOYSTICK_MAX_FORWARD = 6.0f;
 constexpr float JOYSTICK_MAX_TURN = 3.0f;
+constexpr float ARM_JOYSTICK_DEADBAND = 0.1f;
+constexpr float ARM_MIN_RADIUS_M = 0.10f;
+constexpr float ARM_MAX_RADIUS_M = 0.42f;
+constexpr float ARM_X_CENTER_M = 0.30f;
+constexpr float ARM_Y_CENTER_M = 0.10f;
+constexpr float ARM_MAX_XY_SPEED_MPS = 0.08f;
+constexpr unsigned long ARM_CMD_PUBLISH_PERIOD_MS = 50;
 
 // User-defined serial/control rates.
 constexpr unsigned long CMD_APPLY_PERIOD_MS = 10;   // latest buffered wheel cmd -> motors
@@ -99,6 +106,11 @@ unsigned long last_imu_publish_ms = 0;
 unsigned long last_ack_debug_ms = 0;
 unsigned long last_imu_debug_ms = 0;
 unsigned long last_accel_filter_ms = 0;
+unsigned long last_arm_publish_ms = 0;
+unsigned long last_arm_update_ms = 0;
+
+float arm_target_x_m = ARM_X_CENTER_M;
+float arm_target_y_m = ARM_Y_CENTER_M;
 
 float filtered_ax = 0.0f;
 float filtered_ay = 0.0f;
@@ -220,6 +232,71 @@ static void applyWheelCommand(const DesiredWheelVel& cmd) {
       wheels[i].drive(control_effort[i]);
     }
 
+  }
+}
+
+static void clampArmTargetToWorkspace(float& x_m, float& y_m) {
+  const float r = sqrtf(x_m * x_m + y_m * y_m);
+  if (r < 1e-6f) {
+    x_m = ARM_MIN_RADIUS_M;
+    y_m = 0.0f;
+    return;
+  }
+
+  if (r < ARM_MIN_RADIUS_M) {
+    const float scale = ARM_MIN_RADIUS_M / r;
+    x_m *= scale;
+    y_m *= scale;
+  } else if (r > ARM_MAX_RADIUS_M) {
+    const float scale = ARM_MAX_RADIUS_M / r;
+    x_m *= scale;
+    y_m *= scale;
+  }
+}
+
+static void updateArmCommandFromJoystick(const ControllerMessage& controller_msg,
+                                         unsigned long now_ms) {
+  if (last_arm_update_ms == 0 || now_ms < last_arm_update_ms) {
+    last_arm_update_ms = now_ms;
+  }
+
+  float dt_s = (now_ms - last_arm_update_ms) * 0.001f;
+  // Avoid large jump after pauses/mode switches.
+  dt_s = constrain(dt_s, 0.0f, 0.10f);
+  last_arm_update_ms = now_ms;
+
+  float x_input = controller_msg.joystick2.x;
+  float y_input = controller_msg.joystick2.y;
+
+  if (fabs(x_input) < ARM_JOYSTICK_DEADBAND) {
+    x_input = 0.0f;
+  }
+  if (fabs(y_input) < ARM_JOYSTICK_DEADBAND) {
+    y_input = 0.0f;
+  }
+
+  // Arrow-key style behavior: stick deflection nudges position; neutral holds.
+  arm_target_x_m += x_input * ARM_MAX_XY_SPEED_MPS * dt_s;
+  arm_target_y_m += y_input * ARM_MAX_XY_SPEED_MPS * dt_s;
+  clampArmTargetToWorkspace(arm_target_x_m, arm_target_y_m);
+
+  if (now_ms - last_arm_publish_ms >= ARM_CMD_PUBLISH_PERIOD_MS) {
+    // Host bridge forwards this line to elevator controller as a real ARM_CMD.
+    Serial.print("ARM_CMD,");
+    Serial.print(arm_target_x_m, 4);
+    Serial.print(",");
+    Serial.println(arm_target_y_m, 4);
+
+    Serial.print("ARM_JS,ix,");
+    Serial.print(x_input, 3);
+    Serial.print(",iy,");
+    Serial.print(y_input, 3);
+    Serial.print(",x,");
+    Serial.print(arm_target_x_m, 4);
+    Serial.print(",y,");
+    Serial.println(arm_target_y_m, 4);
+
+    last_arm_publish_ms = now_ms;
   }
 }
 
@@ -379,6 +456,8 @@ void setup() {
   last_joystick_apply_ms = now;
   last_controller_rx_ms = now;
   last_wheel_cmd_filter_ms = now;
+  last_arm_publish_ms = now;
+  last_arm_update_ms = now;
 }
 
 void loop() {
@@ -435,6 +514,7 @@ void loop() {
       if (joystickToWheelCommand(controllerMessage, joystick_cmd)) {
         latest_rx_cmd = joystick_cmd;
         applyWheelCommand(lowPassWheelCommand(latest_rx_cmd, now));
+        updateArmCommandFromJoystick(controllerMessage, now);
         ack_dirty = true;
       } else {
         Serial.println("ERR,BAD_JOYSTICK_CMD");

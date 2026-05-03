@@ -12,6 +12,15 @@
 #define COMMAND_FILTER_TAU_S 0.1f
 #define BUTTON_ACTIVE_LOW true
 
+// Mirror wheels-side arm mapping for operator debug visibility.
+#define ARM_JOYSTICK_DEADBAND 0.1f
+#define ARM_MIN_RADIUS_M 0.10f
+#define ARM_MAX_RADIUS_M 0.42f
+#define ARM_X_CENTER_M 0.30f
+#define ARM_Y_CENTER_M 0.10f
+#define ARM_MAX_XY_SPEED_MPS 0.08f
+#define CONTROLLER_DT_S (CONTROLLER_READ_PERIOD_MS / 1000.0f)
+
 static unsigned long last_command_filter_ms = 0;
 
 ControllerMessage prevControllerMessage;
@@ -60,19 +69,43 @@ static JoystickReading lowPassReading(JoystickReading current,
     return current;
 }
 
+static void estimateArmDeltaForDebug(const JoystickReading& rightStick,
+                                     float& armDx,
+                                     float& armDy) {
+    float x_input = rightStick.x;
+    float y_input = rightStick.y;
+
+    if (fabs(x_input) < ARM_JOYSTICK_DEADBAND) {
+        x_input = 0.0f;
+    }
+    if (fabs(y_input) < ARM_JOYSTICK_DEADBAND) {
+        y_input = 0.0f;
+    }
+
+    armDx = x_input * ARM_MAX_XY_SPEED_MPS * CONTROLLER_DT_S;
+    armDy = y_input * ARM_MAX_XY_SPEED_MPS * CONTROLLER_DT_S;
+}
+
 static void printDebug(const JoystickReading& leftStick, const JoystickReading& rightStick) {
-    (void)rightStick;
+    float armDx = 0.0f;
+    float armDy = 0.0f;
+    estimateArmDeltaForDebug(rightStick, armDx, armDy);
+    const int rawBtnRLevel = digitalRead(BUTTON_R_PIN);
+
     Serial.printf(
-    "POTS raw_fb=%d raw_turn=%d mapped_fb=%.3f mapped_turn=%.3f btnR=%d joy1(x,y)=(%.3f, %.3f) joy2(x,y)=(%.3f, %.3f)\n",
+    "POTS raw_fb=%d raw_turn=%d mapped_fb=%.3f mapped_turn=%.3f btnR=%d raw_btnR=%d joy1(x,y)=(%.3f, %.3f) joy2(x,y)=(%.3f, %.3f) arm_dxy=(%.4f, %.4f)\n",
         joystickRangeToAnalog(leftStick.y),
         joystickRangeToAnalog(leftStick.x),
         leftStick.y,
         leftStick.x,
-    controllerMessage.buttonR,
+        controllerMessage.buttonR,
+        rawBtnRLevel,
         controllerMessage.joystick1.x,
         controllerMessage.joystick1.y,
         controllerMessage.joystick2.x,
-        controllerMessage.joystick2.y);
+        controllerMessage.joystick2.y,
+        armDx,
+        armDy);
 }
 
 void setup() {

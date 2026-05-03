@@ -59,6 +59,12 @@ class EncoderReading:
     w4: float
 
 
+@dataclass(frozen=True)
+class ArmXYCommand:
+    x_m: float
+    y_m: float
+
+
 def deserialize_imu(line: str) -> Optional[IMUReading]:
     """
     Parse ``IMU,<ax>,<ay>,<az>,<gx>,<gy>,<gz>`` (optional trailing whitespace).
@@ -92,16 +98,38 @@ def deserialize_encoder(line: str) -> Optional[EncoderReading]:
     return EncoderReading(w1=w1, w2=w2, w3=w3, w4=w4)
 
 
-def parse_mcu_line(line: str) -> Optional[Union[IMUReading, EncoderReading]]:
-    return deserialize_imu(line) or deserialize_encoder(line)
+def deserialize_arm_xy_command(line: str) -> Optional[ArmXYCommand]:
+    """Parse ``ARM_CMD,<x_m>,<y_m>`` emitted by wheels joystick control."""
+    s = line.strip()
+    if not s.startswith("ARM_CMD,"):
+        return None
+    parts = s.split(",")
+    if len(parts) != 3:
+        return None
+    try:
+        x_m = float(parts[1])
+        y_m = float(parts[2])
+    except ValueError:
+        return None
+    return ArmXYCommand(x_m=x_m, y_m=y_m)
+
+
+def parse_mcu_line(line: str) -> Optional[Union[IMUReading, EncoderReading, ArmXYCommand]]:
+    return (
+        deserialize_imu(line)
+        or deserialize_encoder(line)
+        or deserialize_arm_xy_command(line)
+    )
 
 
 __all__ = [
     "EncoderReading",
     "IMUReading",
+    "ArmXYCommand",
     "serialize_arm_cmd",
     "serialize_wheel_cmd",
     "deserialize_encoder",
     "deserialize_imu",
+    "deserialize_arm_xy_command",
     "parse_mcu_line",
 ]
