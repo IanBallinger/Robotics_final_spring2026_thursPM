@@ -10,6 +10,7 @@
 #define DEBUG_PRINT_PERIOD_MS 100
 #define POT_DEADBAND 0.08f
 #define COMMAND_FILTER_TAU_S 0.1f
+#define BUTTON_ACTIVE_LOW true
 
 static unsigned long last_command_filter_ms = 0;
 
@@ -46,6 +47,11 @@ static float lowPassValue(float currentValue, float targetValue, float alpha) {
     return currentValue + alpha * (targetValue - currentValue);
 }
 
+static bool isButtonPressed(int pin) {
+    const int level = digitalRead(pin);
+    return BUTTON_ACTIVE_LOW ? (level == LOW) : (level == HIGH);
+}
+
 static JoystickReading lowPassReading(JoystickReading current,
                                       const JoystickReading& target,
                                       float alpha) {
@@ -55,12 +61,14 @@ static JoystickReading lowPassReading(JoystickReading current,
 }
 
 static void printDebug(const JoystickReading& leftStick, const JoystickReading& rightStick) {
+    (void)rightStick;
     Serial.printf(
-        "POTS raw_fb=%d raw_turn=%d mapped_fb=%.3f mapped_turn=%.3f joy1(x,y)=(%.3f, %.3f) joy2(x,y)=(%.3f, %.3f)\n",
+    "POTS raw_fb=%d raw_turn=%d mapped_fb=%.3f mapped_turn=%.3f btnR=%d joy1(x,y)=(%.3f, %.3f) joy2(x,y)=(%.3f, %.3f)\n",
         joystickRangeToAnalog(leftStick.y),
-        joystickRangeToAnalog(rightStick.y),
+        joystickRangeToAnalog(leftStick.x),
         leftStick.y,
-        rightStick.y,
+        leftStick.x,
+    controllerMessage.buttonR,
         controllerMessage.joystick1.x,
         controllerMessage.joystick1.y,
         controllerMessage.joystick2.x,
@@ -71,6 +79,9 @@ void setup() {
     Serial.begin(115200);
 
     setupWireless();
+
+    pinMode(BUTTON_L_PIN, INPUT_PULLUP);
+    pinMode(BUTTON_R_PIN, INPUT);
 
     joystick1.setup();
     joystick2.setup();
@@ -96,11 +107,13 @@ void loop() {
 
         // Differential-drive mapping:
         // - left-stick forward/back comes from joystick1.y
-        // - right-stick up/down comes from joystick2.y and commands turn-in-place
+        // - left-stick left/right comes from joystick1.x and commands turn-in-place
         controllerMessage.joystick1.x = filteredLeftCommand.x;
         controllerMessage.joystick1.y = filteredLeftCommand.y;
         controllerMessage.joystick2.x = filteredRightCommand.x;
         controllerMessage.joystick2.y = filteredRightCommand.y;
+        controllerMessage.buttonL = isButtonPressed(BUTTON_L_PIN);
+        controllerMessage.buttonR = isButtonPressed(BUTTON_R_PIN);
 
         if (!(prevControllerMessage == controllerMessage)) {
             sendControllerData();

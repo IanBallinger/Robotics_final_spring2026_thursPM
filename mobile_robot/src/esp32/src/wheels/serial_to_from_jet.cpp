@@ -6,7 +6,6 @@
 #include "MotorDriver.h"
 #include "EncoderVelocity.h"
 #include "PID.h"
-#include "joystick.h"
 #include "util.h"
 #include "wireless.h"
 
@@ -33,18 +32,6 @@ String rx_line = "";
 constexpr uint8_t num_wheels = 4;
 constexpr float PID_TAU = 0.1f;
 constexpr float ENCODER_SIGN[num_wheels] = {1.0f, -1.0f, 1.0f, -1.0f};
-
-#ifndef MANUAL_JOYSTICK_X_PIN
-#define MANUAL_JOYSTICK_X_PIN A0
-#endif
-
-#ifndef MANUAL_JOYSTICK_Y_PIN
-#define MANUAL_JOYSTICK_Y_PIN A1
-#endif
-
-#ifndef AUTONOMY_TOGGLE_BUTTON_PIN
-#define AUTONOMY_TOGGLE_BUTTON_PIN 14
-#endif
 
 constexpr float JOYSTICK_DEADBAND = 0.1f;
 constexpr float JOYSTICK_MAX_FORWARD = 6.0f;
@@ -98,9 +85,8 @@ unsigned long last_wheel_cmd_filter_ms = 0;
 bool has_pending_cmd = false;
 bool ack_dirty = false;
 
-Joystick manual_joystick(MANUAL_JOYSTICK_X_PIN, MANUAL_JOYSTICK_Y_PIN);
 bool autonomy_enabled = true;
-bool last_button_level = HIGH;
+bool last_toggle_button_pressed = false;
 unsigned long last_button_change_ms = 0;
 unsigned long last_joystick_apply_ms = 0;
 unsigned long last_controller_rx_ms = 0;
@@ -240,7 +226,7 @@ static void applyWheelCommand(const DesiredWheelVel& cmd) {
 static bool joystickToWheelCommand(const ControllerMessage& controller_msg,
                                   DesiredWheelVel& des_wheel_spd) {
   const float forward_input = controller_msg.joystick1.y;
-  const float turn_input = controller_msg.joystick2.x;
+  const float turn_input = controller_msg.joystick1.x;
 
   const float forward = fabs(forward_input) < JOYSTICK_DEADBAND
                             ? 0.0f
@@ -263,7 +249,7 @@ static bool joystickToWheelCommand(const ControllerMessage& controller_msg,
 
   // Differential/skid-steer mixing:
   //   joystick1.y -> forward/back
-  //   joystick2.y -> turn in place
+  //   joystick1.x -> turn in place
   // Legend:
   // w1 = left_front (MOTOR 2), w2 = right_front (MOTOR 3), w3 = left_rear (MOTOR 1), w4 = right_rear (MOTOR 4).
   const float left = forward + turn;
@@ -285,14 +271,15 @@ static bool joystickToWheelCommand(const ControllerMessage& controller_msg,
 
 static void updateAutonomyToggle() {
   const unsigned long now = millis();
-  const bool button_level = digitalRead(AUTONOMY_TOGGLE_BUTTON_PIN);
+  const bool button_pressed = controllerMessage.buttonR;
 
-  if (button_level != last_button_level &&
+  if (button_pressed != last_toggle_button_pressed &&
       now - last_button_change_ms >= BUTTON_DEBOUNCE_MS) {
     last_button_change_ms = now;
-    last_button_level = button_level;
+    last_toggle_button_pressed = button_pressed;
 
-    if (button_level == LOW) {
+    // Toggle on button press edge only.
+    if (button_pressed) {
       autonomy_enabled = !autonomy_enabled;
       stopMotors();
       Serial.print("MODE,");
@@ -381,8 +368,6 @@ void setup() {
                                integral_max);
   }
 
-  manual_joystick.setup();
-  pinMode(AUTONOMY_TOGGLE_BUTTON_PIN, INPUT_PULLUP);
   setupWireless();
 
   const unsigned long now = millis();
@@ -441,23 +426,22 @@ void loop() {
       has_pending_cmd = false;
       last_cmd_apply_ms = now;
     }
-  } 
-  // else if (now - last_joystick_apply_ms >= JOYSTICK_APPLY_PERIOD_MS) {
-  //   if (now - last_controller_rx_ms > CONTROLLER_TIMEOUT_MS) {
-  //     stopMotors();
-  //     Serial.println("ERR,CONTROLLER_TIMEOUT");
-  //   } else {
-  //     DesiredWheelVel joystick_cmd;
-  //     if (joystickToWheelCommand(controllerMessage, joystick_cmd)) {
-  //       latest_rx_cmd = joystick_cmd;
-  //       applyWheelCommand(lowPassWheelCommand(latest_rx_cmd, now));
-  //       ack_dirty = true;
-  //     } else {
-  //       Serial.println("ERR,BAD_JOYSTICK_CMD");
-  //     }
-  //   }
-  //   last_joystick_apply_ms = now;
-  // }
+  } else if (now - last_joystick_apply_ms >= JOYSTICK_APPLY_PERIOD_MS) {
+    if (now - last_controller_rx_ms > CONTROLLER_TIMEOUT_MS) {
+      stopMotors();
+      Serial.println("ERR,CONTROLLER_TIMEOUT");
+    } else {
+      DesiredWheelVel joystick_cmd;
+      if (joystickToWheelCommand(controllerMessage, joystick_cmd)) {
+        latest_rx_cmd = joystick_cmd;
+        applyWheelCommand(lowPassWheelCommand(latest_rx_cmd, now));
+        ack_dirty = true;
+      } else {
+        Serial.println("ERR,BAD_JOYSTICK_CMD");
+      }
+    }
+    last_joystick_apply_ms = now;
+  }
 
   if (ack_dirty && (now - last_ack_publish_ms >= ACK_PUBLISH_PERIOD_MS)) {
     printWheelAck(latest_applied_cmd);
