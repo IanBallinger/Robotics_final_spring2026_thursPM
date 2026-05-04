@@ -58,12 +58,7 @@ from localization import (  # noqa: E402
     WheelTwistMeasurement,
 )
 
-from camera import (
-    CameraIntrinsics,
-    OpenCVCamera,
-    RealSenseCamera,
-    StreamConfig,
-)  # noqa: E402
+from camera import RealSenseCamera, StreamConfig  # noqa: E402
 from localization.april_tag_pose_est import AprilTagPoseEst
 from localization.person_detection import PersonDetector
 
@@ -108,8 +103,8 @@ class RuntimeConfig:
 
 
 @dataclass
-class AprilTagCameraConfig:
-    device_index: int = 0
+class RealSenseDeviceConfig:
+    serial_number: Optional[str] = None
     width: int = 640
     height: int = 480
     fps: int = 30
@@ -189,6 +184,7 @@ class MissionRuntime:
             self.runtime_config,
             self.camera_to_robot,
             self.apriltag_camera_config,
+            self.person_camera_config,
         ) = self._load_config(
             self.tasks_path, self.localization_cfg_path, self.camera_cfg_path
         )
@@ -254,7 +250,7 @@ class MissionRuntime:
             )
         self.localization_filter = self._create_localization_filter()
 
-        self.apriltag_camera: Optional[OpenCVCamera] = None
+        self.apriltag_camera: Optional[RealSenseCamera] = None
         self.person_camera: Optional[RealSenseCamera] = None
         self.apriltag_estimator = None
         self.person_detector = None
@@ -267,31 +263,54 @@ class MissionRuntime:
         self._last_person_detection_time = -float("inf")
         self._dynamic_obstacle_packets: list[DynamicObstaclePacket] = []
         if not disable_camera:
-            apriltag_intrinsics = self._load_apriltag_camera_intrinsics()
-            self.apriltag_camera = OpenCVCamera(
-                device_index=self.apriltag_camera_config.device_index,
-                config=StreamConfig(
+            self.apriltag_camera = RealSenseCamera(
+                color_config=StreamConfig(
                     width=self.apriltag_camera_config.width,
                     height=self.apriltag_camera_config.height,
                     fps=self.apriltag_camera_config.fps,
                 ),
-                intrinsics=apriltag_intrinsics,
+                depth_config=StreamConfig(
+                    width=self.apriltag_camera_config.width,
+                    height=self.apriltag_camera_config.height,
+                    fps=self.apriltag_camera_config.fps,
+                ),
+                serial_number=self.apriltag_camera_config.serial_number,
             )
             try:
                 self.apriltag_camera.open()
             except Exception as exc:
                 raise RuntimeError(
-                    "Failed to open AprilTag camera device "
-                    f"{self.apriltag_camera_config.device_index}. "
-                    "Set camera_config.yaml -> apriltag_camera.device_index or "
-                    "APRILTAG_CAMERA_DEVICE_INDEX to the correct /dev/videoN index."
+                    "Failed to open AprilTag RealSense camera"
+                    f" (serial={self.apriltag_camera_config.serial_number!r}). "
+                    "Set camera_config.yaml -> apriltag_camera.serial_number or "
+                    "APRILTAG_REALSENSE_SERIAL to the correct device serial."
                 ) from exc
             self.apriltag_estimator = AprilTagPoseEst(
                 realsense_camera=self.apriltag_camera
             )
 
-            self.person_camera = RealSenseCamera()
-            self.person_camera.open()
+            self.person_camera = RealSenseCamera(
+                color_config=StreamConfig(
+                    width=self.person_camera_config.width,
+                    height=self.person_camera_config.height,
+                    fps=self.person_camera_config.fps,
+                ),
+                depth_config=StreamConfig(
+                    width=self.person_camera_config.width,
+                    height=self.person_camera_config.height,
+                    fps=self.person_camera_config.fps,
+                ),
+                serial_number=self.person_camera_config.serial_number,
+            )
+            try:
+                self.person_camera.open()
+            except Exception as exc:
+                raise RuntimeError(
+                    "Failed to open person-detection RealSense camera"
+                    f" (serial={self.person_camera_config.serial_number!r}). "
+                    "Set camera_config.yaml -> person_camera.serial_number or "
+                    "PERSON_REALSENSE_SERIAL to the correct device serial."
+                ) from exc
             self.person_detector = PersonDetector(
                 camera=self.person_camera,
                 mission_config_path=self.tasks_path,
@@ -333,30 +352,6 @@ class MissionRuntime:
             print(f"Control UDP listener: udp://{control_host}:{control_port}")
 
     @staticmethod
-    def _load_apriltag_camera_intrinsics() -> CameraIntrinsics:
-        calib_candidates = [
-            Path(REPO_ROOT) / "camera_calibration_live.npz",
-            Path(SRC_DIR) / "localization" / "camera_calibration_live.npz",
-        ]
-        for calib_path in calib_candidates:
-            if not calib_path.exists():
-                continue
-            data = np.load(calib_path)
-            camera_matrix = np.asarray(data["camera_matrix"], dtype=float).reshape(3, 3)
-            dist_coeffs = np.asarray(data["dist_coeffs"], dtype=float).reshape(-1)
-            print(f"AprilTag camera calibration: {calib_path}")
-            return CameraIntrinsics(
-                fx=float(camera_matrix[0, 0]),
-                fy=float(camera_matrix[1, 1]),
-                cx=float(camera_matrix[0, 2]),
-                cy=float(camera_matrix[1, 2]),
-                dist_coeffs=dist_coeffs,
-            )
-        raise FileNotFoundError(
-            "Could not find camera_calibration_live.npz for the AprilTag camera"
-        )
-
-    @staticmethod
     def _plan_tasks(map_: Map, tasks: list[Task]) -> list[PlannedTask]:
         planner = AStar(map_)
         planned: list[PlannedTask] = []
@@ -386,7 +381,8 @@ class MissionRuntime:
         LocalizationConfig,
         RuntimeConfig,
         CameraToRobotTransform,
-        AprilTagCameraConfig,
+        RealSenseDeviceConfig,
+        RealSenseDeviceConfig,
     ]:
         with open(tasks_path, "r", encoding="utf-8") as f:
             raw = yaml.safe_load(f)
@@ -446,16 +442,24 @@ class MissionRuntime:
             ),
         )
         apriltag_camera_raw = camera_raw.get("apriltag_camera", {})
-        apriltag_camera = AprilTagCameraConfig(
-            device_index=int(
-                os.environ.get(
-                    "APRILTAG_CAMERA_DEVICE_INDEX",
-                    apriltag_camera_raw.get("device_index", 0),
-                )
+        person_camera_raw = camera_raw.get("person_camera", {})
+        apriltag_camera = RealSenseDeviceConfig(
+            serial_number=os.environ.get(
+                "APRILTAG_REALSENSE_SERIAL",
+                apriltag_camera_raw.get("serial_number"),
             ),
             width=int(apriltag_camera_raw.get("width", 640)),
             height=int(apriltag_camera_raw.get("height", 480)),
             fps=int(apriltag_camera_raw.get("fps", 30)),
+        )
+        person_camera = RealSenseDeviceConfig(
+            serial_number=os.environ.get(
+                "PERSON_REALSENSE_SERIAL",
+                person_camera_raw.get("serial_number"),
+            ),
+            width=int(person_camera_raw.get("width", 640)),
+            height=int(person_camera_raw.get("height", 480)),
+            fps=int(person_camera_raw.get("fps", 15)),
         )
 
         cam = camera_raw.get("camera_to_robot", {})
@@ -479,7 +483,13 @@ class MissionRuntime:
                 pitch=float(cam.get("pitch", 0.0)),
                 yaw=float(cam.get("yaw", 0.0)),
             )
-        return localization, runtime_cfg, camera_to_robot, apriltag_camera
+        return (
+            localization,
+            runtime_cfg,
+            camera_to_robot,
+            apriltag_camera,
+            person_camera,
+        )
 
     def _create_localization_filter(self):
         if self.localization_config.filter_name != "ekf":
