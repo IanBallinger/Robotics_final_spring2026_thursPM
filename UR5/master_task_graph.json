@@ -107,7 +107,11 @@
         "target_label": "microwavable_plate",
         "acquire_context": "microwave_plate",
         "requires_resource_available_for": "microwave_slot",
-        "requires_resource_item": "microwavable_plate"
+        "requires_resource_item": "microwavable_plate",
+        "pose_trace_csv_left": "trace_acquire_plate_left.csv",
+        "pose_trace_csv_right": "trace_acquire_plate_right.csv",
+        "named_waypoints_csv": "UR5/waypoints_acquire_plate.csv",
+        "dependent_item_label": "microwavable_plate"
       }
     },
     {
@@ -159,7 +163,10 @@
         "requires_resource_item": "microwave_open",
         "resource_action": "acquire",
         "resource": "microwave_slot",
-        "resource_item": "microwavable_plate"
+        "resource_item": "microwavable_plate",
+        "pose_trace_csv_left": "trace_place_plate_in_microwave_left.csv",
+        "pose_trace_csv_right": "trace_place_plate_in_microwave_right.csv",
+        "named_waypoints_csv": "UR5/waypoints_put_plate.csv"
       }
     },
     {
@@ -345,7 +352,11 @@
         "requires_resource_item": "microwave_open",
         "resource_action": "release",
         "resource": "microwave_slot",
-        "resource_item": "microwavable_plate"
+        "resource_item": "microwavable_plate",
+        "pose_trace_csv_left": "trace_take_plate_out_to_tray_left.csv",
+        "pose_trace_csv_right": "trace_take_plate_out_to_tray_right.csv",
+        "named_waypoints_csv": "UR5/waypoints_plate_to_tray.csv",
+        "dependent_item_label": "microwavable_plate"
       }
     },
     {

@@ -61,14 +61,14 @@
     "blue microwave door handle": {
       "close_iter": 4,
       "h_hi": 103,
-      "h_lo": 95,
+      "h_lo": 62,
       "kernel": 7,
-      "min_area": 1088,
-      "open_iter": 1,
+      "min_area": 232,
+      "open_iter": 0,
       "s_hi": 255,
       "s_lo": 240,
       "v_hi": 255,
-      "v_lo": 118
+      "v_lo": 139
     },
     "blue plate": {
       "close_iter": 3,
