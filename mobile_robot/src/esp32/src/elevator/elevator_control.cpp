@@ -33,6 +33,14 @@ struct DesiredArmPosition {
   DesiredArmPosition(float xE_, float yE_) : xE(xE_), yE(yE_) {}
 };
 
+struct DesiredArmJointAngles {
+  float theta1;
+  float theta2;
+
+  DesiredArmJointAngles() : theta1(0.0f), theta2(0.0f) {}
+  DesiredArmJointAngles(float theta1_, float theta2_) : theta1(theta1_), theta2(theta2_) {}
+};
+
 Adafruit_VL53L0X lox = Adafruit_VL53L0X();
 String rx_line = "";
 
@@ -79,6 +87,7 @@ constexpr float ARM_JOINT_REACHED_EPS_RAD = 0.01f;
 DesiredElevatorState latest_rx_cmd;
 DesiredElevatorState latest_applied_cmd;
 DesiredArmPosition latest_arm_cmd;
+DesiredArmJointAngles latest_arm_joint_angles_cmd;
 bool has_valid_elevator_cmd = false;
 bool ack_dirty = false;
 unsigned long last_cmd_rx_ms = 0;
@@ -207,6 +216,19 @@ static bool handleArmCommand(const String& line, DesiredArmPosition& cmd) {
   }
 
   if (sscanf(line.c_str(), "ARM_CMD,%f,%f", &cmd.xE, &cmd.yE) != 2) {
+    Serial.println("WRONG_NUM_VALUES");
+    return false;
+  }
+
+  return true;
+}
+
+static bool handleArmJointAnglesCommand(const String& line, DesiredArmJointAngles& cmd) {
+  if (!line.startsWith("ARM_JOINT_ANGLES_CMD,")) {
+    return false;
+  }
+
+  if (sscanf(line.c_str(), "ARM_JOINT_ANGLES_CMD,%f,%f", &cmd.theta1, &cmd.theta2) != 2) {
     Serial.println("WRONG_NUM_VALUES");
     return false;
   }
@@ -343,6 +365,26 @@ static bool moveArmToJointAngles(float theta1_rad, float theta2_rad) {
 
   shoulder_servo.writeMicroseconds(shoulder_ms);
   elbow_servo.writeMicroseconds(elbow_ms);
+  return true;
+}
+
+static bool commandArmToJointAngles(const DesiredArmJointAngles& cmd) {
+  target_shoulder_rad = cmd.theta1;
+  target_elbow_rad = cmd.theta2;
+  has_valid_arm_target = true;
+
+  Serial.print("ARM_JOINT_ACK,");
+  Serial.print(cmd.theta1, 4);
+  Serial.print(",");
+  Serial.print(cmd.theta2, 4);
+  Serial.print(",");
+  Serial.print(target_shoulder_rad * RAD_TO_DEG_FACTOR, 2);
+  Serial.print(",");
+  Serial.print(target_elbow_rad * RAD_TO_DEG_FACTOR, 2);
+  Serial.print(",");
+  Serial.print(applied_shoulder_rad * RAD_TO_DEG_FACTOR, 2);
+  Serial.print(",");
+  Serial.println(applied_elbow_rad * RAD_TO_DEG_FACTOR, 2);
   return true;
 }
 
@@ -509,6 +551,36 @@ void loop() {
           latest_arm_cmd = arm_cmd;
           moveArmToXY(latest_arm_cmd);
         } else {
+          DesiredArmJointAngles arm_joint_angles_cmd;
+          if (handleArmJointAnglesCommand(rx_line, arm_joint_angles_cmd)) {
+            latest_arm_joint_angles_cmd = arm_joint_angles_cmd;
+            commandArmToJointAngles(latest_arm_joint_angles_cmd);
+          } else {
+            Serial.println("WRONG_START");
+          }
+        }
+      }
+      rx_line = "";
+    } else {
+      rx_line += c;
+    }
+  }
+
+  const unsigned long now = millis();
+  updateArmMotion(now);
+  const float measured_height_m = readElevatorHeightMeters();
+
+  if (now - last_cmd_rx_ms > CMD_TIMEOUT_MS) {
+    stopElevator();
+  }
+
+  if (has_valid_elevator_cmd && now - last_cmd_apply_ms >= CMD_APPLY_PERIOD_MS) {
+    if (!isnan(measured_height_m)) {
+      applyElevatorCommand(latest_rx_cmd, measured_height_m);
+    } else {
+      elevator_driver.drive(0.0);
+    }
+    ack_dirty = true;
           Serial.println("WRONG_START");
         }
       }
