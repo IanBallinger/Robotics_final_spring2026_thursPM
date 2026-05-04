@@ -108,8 +108,8 @@ class CascadedWaypointController:
         w_right = (vx_body + omega) / r
 
         # clamp wheel rates
-        w_left = np.clip(float(w_left),-3.0,3.0)
-        w_right = np.clip(float(w_right),-3.0,3.0)
+        w_left = np.clip(float(w_left), -3.0, 3.0)
+        w_right = np.clip(float(w_right), -3.0, 3.0)
         return w_left, w_left, w_right, w_right
 
     def wheel_rates_to_body_twist(
@@ -201,9 +201,12 @@ class CascadedWaypointController:
 
         vx_cmd = vx_ref + self.kv_inner * (vx_ref - vx_meas)
         omega_cmd = omega_ref + self.komega_inner * (omega_ref - omega_meas)
+        print(
+            f"vx_cmd: {vx_cmd}, omega_cmd: {omega_cmd}, vx_ref: {vx_ref}, omega_ref: {omega_ref}"
+        )
 
-        vx_cmd = float(np.clip(vx_cmd, -self.v_max, self.v_max))
-        omega_cmd = float(np.clip(omega_cmd, -self.omega_max, self.omega_max))
+        # vx_cmd = float(np.clip(vx_cmd, -self.v_max, self.v_max))
+        # omega_cmd = float(np.clip(omega_cmd, -self.omega_max, self.omega_max))
 
         wheel_rates = self.body_twist_to_wheel_rates(vx_cmd, omega_cmd)
         return DifferentialDriveCommand(
