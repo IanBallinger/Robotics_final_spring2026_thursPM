@@ -161,8 +161,8 @@ tasks:
     # arm_point_dwell_s: 0.5
     goal:
       position:
-        x: 1.5
-        y: 1.31
+        x: 0.8
+        y: 1.18
       heading: 3.14
     enter_conditions:
       - current_task == "drive_to_tray"
