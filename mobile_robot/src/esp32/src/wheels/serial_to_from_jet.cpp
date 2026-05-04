@@ -69,7 +69,7 @@ MotorDriver wheels[num_wheels] = {
     {B_DIR2, B_PWM2, 3}
 };
 
-float kp[num_wheels] = {0.1f, 0.1f, 0.1f, 0.1f};
+float kp[num_wheels] = {0.3f, 0.3f, 0.3f, 0.3f};
 float ki[num_wheels] = {0.05f, 0.05f, 0.05f, 0.05f}; // old integral: 0.4f
 float kd[num_wheels] = {0.01f, 0.01f, 0.01f, 0.01f};
 
@@ -107,7 +107,7 @@ bool has_pending_cmd = false;
 bool ack_dirty = false;
 
 Joystick manual_joystick(MANUAL_JOYSTICK_X_PIN, MANUAL_JOYSTICK_Y_PIN);
-bool autonomy_enabled = true;
+bool autonomy_enabled = false;
 bool last_button_level = HIGH;
 unsigned long last_button_change_ms = 0;
 unsigned long last_joystick_apply_ms = 0;
