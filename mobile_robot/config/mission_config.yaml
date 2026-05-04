@@ -158,6 +158,26 @@ tasks:
       - distance_to_goal <= 0.10
       - abs(heading_error) <= 0.10
       #- abs(elevator_height_error_m) <= 0.01
+
+  - name: tray_arm_motion
+    desired_elevator_height_m: 0.0
+    arm_waypoints:
+      - x: 0.12
+        y: 0.18
+      - x: 0.16
+        y: 0.22
+      - x: 0.14
+        y: 0.20
+    arm_point_dwell_s: 0.5
+    goal:
+      position:
+        x: 0.8
+        y: 1.18
+      heading: 3.14
+    enter_conditions:
+      - current_task == "tray_arm_motion"
+    completion_conditions:
+      - task_elapsed_s >= 10.0
   # - name: drive_to_zone
   #   desired_elevator_height_m: 0.0
   #   goal:

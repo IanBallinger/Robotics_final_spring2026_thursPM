@@ -58,7 +58,7 @@ from localization import (  # noqa: E402
     WheelTwistMeasurement,
 )
 
-from camera import RealSenseCamera  # noqa: E402
+from camera import CameraIntrinsics, OpenCVCamera, RealSenseCamera, StreamConfig  # noqa: E402
 from localization.april_tag_pose_est import AprilTagPoseEst
 from localization.person_detection import PersonDetector
 
@@ -212,6 +212,7 @@ class MissionRuntime:
                 "deploy": False,
                 "allstop": False,
                 "paused": True,
+                "task_elapsed_s": 0.0,
             },
         )
         self.tree = create_tree(self.tasks)
@@ -237,7 +238,8 @@ class MissionRuntime:
             )
         self.localization_filter = self._create_localization_filter()
 
-        self.shared_camera: Optional[RealSenseCamera] = None
+        self.apriltag_camera: Optional[OpenCVCamera] = None
+        self.person_camera: Optional[RealSenseCamera] = None
         self.apriltag_estimator = None
         self.person_detector = None
         self._warned_raw_apriltag = False
@@ -249,13 +251,21 @@ class MissionRuntime:
         self._last_person_detection_time = -float("inf")
         self._dynamic_obstacle_packets: list[DynamicObstaclePacket] = []
         if not disable_camera:
-            self.shared_camera = RealSenseCamera()
-            self.shared_camera.open()
-            self.apriltag_estimator = AprilTagPoseEst(
-                realsense_camera=self.shared_camera
+            apriltag_intrinsics = self._load_apriltag_camera_intrinsics()
+            self.apriltag_camera = OpenCVCamera(
+                device_index=0,
+                config=StreamConfig(width=640, height=480, fps=int(self.runtime_config.control_rate_hz)),
+                intrinsics=apriltag_intrinsics,
             )
+            self.apriltag_camera.open()
+            self.apriltag_estimator = AprilTagPoseEst(
+                realsense_camera=self.apriltag_camera
+            )
+
+            self.person_camera = RealSenseCamera()
+            self.person_camera.open()
             self.person_detector = PersonDetector(
-                camera=self.shared_camera,
+                camera=self.person_camera,
                 mission_config_path=self.tasks_path,
             )
 
@@ -269,6 +279,8 @@ class MissionRuntime:
         self._active_arm_task_name: Optional[str] = None
         self._active_arm_waypoint_index = 0
         self._last_arm_waypoint_send_time = -float("inf")
+        self._last_task_for_timer: Optional[str] = None
+        self._active_task_start_time = time.monotonic()
 
         self.last_loop_time = time.monotonic()
         self.deploy = False
@@ -291,6 +303,30 @@ class MissionRuntime:
             self.control_sock.bind((control_host, control_port))
             self.control_sock.setblocking(False)
             print(f"Control UDP listener: udp://{control_host}:{control_port}")
+
+    @staticmethod
+    def _load_apriltag_camera_intrinsics() -> CameraIntrinsics:
+        calib_candidates = [
+            Path(REPO_ROOT) / "camera_calibration_live.npz",
+            Path(SRC_DIR) / "localization" / "camera_calibration_live.npz",
+        ]
+        for calib_path in calib_candidates:
+            if not calib_path.exists():
+                continue
+            data = np.load(calib_path)
+            camera_matrix = np.asarray(data["camera_matrix"], dtype=float).reshape(3, 3)
+            dist_coeffs = np.asarray(data["dist_coeffs"], dtype=float).reshape(-1)
+            print(f"AprilTag camera calibration: {calib_path}")
+            return CameraIntrinsics(
+                fx=float(camera_matrix[0, 0]),
+                fy=float(camera_matrix[1, 1]),
+                cx=float(camera_matrix[0, 2]),
+                cy=float(camera_matrix[1, 2]),
+                dist_coeffs=dist_coeffs,
+            )
+        raise FileNotFoundError(
+            "Could not find camera_calibration_live.npz for the AprilTag camera"
+        )
 
     @staticmethod
     def _plan_tasks(map_: Map, tasks: list[Task]) -> list[PlannedTask]:
@@ -861,6 +897,21 @@ class MissionRuntime:
                 f"control rx {addr[0]}:{addr[1]} deploy={self.deploy} allstop={self.allstop}"
             )
 
+    def _update_task_timer(
+        self,
+        current_task_name: str,
+        *,
+        now: Optional[float] = None,
+    ) -> None:
+        if now is None:
+            now = time.monotonic()
+        if self._last_task_for_timer != current_task_name:
+            self._last_task_for_timer = current_task_name
+            self._active_task_start_time = now
+        self.blackboard.set(
+            "task_elapsed_s", float(now - self._active_task_start_time)
+        )
+
     def _update_manipulator_from_serial(
         self,
         current_task_name: str,
@@ -957,6 +1008,7 @@ class MissionRuntime:
                 if current_task == MISSION_DONE:
                     break
 
+                self._update_task_timer(current_task, now=now)
                 self._update_localization_from_imu(dt)
                 self._maybe_capture_wheel_debug_lines()
                 self._maybe_update_apriltag()
@@ -1036,8 +1088,10 @@ class MissionRuntime:
             self.serial.close()
             if self.elevator_serial is not None:
                 self.elevator_serial.close()
-            if self.shared_camera is not None:
-                self.shared_camera.close()
+            if self.apriltag_camera is not None:
+                self.apriltag_camera.close()
+            if self.person_camera is not None:
+                self.person_camera.close()
             if self.telemetry_sock is not None:
                 self.telemetry_sock.close()
             if self.control_sock is not None:
