@@ -131,20 +131,6 @@ initial_state:
     # x: 2.15
     #y: 1.31
   heading: 3.14
-localization:
-  # Demo/local defaults: trust AprilTag and wheel odometry far more than raw IMU.
-  filter: ekf
-  wheel_twist_measurement_noise:
-    - [0.005, 0.0, 0.0]
-    - [0.0, 0.005, 0.0]
-    - [0.0, 0.0, 0.02]
-  apriltag_measurement_noise:
-    - [0.01, 0.0, 0.0]
-    - [0.0, 0.01, 0.0]
-    - [0.0, 0.0, 0.02]
-  gyro_measurement_noise:
-    - [1.5]
-  use_imu_accel_in_prediction: false
 mission_runtime:
   control_rate_hz: 40.0
   waypoint_capture_radius: 0.05
