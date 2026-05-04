@@ -535,7 +535,6 @@ void setup() {
 }
 
 void loop() {
-  
   while (Serial.available()) {
     char c = static_cast<char>(Serial.read());
     if (c == '\n') {
@@ -581,37 +580,13 @@ void loop() {
       elevator_driver.drive(0.0);
     }
     ack_dirty = true;
-          Serial.println("WRONG_START");
-        }
-      }
-      rx_line = "";
-    } else {
-      rx_line += c;
-    }
-  }
-
-  const unsigned long now = millis();
-  updateArmMotion(now);
-  const float measured_height_m = readElevatorHeightMeters();
-
-  if (now - last_cmd_rx_ms > CMD_TIMEOUT_MS) {
-    stopElevator();
-  }
-
-  if (has_valid_elevator_cmd && now - last_cmd_apply_ms >= CMD_APPLY_PERIOD_MS) {
-    if (!isnan(measured_height_m)) {
-      applyElevatorCommand(latest_rx_cmd, measured_height_m);
-    } else {
-      elevator_driver.drive(0.0);
-    }
-    ack_dirty = true;
     last_cmd_apply_ms = now;
   }
 
   if (ack_dirty && now - last_ack_publish_ms >= ACK_PUBLISH_PERIOD_MS) {
-     printElevatorAck(latest_applied_cmd);
-     ack_dirty = false;
-     last_ack_publish_ms = now;
+    printElevatorAck(latest_applied_cmd);
+    ack_dirty = false;
+    last_ack_publish_ms = now;
   }
 
   if (!isnan(measured_height_m) && now - last_meas_publish_ms >= MEAS_PUBLISH_PERIOD_MS) {
