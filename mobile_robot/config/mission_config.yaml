@@ -126,8 +126,10 @@ map:
           y: 1.45
 initial_state:
   position:
-    x: 2.15
-    y: 1.31
+    x: 0.8
+    y: 1.18
+    # x: 2.15
+    #y: 1.31
   heading: 3.14
 localization:
   # Demo/local defaults: trust AprilTag and wheel odometry far more than raw IMU.
