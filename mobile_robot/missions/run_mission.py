@@ -103,6 +103,14 @@ class RuntimeConfig:
 
 
 @dataclass
+class AprilTagCameraConfig:
+    device_index: int = 0
+    width: int = 640
+    height: int = 480
+    fps: int = 30
+
+
+@dataclass
 class CameraToRobotTransform:
     """Camera extrinsics expressed in the robot/body frame.
 
@@ -171,10 +179,13 @@ class MissionRuntime:
         self.tasks = load_tasks(self.tasks_path)
         self.task_lookup = {task.name: task for task in self.tasks}
         self.map_ = load_map(self.tasks_path)
-        self.localization_config, self.runtime_config, self.camera_to_robot = (
-            self._load_config(
-                self.tasks_path, self.localization_cfg_path, self.camera_cfg_path
-            )
+        (
+            self.localization_config,
+            self.runtime_config,
+            self.camera_to_robot,
+            self.apriltag_camera_config,
+        ) = self._load_config(
+            self.tasks_path, self.localization_cfg_path, self.camera_cfg_path
         )
         
         self.planned_tasks = self._plan_tasks(self.map_, self.tasks)
@@ -253,11 +264,23 @@ class MissionRuntime:
         if not disable_camera:
             apriltag_intrinsics = self._load_apriltag_camera_intrinsics()
             self.apriltag_camera = OpenCVCamera(
-                device_index=0,
-                config=StreamConfig(width=640, height=480, fps=int(self.runtime_config.control_rate_hz)),
+                device_index=self.apriltag_camera_config.device_index,
+                config=StreamConfig(
+                    width=self.apriltag_camera_config.width,
+                    height=self.apriltag_camera_config.height,
+                    fps=self.apriltag_camera_config.fps,
+                ),
                 intrinsics=apriltag_intrinsics,
             )
-            self.apriltag_camera.open()
+            try:
+                self.apriltag_camera.open()
+            except Exception as exc:
+                raise RuntimeError(
+                    "Failed to open AprilTag camera device "
+                    f"{self.apriltag_camera_config.device_index}. "
+                    "Set camera_config.yaml -> apriltag_camera.device_index or "
+                    "APRILTAG_CAMERA_DEVICE_INDEX to the correct /dev/videoN index."
+                ) from exc
             self.apriltag_estimator = AprilTagPoseEst(
                 realsense_camera=self.apriltag_camera
             )
@@ -354,7 +377,12 @@ class MissionRuntime:
         tasks_path: Path,
         localization_path: Path,
         camera_path: Path,
-    ) -> tuple[LocalizationConfig, RuntimeConfig, CameraToRobotTransform]:
+    ) -> tuple[
+        LocalizationConfig,
+        RuntimeConfig,
+        CameraToRobotTransform,
+        AprilTagCameraConfig,
+    ]:
         with open(tasks_path, "r", encoding="utf-8") as f:
             raw = yaml.safe_load(f)
 
@@ -412,6 +440,19 @@ class MissionRuntime:
                 runtime.get("person_detection_period_s", 1.0)
             ),
         )
+        apriltag_camera_raw = camera_raw.get("apriltag_camera", {})
+        apriltag_camera = AprilTagCameraConfig(
+            device_index=int(
+                os.environ.get(
+                    "APRILTAG_CAMERA_DEVICE_INDEX",
+                    apriltag_camera_raw.get("device_index", 0),
+                )
+            ),
+            width=int(apriltag_camera_raw.get("width", 640)),
+            height=int(apriltag_camera_raw.get("height", 480)),
+            fps=int(apriltag_camera_raw.get("fps", 30)),
+        )
+
         cam = camera_raw.get("camera_to_robot", {})
         if "translation" in cam or "rotation_rpy" in cam:
             translation = cam.get("translation", {})
@@ -433,7 +474,7 @@ class MissionRuntime:
                 pitch=float(cam.get("pitch", 0.0)),
                 yaw=float(cam.get("yaw", 0.0)),
             )
-        return localization, runtime_cfg, camera_to_robot
+        return localization, runtime_cfg, camera_to_robot, apriltag_camera
 
     def _create_localization_filter(self):
         if self.localization_config.filter_name != "ekf":

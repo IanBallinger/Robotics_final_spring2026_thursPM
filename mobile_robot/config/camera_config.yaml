@@ -1,3 +1,11 @@
+apriltag_camera:
+  # OpenCV / V4L2 camera index for AprilTag localization.
+  # On Linux this usually corresponds to /dev/videoN.
+  device_index: 0
+  width: 640
+  height: 480
+  fps: 30
+
 camera_to_robot:
   # Camera pose expressed in the robot/body frame.
   # Keep this as the single source of truth for mobile-robot camera extrinsics.
