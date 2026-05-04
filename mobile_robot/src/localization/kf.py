@@ -4,7 +4,7 @@ This module provides lightweight nonlinear filters for fusing:
 - AprilTag global pose measurements: [x, y, yaw]
 - IMU measurements:
   - body-frame linear accelerations ax, ay (used in prediction)
-  - yaw rate wz (fused as a measurement update)
+  - yaw rate wz (used directly in the process model for yaw propagation)
 
 State definition (9D):
     x = [px, py, yaw, vx_body, vy_body, wz, b_ax, b_ay, b_wz]
@@ -13,17 +13,17 @@ where:
 - px, py are global/world position coordinates
 - yaw is global heading
 - vx_body, vy_body are body-frame translational velocities
-- wz is bias-corrected yaw rate
+- wz stores the latest yaw rate supplied to the process model
 - b_ax, b_ay are accelerometer biases
-- b_wz is gyro yaw-rate bias
+- b_wz is retained for backward compatibility but is not used in yaw propagation
 
 The process model is:
     px_{k+1} = px_k + dt * (cos(yaw) * vx_body - sin(yaw) * vy_body)
     py_{k+1} = py_k + dt * (sin(yaw) * vx_body + cos(yaw) * vy_body)
-    yaw_{k+1}= yaw_k + dt * wz
+    yaw_{k+1}= yaw_k + dt * imu.wz
     vx_{k+1} = vx_k + dt * (ax_body - b_ax)
     vy_{k+1} = vy_k + dt * (ay_body - b_ay)
-    wz_{k+1} = wz_k
+    wz_{k+1} = imu.wz
     b_ax_{k+1} = b_ax_k
     b_ay_{k+1} = b_ay_k
     b_wz_{k+1} = b_wz_k
@@ -210,10 +210,10 @@ class _BaseLocalizationFilter:
         out = x.copy()
         out[PX] = x[PX] + dt * (c * x[VX] - s * x[VY])
         out[PY] = x[PY] + dt * (s * x[VX] + c * x[VY])
-        out[YAW] = wrap_angle(x[YAW] + dt * x[WZ])
+        out[YAW] = wrap_angle(x[YAW] + dt * imu.wz)
         out[VX] = x[VX] + dt * (imu.ax - x[BAX])
         out[VY] = x[VY] + dt * (imu.ay - x[BAY])
-        out[WZ] = x[WZ]
+        out[WZ] = float(imu.wz)
         out[BAX] = x[BAX]
         out[BAY] = x[BAY]
         out[BWZ] = x[BWZ]
@@ -237,7 +237,7 @@ class _BaseLocalizationFilter:
         F[PY, VX] = dt * s
         F[PY, VY] = dt * c
 
-        F[YAW, WZ] = dt
+        F[WZ, WZ] = 0.0
         F[VX, BAX] = -dt
         F[VY, BAY] = -dt
         return F
@@ -331,20 +331,11 @@ class ExtendedKalmanFilter2D(_BaseLocalizationFilter):
         return self.get_state()
 
     def update_imu(self, imu: IMUMeasurement) -> np.ndarray:
-        z = np.array([imu.wz], dtype=float)
-        h = self._gyro_measurement_model(self.state)
-        H = self._gyro_measurement_matrix()
-        R = self.gyro_measurement_noise
-
-        innovation = z - h
-        S = H @ self.covariance @ H.T + R
-        K = self.covariance @ H.T @ np.linalg.inv(S)
-
-        self.state = self.state + K @ innovation
+        # IMU yaw rate is consumed directly in predict() for yaw propagation.
+        # Keep the cached wz state in sync for downstream consumers, but do not
+        # run a separate EKF measurement update on yaw rate.
+        self.state[WZ] = float(imu.wz)
         self.state[YAW] = wrap_angle(self.state[YAW])
-
-        I = np.eye(STATE_DIM)
-        self.covariance = (I - K @ H) @ self.covariance
         return self.get_state()
 
     def update_wheel_twist(self, measurement: WheelTwistMeasurement) -> np.ndarray:
