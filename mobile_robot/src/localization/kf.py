@@ -5,6 +5,9 @@ This module provides lightweight nonlinear filters for fusing:
 - IMU measurements:
   - body-frame linear accelerations ax, ay (used in prediction)
   - yaw rate wz (used directly in the process model for yaw propagation)
+- Wheel encoder twist measurements:
+  - body-frame vx, vy only
+  - wheel-derived wz is intentionally not fused
 
 State definition (9D):
     x = [px, py, yaw, vx_body, vy_body, wz, b_ax, b_ay, b_wz]
@@ -39,7 +42,7 @@ import numpy as np
 STATE_DIM = 9
 POSE_MEAS_DIM = 3
 GYRO_MEAS_DIM = 1
-WHEEL_TWIST_MEAS_DIM = 3
+WHEEL_TWIST_MEAS_DIM = 2
 
 PX = 0
 PY = 1
@@ -113,18 +116,20 @@ class WheelTwistMeasurement:
         Body-frame lateral velocity [m/s]. For this platform this is expected to
         be zero, but it is kept for filter/state consistency.
     wz : float
-        Body-frame yaw rate [rad/s].
+        Optional wheel-derived yaw rate [rad/s]. This field is accepted for API
+        compatibility but is intentionally ignored by the filter.
     covariance : Optional[np.ndarray]
-        Optional 3x3 measurement covariance for [vx, vy, wz].
+        Optional 2x2 or 3x3 measurement covariance. Only the ``vx, vy`` block is
+        used.
     """
 
     vx: float
     vy: float
-    wz: float
+    wz: float = 0.0
     covariance: Optional[np.ndarray] = None
 
     def as_vector(self) -> np.ndarray:
-        return np.array([self.vx, self.vy, self.wz], dtype=float)
+        return np.array([self.vx, self.vy], dtype=float)
 
 
 class _BaseLocalizationFilter:
@@ -167,13 +172,18 @@ class _BaseLocalizationFilter:
             )
         )
 
-        self.wheel_twist_measurement_noise = (
-            np.diag([2e-2, 2e-2, 8e-2])
-            if wheel_twist_measurement_noise is None
-            else np.asarray(wheel_twist_measurement_noise, dtype=float).reshape(
-                WHEEL_TWIST_MEAS_DIM, WHEEL_TWIST_MEAS_DIM
-            )
-        )
+        if wheel_twist_measurement_noise is None:
+            self.wheel_twist_measurement_noise = np.diag([2e-2, 2e-2])
+        else:
+            wheel_noise = np.asarray(wheel_twist_measurement_noise, dtype=float)
+            if wheel_noise.shape == (WHEEL_TWIST_MEAS_DIM, WHEEL_TWIST_MEAS_DIM):
+                self.wheel_twist_measurement_noise = wheel_noise.copy()
+            elif wheel_noise.shape == (3, 3):
+                self.wheel_twist_measurement_noise = wheel_noise[:2, :2].copy()
+            else:
+                raise ValueError(
+                    "wheel_twist_measurement_noise must have shape (2, 2) or (3, 3)"
+                )
 
     @staticmethod
     def _coerce_initial_state(initial_state: Optional[np.ndarray]) -> np.ndarray:
@@ -252,7 +262,7 @@ class _BaseLocalizationFilter:
 
     @staticmethod
     def _wheel_twist_measurement_model(state: np.ndarray) -> np.ndarray:
-        return np.array([state[VX], state[VY], state[WZ]], dtype=float)
+        return np.array([state[VX], state[VY]], dtype=float)
 
     @staticmethod
     def _pose_measurement_matrix() -> np.ndarray:
@@ -274,7 +284,6 @@ class _BaseLocalizationFilter:
         H = np.zeros((WHEEL_TWIST_MEAS_DIM, STATE_DIM), dtype=float)
         H[0, VX] = 1.0
         H[1, VY] = 1.0
-        H[2, WZ] = 1.0
         return H
 
     def get_state(self) -> np.ndarray:
@@ -342,13 +351,18 @@ class ExtendedKalmanFilter2D(_BaseLocalizationFilter):
         z = measurement.as_vector()
         h = self._wheel_twist_measurement_model(self.state)
         H = self._wheel_twist_measurement_matrix()
-        R = (
-            self.wheel_twist_measurement_noise
-            if measurement.covariance is None
-            else np.asarray(measurement.covariance, dtype=float).reshape(
-                WHEEL_TWIST_MEAS_DIM, WHEEL_TWIST_MEAS_DIM
-            )
-        )
+        if measurement.covariance is None:
+            R = self.wheel_twist_measurement_noise
+        else:
+            wheel_cov = np.asarray(measurement.covariance, dtype=float)
+            if wheel_cov.shape == (WHEEL_TWIST_MEAS_DIM, WHEEL_TWIST_MEAS_DIM):
+                R = wheel_cov
+            elif wheel_cov.shape == (3, 3):
+                R = wheel_cov[:2, :2]
+            else:
+                raise ValueError(
+                    "wheel twist measurement covariance must have shape (2, 2) or (3, 3)"
+                )
 
         innovation = z - h
         S = H @ self.covariance @ H.T + R
