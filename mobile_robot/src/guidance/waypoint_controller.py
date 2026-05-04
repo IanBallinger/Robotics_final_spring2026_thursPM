@@ -163,6 +163,17 @@ class CascadedWaypointController:
         alpha = wrap_to_pi(float(np.arctan2(ey_body, ex_body))) if rho > 1e-9 else 0.0
         e_psi = wrap_to_pi(goal.heading - state.heading)
 
+        print(
+            "[CascadedWaypointController] "
+            f"goal=({gx:.3f}, {gy:.3f}, hdg={goal.heading:.3f}) "
+            f"state=({state.x:.3f}, {state.y:.3f}, hdg={state.heading:.3f}) "
+            f"world_err=(dx={dx_w:.3f}, dy={dy_w:.3f}, rho={rho:.3f}) "
+            f"body_err=(ex={ex_body:.3f}, ey={ey_body:.3f}, alpha={alpha:.3f}) "
+            f"heading_err={e_psi:.3f} final_pose_mode={final_pose_mode}"
+        )
+
+        align_turn_active = abs(alpha) > self.align_turn_thresh
+
         if final_pose_mode:
             # Final pose regulator: first approach the goal position, then settle
             # precisely onto the desired terminal heading once the robot is close.
@@ -172,43 +183,76 @@ class CascadedWaypointController:
             if rho <= final_heading_radius:
                 vx_ref = 0.0
                 omega_ref = self.k_heading * e_psi
+                print(
+                    "[CascadedWaypointController] final-pose heading settle "
+                    f"rho={rho:.3f} <= {final_heading_radius:.3f} "
+                    f"omega_ref_from_heading={omega_ref:.3f}"
+                )
             else:
                 vx_ref = self.k_rho * ex_body
                 if rho <= final_pos_radius:
                     vx_ref *= rho / final_pos_radius
-                if abs(alpha) > self.align_turn_thresh:
+                    print(
+                        "[CascadedWaypointController] final-pose position taper "
+                        f"rho={rho:.3f} <= {final_pos_radius:.3f} "
+                        f"scaled_vx_ref={vx_ref:.3f}"
+                    )
+                if align_turn_active:
                     vx_ref = 0.0
                     omega_ref = self.k_alpha * alpha
+                    print(
+                        "[CascadedWaypointController] final-pose align-turn active "
+                        f"|alpha|={abs(alpha):.3f} > {self.align_turn_thresh:.3f}"
+                    )
                 else:
                     omega_ref = self.k_alpha * alpha
                     if rho <= final_pos_radius:
                         omega_ref += self.k_heading * e_psi
+                        print(
+                            "[CascadedWaypointController] final-pose close-in heading correction added "
+                            f"k_alpha*alpha={(self.k_alpha * alpha):.3f} "
+                            f"k_heading*e_psi={(self.k_heading * e_psi):.3f}"
+                        )
         else:
             vx_ref = self.k_rho * ex_body
 
             # Differential drive cannot translate laterally. If the waypoint lies
             # far off the body x-axis, prioritize turning in place before driving.
-            if abs(alpha) > self.align_turn_thresh:
+            if align_turn_active:
                 vx_ref = 0.0
+                print(
+                    "[CascadedWaypointController] align-turn active "
+                    f"|alpha|={abs(alpha):.3f} > {self.align_turn_thresh:.3f}; zeroing vx_ref"
+                )
 
             omega_ref = self.k_alpha * alpha + self.k_heading * e_psi
 
+        raw_vx_ref = vx_ref
+        raw_omega_ref = omega_ref
         vx_ref = float(np.clip(vx_ref, -self.v_max, self.v_max))
         omega_ref = float(np.clip(omega_ref, -self.omega_max, self.omega_max))
+        if vx_ref != raw_vx_ref or omega_ref != raw_omega_ref:
+            print(
+                "[CascadedWaypointController] reference clamp "
+                f"vx_ref: {raw_vx_ref:.3f} -> {vx_ref:.3f}, "
+                f"omega_ref: {raw_omega_ref:.3f} -> {omega_ref:.3f}"
+            )
 
-        vx_meas, _ = state.body_velocity()
+        vx_meas, vy_meas = state.body_velocity()
         omega_meas = state.heading_rate
 
         vx_cmd = vx_ref + self.kv_inner * (vx_ref - vx_meas)
         omega_cmd = omega_ref + self.komega_inner * (omega_ref - omega_meas)
+        wheel_rates = self.body_twist_to_wheel_rates(vx_cmd, omega_cmd)
+
         print(
-            f"vx_cmd: {vx_cmd}, omega_cmd: {omega_cmd}, vx_ref: {vx_ref}, omega_ref: {omega_ref}"
+            "[CascadedWaypointController] "
+            f"refs=(vx={vx_ref:.3f}, omega={omega_ref:.3f}) "
+            f"meas=(vx={vx_meas:.3f}, vy={vy_meas:.3f}, omega={omega_meas:.3f}) "
+            f"cmd=(vx={vx_cmd:.3f}, omega={omega_cmd:.3f}) "
+            f"wheel_rates={tuple(round(w, 3) for w in wheel_rates)}"
         )
 
-        # vx_cmd = float(np.clip(vx_cmd, -self.v_max, self.v_max))
-        # omega_cmd = float(np.clip(omega_cmd, -self.omega_max, self.omega_max))
-
-        wheel_rates = self.body_twist_to_wheel_rates(vx_cmd, omega_cmd)
         return DifferentialDriveCommand(
             vx=vx_cmd, vy=0.0, omega=omega_cmd, wheel_rates=wheel_rates
         )
