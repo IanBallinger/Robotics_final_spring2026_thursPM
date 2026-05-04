@@ -9,11 +9,19 @@ import json
 import math
 import socket
 import threading
-import cv2
-import numpy as np
 import os
 import re
 import shutil
+from pathlib import Path
+
+UR5_ROOT = Path(__file__).resolve().parents[1]
+if str(UR5_ROOT) not in sys.path:
+    sys.path.insert(0, str(UR5_ROOT))
+
+try:
+    from subtasks.example_subtask import _get_or_start_vision_feeds
+except Exception:
+    _get_or_start_vision_feeds = None
 
 left_arm_ip = "192.168.1.101"
 right_arm_ip = "192.168.1.102"
@@ -139,19 +147,7 @@ variables = ["timestamp",
                   "robot_status_bits",
                   "safety_status_bits"]
 
-# HSV color thresholds (tuned from morphOps_streaming.py)
-CAMERA_COLORS = {
-    'purple': {'lower': np.array([156,  83,   0]), 'upper': np.array([180, 176, 143])},
-    'yellow': {'lower': np.array([ 13, 255, 120]), 'upper': np.array([ 98, 255, 208])},
-    'green':  {'lower': np.array([ 53,  90, 128]), 'upper': np.array([ 87, 180, 221])},
-    'tan':    {'lower': np.array([ 40,  71, 139]), 'upper': np.array([ 56, 195, 255])},
-    'blue':   {'lower': np.array([ 95, 105, 158]), 'upper': np.array([103, 255, 255])},
-    'red':    {'lower': np.array([  1, 180, 131]), 'upper': np.array([  3, 255, 236])},
-}
-CM_PIXEL  = 54.0 / 275  # pixels -> cm
-CENTER_X  = 337.5       # camera origin in pixels
-CENTER_Y  = 337.5
-VISION_Z  = 0.1         # fixed z: top-down camera (metres above table plane)
+VISION_Z = 0.1  # fallback z when vision feed reports x/y only
 
 
 def _send_stream_packet(stream_socket, stream_send_lock, packet):
@@ -163,60 +159,80 @@ def _send_stream_packet(stream_socket, stream_send_lock, packet):
         stream_socket.sendall(payload)
 
 
-def run_camera_detection(stream_socket, stream_target, stop_event, stream_send_lock, camera_index=2, color_to_target_label=None):
-    """Background thread: detect coloured objects and stream vision packets."""
-    cap = cv2.VideoCapture(camera_index)
-    kernel = np.ones((5, 5), np.uint8)
-    iters = 3
-    packet_count = 0
-    print(f"Camera thread started (index {camera_index}). Streaming to {stream_target} via TCP.")
+def _vision_point_to_detection(label, point, cam_spec_key=-1, cam_axis_pair=None, cam_index=-1):
+    x = float(point.get("x", 0.0))
+    y = float(point.get("y", 0.0))
+    z = float(point.get("z", VISION_Z))
+    point_axis_pair = point.get("axis_pair", None)
+    axis_pair = tuple(point_axis_pair) if point_axis_pair is not None else tuple(cam_axis_pair or ("x", "y"))
+    spec_key = point.get("spec_key", cam_spec_key)
+    camera_index = point.get("camera_index", cam_index)
+    if len(axis_pair) >= 2 and axis_pair[1] == "z" and "z" in point:
+        z = float(point.get("z", 0.0))
+
+    return {
+        "label": str(label),
+        "color": str(point.get("target_name", label)),
+        "position": [round(x, 4), round(y, 4), round(z, 4)],
+        "axis_pair": list(axis_pair),
+        "camera_index": int(camera_index),
+        "spec_key": int(spec_key) if spec_key is not None else -1,
+    }
+
+
+def run_camera_detection(stream_socket, stream_target, stop_event, stream_send_lock, vision_params=None):
+    """Background thread: stream detections from shared threaded vision feeds."""
+    if _get_or_start_vision_feeds is None:
+        print("Warning: vision feed module unavailable; camera thread disabled.")
+        return
+
+    feeds = None
+    try:
+        feeds = _get_or_start_vision_feeds(params=vision_params or {})
+    except Exception as exc:
+        print(f"Warning: failed to initialize shared vision feeds: {exc}")
+        return
+
+    print(f"Camera stream thread started (shared feeds). Streaming to {stream_target} via TCP.")
     try:
         while not stop_event.is_set():
-            ret, frame = cap.read()
-            if not ret:
-                time.sleep(0.05)
-                continue
-
-            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-
+            snapshot = feeds.snapshot()
             frame_detections = []
-
-            for color_name, rng in CAMERA_COLORS.items():
-                mask = cv2.inRange(hsv, rng['lower'], rng['upper'])
-                opened  = cv2.morphologyEx(mask,   cv2.MORPH_OPEN,  kernel, iterations=iters)
-                closed  = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel, iterations=iters)
-                contours, _ = cv2.findContours(closed, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-
-                for cnt in contours:
-                    if cv2.contourArea(cnt) < 500:
-                        continue
-                    x, y, w, h = cv2.boundingRect(cnt)
-                    xc = x + w // 2
-                    yc = y + h // 2
-                    x_cm = (xc - CENTER_X) * CM_PIXEL
-                    y_cm = (CENTER_Y - yc) * CM_PIXEL
-
-                    resolved_label = color_to_target_label.get(color_name, color_name) if color_to_target_label else color_name
-                    frame_detections.append(
-                        {
-                            "label": str(resolved_label),
-                            "color": color_name,
-                            "position": [round(x_cm / 100.0, 4), round(y_cm / 100.0, 4), VISION_Z],
-                            "x_cm": round(float(x_cm), 3),
-                            "y_cm": round(float(y_cm), 3),
-                            "bbox_xywh": [int(x), int(y), int(w), int(h)],
-                        }
-                    )
-
+            latest_by_label = {}
             now_ts = time.time()
+
+            for cam_data in snapshot.values():
+                cam_spec_raw = cam_data.get("spec_key", -1)
+                cam_spec_key = int(cam_spec_raw) if cam_spec_raw is not None else -1
+                cam_axis_pair = tuple(cam_data.get("axis_pair", ("x", "y")))
+                cam_index = -1
+                targets = cam_data.get("targets", {})
+                for label, point in targets.items():
+                    det = _vision_point_to_detection(
+                        label,
+                        point,
+                        cam_spec_key=cam_spec_key,
+                        cam_axis_pair=cam_axis_pair,
+                        cam_index=cam_index,
+                    )
+                    frame_detections.append(det)
+
+                    point_ts = float(point.get("timestamp", now_ts))
+                    prev = latest_by_label.get(label)
+                    if prev is None or point_ts > float(prev.get("timestamp", 0.0)):
+                        latest_by_label[label] = {
+                            "position": [
+                                float(det["position"][0]),
+                                float(det["position"][1]),
+                                float(det["position"][2]),
+                            ],
+                            "timestamp": point_ts,
+                            "color": det["color"],
+                        }
+
             with vision_targets_lock:
                 latest_target_positions.clear()
-                for det in frame_detections:
-                    latest_target_positions[str(det["label"])] = {
-                        "position": [float(det["position"][0]), float(det["position"][1]), float(det["position"][2])],
-                        "timestamp": now_ts,
-                        "color": det["color"],
-                    }
+                latest_target_positions.update({str(k): v for k, v in latest_by_label.items()})
 
             if frame_detections:
                 packet = {
@@ -226,16 +242,16 @@ def run_camera_detection(stream_socket, stream_target, stop_event, stream_send_l
                 }
                 try:
                     _send_stream_packet(stream_socket, stream_send_lock, packet)
-                except Exception as e:
-                    print(f"Vision TCP send error: {e}")
+                except Exception as exc:
+                    print(f"Vision TCP send error: {exc}")
 
-            cv2.imshow("Camera (record.py)", frame)
-            cv2.waitKey(3)
-            packet_count += 1
+            time.sleep(0.03)
     finally:
-        cap.release()
-        cv2.destroyAllWindows()
-        print("Camera thread stopped.")
+        try:
+            feeds.stop()
+        except Exception:
+            pass
+        print("Camera stream thread stopped.")
 
 
 def parse_args(args):
@@ -464,6 +480,65 @@ def _offset_and_distance(arm_pose, target_position):
     dz = float(target_position[2]) - float(arm_pose[2])
     return [dx, dy, dz], math.sqrt(dx * dx + dy * dy + dz * dz)
 
+
+def _segment_path(base_path, segment_idx):
+    if segment_idx <= 0:
+        return base_path
+    root, ext = os.path.splitext(base_path)
+    return f"{root}_segment{segment_idx:02d}{ext}"
+
+
+def _stop_rtde_recording_safe(rtde_obj):
+    if rtde_obj is None:
+        return
+    try:
+        rtde_obj.stopFileRecording()
+    except Exception:
+        pass
+
+
+def _start_rtde_segment(left_ip, right_ip, frequency, left_base_path, right_base_path, segment_idx):
+    left_seg = _segment_path(left_base_path, segment_idx)
+    right_seg = _segment_path(right_base_path, segment_idx)
+    rtde_left = RTDEReceive(left_ip, frequency)
+    rtde_right = RTDEReceive(right_ip, frequency)
+    rtde_left.startFileRecording(left_seg, variables)
+    rtde_right.startFileRecording(right_seg, variables)
+    return rtde_left, rtde_right, left_seg, right_seg
+
+
+def _merge_csv_segments(segment_paths, merged_output_path):
+    if not segment_paths:
+        return
+    if len(segment_paths) == 1 and os.path.abspath(segment_paths[0]) == os.path.abspath(merged_output_path):
+        return
+
+    tmp_path = merged_output_path + ".tmpmerge"
+    wrote_any = False
+
+    with open(tmp_path, "w", encoding="utf-8", newline="") as out_fh:
+        for idx, seg in enumerate(segment_paths):
+            if not os.path.exists(seg):
+                continue
+            with open(seg, "r", encoding="utf-8", newline="") as in_fh:
+                lines = in_fh.readlines()
+            if not lines:
+                continue
+            if not wrote_any:
+                out_fh.writelines(lines)
+                wrote_any = True
+                continue
+            if len(lines) > 1:
+                out_fh.writelines(lines[1:])
+
+    if wrote_any:
+        os.replace(tmp_path, merged_output_path)
+    else:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
 def main(args):
     """Main entry point allowing external calls
 
@@ -477,8 +552,6 @@ def main(args):
     task_context = load_task_context(args.task_graph_file, args.task_id)
     if args.output and args.output != "robot_data.csv":
         print("Warning: --output is deprecated and ignored. Using task-name-derived trace filenames.")
-    target_coloring = task_context.get("target_coloring", {})
-    color_to_target_label = {str(v): str(k) for k, v in target_coloring.items()}
     dependent_item_label = str(task_context.get("dependent_item_label", ""))
     if args.task_id:
         print(
@@ -507,9 +580,13 @@ def main(args):
     # Default: camera ON unless explicitly disabled via --no-camera.
     use_camera = not args.no_camera
     if use_camera and stream_socket and stream_target:
+        vision_params = {
+            "task_graph_file": args.task_graph_file,
+            "vision_camera_scan_max_index": max(args.camera_index, 6),
+        }
         camera_thread = threading.Thread(
             target=run_camera_detection,
-            args=(stream_socket, stream_target, camera_stop, stream_send_lock, args.camera_index, color_to_target_label),
+            args=(stream_socket, stream_target, camera_stop, stream_send_lock, vision_params),
             daemon=True,
         )
         camera_thread.start()
@@ -536,8 +613,8 @@ def main(args):
         return
 
     # --- Full robot mode ---
-    rtde_r_left = RTDEReceive(args.ip, args.frequency)
-    rtde_r_right = RTDEReceive(args.right_ip, args.frequency)
+    rtde_r_left = None
+    rtde_r_right = None
 
     # Initialize gripper control interfaces
     try:
@@ -584,8 +661,20 @@ def main(args):
             dependent_item_label,
         )
 
-    rtde_r_left.startFileRecording(left_output, variables)
-    rtde_r_right.startFileRecording(right_output, variables)
+    segment_index = 0
+    left_segments = []
+    right_segments = []
+
+    rtde_r_left, rtde_r_right, left_seg_path, right_seg_path = _start_rtde_segment(
+        args.ip,
+        args.right_ip,
+        args.frequency,
+        left_output,
+        right_output,
+        segment_index,
+    )
+    left_segments.append(left_seg_path)
+    right_segments.append(right_seg_path)
     if stream_target:
         print(
             f"Data recording started (+ TCP stream to {stream_target[0]}:{stream_target[1]}), "
@@ -605,12 +694,46 @@ def main(args):
         while recording_active:
             start = time.time()
 
-            left_timestamp = rtde_r_left.getTimestamp()
-            right_timestamp = rtde_r_right.getTimestamp()
-            left_pose = rtde_r_left.getActualTCPPose()
-            right_pose = rtde_r_right.getActualTCPPose()
-            left_q = rtde_r_left.getActualQ()
-            right_q = rtde_r_right.getActualQ()
+            try:
+                left_timestamp = rtde_r_left.getTimestamp()
+                right_timestamp = rtde_r_right.getTimestamp()
+                left_pose = rtde_r_left.getActualTCPPose()
+                right_pose = rtde_r_right.getActualTCPPose()
+                left_q = rtde_r_left.getActualQ()
+                right_q = rtde_r_right.getActualQ()
+            except Exception as exc:
+                print(f"\nWarning: RTDE receive dropped ({exc}). Attempting auto-recovery...")
+                _stop_rtde_recording_safe(rtde_r_left)
+                _stop_rtde_recording_safe(rtde_r_right)
+
+                recovered = False
+                while recording_active and not recovered:
+                    try:
+                        segment_index += 1
+                        rtde_r_left, rtde_r_right, left_seg_path, right_seg_path = _start_rtde_segment(
+                            args.ip,
+                            args.right_ip,
+                            args.frequency,
+                            left_output,
+                            right_output,
+                            segment_index,
+                        )
+                        left_segments.append(left_seg_path)
+                        right_segments.append(right_seg_path)
+                        print(
+                            f"RTDE reconnected; continuing recording in segments "
+                            f"{left_seg_path} and {right_seg_path}"
+                        )
+                        recovered = True
+                        time.sleep(0.2)
+                    except Exception as rec_exc:
+                        print(f"RTDE reconnect failed: {rec_exc}; retrying in 1s")
+                        time.sleep(1.0)
+
+                if not recovered:
+                    break
+                continue
+
             left_task_xyz = base_to_global_task_xyz(left_pose[:3], "left")
             right_task_xyz = base_to_global_task_xyz(right_pose[:3], "right")
 
@@ -742,19 +865,19 @@ def main(args):
             listener.stop()
         except Exception:
             pass
-        try:
-            rtde_r_left.stopFileRecording()
-        except Exception:
-            pass
-        try:
-            rtde_r_right.stopFileRecording()
-        except Exception:
-            pass
+        _stop_rtde_recording_safe(rtde_r_left)
+        _stop_rtde_recording_safe(rtde_r_right)
         camera_stop.set()
         if camera_thread:
             camera_thread.join(timeout=2)
         if stream_socket:
             stream_socket.close()
+
+        try:
+            _merge_csv_segments(left_segments, left_output)
+            _merge_csv_segments(right_segments, right_output)
+        except Exception as exc:
+            print(f"Warning: failed to merge RTDE segments: {exc}")
 
         try:
             shutil.copy2(left_output, left_output_copy)

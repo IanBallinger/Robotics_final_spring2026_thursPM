@@ -22,7 +22,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import cv2
 import numpy as np
@@ -35,6 +35,16 @@ _DEMO_DIR = _THIS_DIR / "demo_4_16"
 if str(_DEMO_DIR) not in sys.path:
     sys.path.append(str(_DEMO_DIR))
 from robotiq_gripper_control import RobotiqGripper  # noqa: E402
+
+try:
+    from subtasks.example_subtask import _get_or_start_vision_feeds
+except Exception:
+    _get_or_start_vision_feeds = None
+
+try:
+    from task_graph_visualizer import TaskGraphStateVisualizer
+except Exception:
+    TaskGraphStateVisualizer = None  # type: ignore
 
 
 LEFT_ARM_IP = "192.168.1.101"
@@ -135,6 +145,29 @@ class QueuedTask:
     params: dict = field(compare=False, default_factory=dict)
 
 
+OPEN_MICROWAVE_TASK_TEMPLATE = {
+    "name": "open_microwave_door",
+    "points": 1.0,
+    "arm": "left",
+    "blocks_arms": ["left"],
+    "unblocks_arms": [],
+    "score_token": "open_microwave_door",
+    "max_score_count": 3,
+    "params": {
+        "door_handle_pose_source": "vision",
+        "safe_approach_offset_m": 0.1,
+        "requires_resource_available_for": "table_area",
+        "resource_action": "acquire",
+        "resource": "table_area",
+        "resource_item": "microwave_open",
+    },
+}
+
+DOOR_OPEN_FOR_LOAD_TASK_ID = "door_open_for_load"
+PRESS_STOP_FOR_BOWL_TASK_ID = "press_stop_for_bowl"
+PRESS_STOP_FOR_PLATE_TASK_ID = "press_stop_for_plate"
+
+
 class Supervisor:
     """Main orchestration class for dual-arm collaboration."""
 
@@ -161,6 +194,9 @@ class Supervisor:
         self._max_consecutive_idle_per_arm: int = 2
         self._score_counts: Dict[str, int] = {}
         self._earned_points_total: float = 0.0
+        self._completed_task_ids: Set[str] = set()
+        self._task_catalog: Dict[str, Dict[str, Any]] = {}
+        self._visual_step_counter: int = 0
         self.subtasks_dir = subtasks_dir or (_THIS_DIR / "subtasks")
         self._ensure_subtasks_dir()
         self.reload_subtasks()
@@ -246,8 +282,68 @@ class Supervisor:
         stop_event: threading.Event,
         send_lock: threading.Lock,
         camera_index: int,
+        vision_params: Optional[dict] = None,
     ) -> threading.Thread:
         def worker():
+            if _get_or_start_vision_feeds is not None:
+                feeds = None
+                try:
+                    feeds = _get_or_start_vision_feeds(params=vision_params or {})
+                except Exception as exc:
+                    print(f"[Supervisor] Warning: failed to initialize shared vision feeds: {exc}")
+                    feeds = None
+
+                if feeds is not None:
+                    while not stop_event.is_set():
+                        snapshot = feeds.snapshot()
+                        detections = []
+                        frame_ts = time.time()
+
+                        for cam_data in snapshot.values():
+                            cam_spec_raw = cam_data.get("spec_key", -1)
+                            cam_spec_key = int(cam_spec_raw) if cam_spec_raw is not None else -1
+                            cam_axis_pair = tuple(cam_data.get("axis_pair", ("x", "y")))
+                            targets = cam_data.get("targets", {})
+                            for label, point in targets.items():
+                                point_axis_pair = point.get("axis_pair", None)
+                                axis_pair = tuple(point_axis_pair) if point_axis_pair is not None else cam_axis_pair
+                                x = float(point.get("x", 0.0))
+                                y = float(point.get("y", 0.0))
+                                z = float(point.get("z", VISION_Z))
+                                if len(axis_pair) >= 2 and axis_pair[1] == "z" and "z" in point:
+                                    z = float(point.get("z", 0.0))
+
+                                detections.append(
+                                    {
+                                        "label": str(label),
+                                        "color": str(point.get("target_name", label)),
+                                        "position": [round(x, 4), round(y, 4), round(z, 4)],
+                                        "axis_pair": list(axis_pair),
+                                        "camera_index": int(point.get("camera_index", -1)),
+                                        "spec_key": int(point.get("spec_key", cam_spec_key)) if point.get("spec_key", cam_spec_key) is not None else -1,
+                                    }
+                                )
+
+                        if detections:
+                            packet = {
+                                "packet_type": "vision_frame",
+                                "timestamp": frame_ts,
+                                "detections": detections,
+                            }
+                            try:
+                                with send_lock:
+                                    udp_socket.sendto(json.dumps(packet).encode("utf-8"), udp_target)
+                            except OSError:
+                                pass
+                        time.sleep(0.03)
+
+                    try:
+                        feeds.stop()
+                    except Exception:
+                        pass
+                    return
+
+            # Fallback local vision path (kept for compatibility if shared feed import fails).
             cap = cv2.VideoCapture(camera_index)
             kernel = np.ones((5, 5), np.uint8)
             while not stop_event.is_set():
@@ -257,6 +353,7 @@ class Supervisor:
                     continue
 
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+                frame_detections = []
                 for color_name, rng in CAMERA_COLORS.items():
                     mask = cv2.inRange(hsv, rng["lower"], rng["upper"])
                     opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=3)
@@ -270,17 +367,28 @@ class Supervisor:
                         yc = y + h // 2
                         x_cm = (xc - CENTER_X) * CM_PIXEL
                         y_cm = (CENTER_Y - yc) * CM_PIXEL
-                        packet = {
-                            "position": [round(x_cm / 100.0, 4), round(y_cm / 100.0, 4), VISION_Z],
-                            "color": color_name,
-                            "x_cm": round(float(x_cm), 3),
-                            "y_cm": round(float(y_cm), 3),
-                        }
-                        try:
-                            with send_lock:
-                                udp_socket.sendto(json.dumps(packet).encode("utf-8"), udp_target)
-                        except OSError:
-                            pass
+                        frame_detections.append(
+                            {
+                                "label": color_name,
+                                "color": color_name,
+                                "position": [round(x_cm / 100.0, 4), round(y_cm / 100.0, 4), VISION_Z],
+                                "axis_pair": ["x", "y"],
+                                "camera_index": int(camera_index),
+                                "spec_key": -1,
+                            }
+                        )
+
+                if frame_detections:
+                    packet = {
+                        "packet_type": "vision_frame",
+                        "timestamp": time.time(),
+                        "detections": frame_detections,
+                    }
+                    try:
+                        with send_lock:
+                            udp_socket.sendto(json.dumps(packet).encode("utf-8"), udp_target)
+                    except OSError:
+                        pass
 
                 cv2.imshow("Camera (Supervisor)", frame)
                 cv2.waitKey(3)
@@ -315,8 +423,11 @@ class Supervisor:
         camera_stop = threading.Event()
         camera_thread = None
         if camera_enabled and udp_socket is not None and udp_target is not None:
+            vision_params = {
+                "vision_camera_scan_max_index": max(int(camera_index), 6),
+            }
             camera_thread = self._start_camera_thread(
-                udp_socket, udp_target, camera_stop, send_lock, camera_index
+                udp_socket, udp_target, camera_stop, send_lock, camera_index, vision_params
             )
 
         if no_robot:
@@ -945,7 +1056,9 @@ class Supervisor:
         Use params:
         - requires_resource_available_for: <resource_name>
  sh        - requires_resource_occupied_for: <resource_name>
+        - requires_resource_not_occupied_for: <resource_name>
         - requires_resource_item: <item_name> (optional, defaults to target_label)
+        - requires_resource_not_item: <item_name> (optional, defaults to requires_resource_item)
         """
         params = task.params or {}
         item = str(params.get("requires_resource_item", params.get("target_label", ""))).strip()
@@ -961,8 +1074,10 @@ class Supervisor:
             capacity = int(cfg.get("capacity", 0))
             mutex_items: Set[str] = set(cfg.get("mutex_items", set()))
 
+            same_item_held = bool(item) and int(held.get(item, 0)) > 0
+
             total_held = sum(int(v) for v in held.values())
-            if total_held >= capacity:
+            if total_held >= capacity and not same_item_held:
                 return False
 
             if item and item in mutex_items:
@@ -982,6 +1097,22 @@ class Supervisor:
                 return False
             if item:
                 if int(held.get(item, 0)) <= 0:
+                    return False
+
+        not_occupied_resource_name = str(params.get("requires_resource_not_occupied_for", "")).strip()
+        if not_occupied_resource_name:
+            cfg = self._resource_constraints.get(not_occupied_resource_name)
+            if cfg is None:
+                return False
+
+            held = self._resource_state.get(not_occupied_resource_name, {})
+            not_item = str(params.get("requires_resource_not_item", item)).strip()
+            if not_item:
+                if int(held.get(not_item, 0)) > 0:
+                    return False
+            else:
+                total_held = sum(int(v) for v in held.values())
+                if total_held > 0:
                     return False
 
         return True
@@ -1007,8 +1138,12 @@ class Supervisor:
                 return False
         return True
 
-    def _apply_resource_action(self, task: QueuedTask):
-        if not task.resource_action or not task.resource:
+    def _apply_resource_action_on_start(self, task: QueuedTask):
+        """Apply resource usage at execution start.
+
+        Acquire actions reserve capacity immediately when the task is dispatched.
+        """
+        if task.resource_action != "acquire" or not task.resource:
             return
 
         if task.resource not in self._resource_state:
@@ -1019,16 +1154,42 @@ class Supervisor:
         if not item:
             return
 
-        if task.resource_action == "acquire":
-            held[item] = int(held.get(item, 0)) + 1
+        held[item] = int(held.get(item, 0)) + 1
+
+    def _apply_resource_action_on_end(self, task: QueuedTask):
+        """Apply resource usage transition at execution end.
+
+        Release actions free capacity only after the task finishes successfully.
+        """
+        if task.resource_action != "release" or not task.resource:
             return
 
-        if task.resource_action == "release":
-            current = int(held.get(item, 0))
-            if current <= 1:
-                held.pop(item, None)
-            else:
-                held[item] = current - 1
+        held = self._resource_state.get(task.resource, {})
+        item = task.resource_item
+        if not item:
+            return
+
+        current = int(held.get(item, 0))
+        if current <= 1:
+            held.pop(item, None)
+        else:
+            held[item] = current - 1
+
+    def _rollback_resource_start_if_needed(self, task: QueuedTask):
+        """Rollback start-phase acquire when the task does not complete successfully."""
+        if task.resource_action != "acquire" or not task.resource:
+            return
+
+        held = self._resource_state.get(task.resource, {})
+        item = task.resource_item
+        if not item:
+            return
+
+        current = int(held.get(item, 0))
+        if current <= 1:
+            held.pop(item, None)
+        else:
+            held[item] = current - 1
 
     @staticmethod
     def _is_microwave_close_task(task: QueuedTask) -> bool:
@@ -1351,6 +1512,112 @@ class Supervisor:
             queued.queue_weight = -self._priority_score(queued)
         heapq.heapify(self._task_heap)
 
+    def _reset_visual_tracking(self):
+        self._completed_task_ids = set()
+        self._visual_step_counter = 0
+
+    def _catalog_task(self, queued: QueuedTask):
+        self._task_catalog[queued.task_id] = {
+            "task_id": queued.task_id,
+            "name": queued.name,
+            "arm": queued.arm,
+            "sequence": queued.sequence,
+            "prerequisites": list(queued.prerequisites),
+            "resource_action": queued.resource_action,
+            "resource": queued.resource,
+            "resource_item": queued.resource_item,
+        }
+
+    def _build_visual_snapshot(
+        self,
+        event: str,
+        arm_busy: Optional[Dict[str, bool]] = None,
+        running_by_arm: Optional[Dict[str, Optional[str]]] = None,
+        message: str = "",
+        tick: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        self._visual_step_counter += 1
+        arm_busy = dict(arm_busy or {"left": False, "right": False})
+        running_by_arm = dict(running_by_arm or {"left": None, "right": None})
+
+        queued_by_id: Dict[str, QueuedTask] = {task.task_id: task for task in self._task_heap}
+        running_ids = {task_id for task_id in running_by_arm.values() if task_id}
+
+        tasks = []
+        for task_id, meta in sorted(self._task_catalog.items(), key=lambda item: item[1]["sequence"]):
+            state = "pending"
+            priority = 0.0
+            effective = 0.0
+
+            if task_id in running_ids:
+                state = "running"
+            elif task_id in self._completed_task_ids:
+                state = "completed"
+            elif task_id in queued_by_id:
+                queued = queued_by_id[task_id]
+                priority = self._priority_score(queued)
+                effective = self._effective_points(queued)
+                state = "runnable" if self._is_task_runnable(queued) else "blocked"
+
+            tasks.append(
+                {
+                    "task_id": task_id,
+                    "name": meta["name"],
+                    "arm": meta["arm"],
+                    "prerequisites": list(meta["prerequisites"]),
+                    "state": state,
+                    "priority_score": priority,
+                    "effective_points": effective,
+                }
+            )
+
+        return {
+            "step": self._visual_step_counter,
+            "event": event,
+            "tick": tick,
+            "timestamp": time.time(),
+            "message": message,
+            "pending_count": len(self._task_heap),
+            "blocked_arms": dict(self._blocked_arms),
+            "resource_state": {
+                resource: {item: int(count) for item, count in held.items()}
+                for resource, held in self._resource_state.items()
+            },
+            "resource_constraints": {
+                resource: {
+                    "capacity": int(cfg.get("capacity", 0)),
+                    "mutex_items": sorted(str(item) for item in cfg.get("mutex_items", set())),
+                }
+                for resource, cfg in self._resource_constraints.items()
+            },
+            "arm_busy": arm_busy,
+            "running_by_arm": running_by_arm,
+            "completed_task_ids": sorted(self._completed_task_ids),
+            "earned_points_total": self._earned_points_total,
+            "score_counts": dict(self._score_counts),
+            "tasks": tasks,
+        }
+
+    def _push_visual_snapshot(
+        self,
+        visualizer,
+        event: str,
+        arm_busy: Optional[Dict[str, bool]] = None,
+        running_by_arm: Optional[Dict[str, Optional[str]]] = None,
+        message: str = "",
+        tick: Optional[int] = None,
+    ):
+        if visualizer is None:
+            return
+        snapshot = self._build_visual_snapshot(
+            event=event,
+            arm_busy=arm_busy,
+            running_by_arm=running_by_arm,
+            message=message,
+            tick=tick,
+        )
+        visualizer.push_snapshot(snapshot)
+
     def queue_task(
         self,
         name: str,
@@ -1404,45 +1671,107 @@ class Supervisor:
             params=params_dict,
         )
         self._task_sequence += 1
+        self._catalog_task(queued)
         heapq.heappush(self._task_heap, queued)
 
-    def _enqueue_close_after_open(self, opened_task: QueuedTask):
-        """Queue a generic close-door task after an open-door task completes."""
-        if opened_task.name != "open_microwave_door":
-            return
-
-        # Initial open already has explicit graph-level close tasks.
-        if opened_task.task_id == "open_door":
-            return
-
-        # If there are pending microwave put tasks, keep the door open for loading.
-        pending_put_ids = {"put_bowl", "put_plate"}
-        if any(task_id not in self._completed_tokens for task_id in pending_put_ids):
-            return
-
-        prereqs = [opened_task.task_id]
-        if opened_task.task_id == "door_open_for_unload":
-            prereqs = ["bowl_to_tray"]
-        elif opened_task.task_id == "door_open_for_plate_unload":
-            prereqs = ["plate_to_tray"]
-
-        self.queue_task(
-            name="close_microwave_door",
-            points=1.0,
-            params={
-                "close_force": 15,
-                "resource_action": "release",
-                "resource": "table_area",
-                "resource_item": "microwave_open",
-            },
-            prerequisites=prereqs,
-            arm="left",
-            blocks_arms=[],
-            unblocks_arms=["left"],
-            score_token="close_microwave_door",
-            max_score_count=3,
-            validate_subtask_exists=False,
+    @staticmethod
+    def _is_microwave_open_task(task: QueuedTask) -> bool:
+        return (
+            task.name == "open_microwave_door"
+            and task.resource_action == "acquire"
+            and task.resource == "table_area"
+            and task.resource_item == "microwave_open"
         )
+
+    def _queue_has_microwave_open_task(self) -> bool:
+        for task in self._task_heap:
+            if self._is_microwave_open_task(task) and self._prerequisites_met(task):
+                return True
+        return False
+
+    @staticmethod
+    def _resource_holds_microwave_open(resource_state: Dict[str, Dict[str, int]]) -> bool:
+        held = resource_state.get("table_area", {})
+        return int(held.get("microwave_open", 0)) > 0
+
+    def _task_ready_except_microwave_open_gate(self, task: QueuedTask) -> bool:
+        """True if task is dispatch-ready except for missing microwave_open occupancy."""
+        if task.name == "_idle_wait":
+            return False
+        if task.arm not in {"right", "both", "any"}:
+            return False
+        if not self._task_requires_microwave_open(task):
+            return False
+        missing_prerequisites = [
+            token
+            for token in self._missing_prerequisites(task)
+            if token != DOOR_OPEN_FOR_LOAD_TASK_ID
+        ]
+        if missing_prerequisites:
+            return False
+        # Exclude the occupied gate itself; check the rest of core run constraints.
+        for arm in self._task_target_arms(task):
+            if arm in self._blocked_arms and arm not in task.unblocks_arms:
+                return False
+        if not self._resource_action_allowed(task):
+            return False
+        if not self._arm_gate_allowed(task):
+            return False
+        if not self._gripper_gate_allowed(task):
+            return False
+        return True
+
+    def _enqueue_open_for_right_arm_if_needed(
+        self,
+        arm_busy: Dict[str, bool],
+        running_by_arm: Optional[Dict[str, Optional[str]]] = None,
+    ) -> bool:
+        """Queue one canonical open-door task when a right-arm task needs microwave_open.
+
+        Returns True when a task was enqueued.
+        """
+        if self._resource_holds_microwave_open(self._resource_state):
+            return False
+        if self._queue_has_microwave_open_task():
+            return False
+
+        if running_by_arm:
+            for running_task_id in running_by_arm.values():
+                if not running_task_id:
+                    continue
+                meta = self._task_catalog.get(running_task_id, {})
+                if (
+                    meta.get("name") == "open_microwave_door"
+                    and str(meta.get("resource_action", "")) == "acquire"
+                    and str(meta.get("resource", "")) == "table_area"
+                    and str(meta.get("resource_item", "")) == "microwave_open"
+                ):
+                    return False
+
+        for candidate in self._task_heap:
+            if not self._task_ready_except_microwave_open_gate(candidate):
+                continue
+
+            dispatch = self._task_reserved_arms(candidate, dict(arm_busy))
+            if dispatch is None:
+                continue
+
+            self.queue_task(
+                name=OPEN_MICROWAVE_TASK_TEMPLATE["name"],
+                points=float(OPEN_MICROWAVE_TASK_TEMPLATE["points"]),
+                params=dict(OPEN_MICROWAVE_TASK_TEMPLATE["params"]),
+                task_id=DOOR_OPEN_FOR_LOAD_TASK_ID,
+                prerequisites=[],
+                arm=str(OPEN_MICROWAVE_TASK_TEMPLATE["arm"]),
+                blocks_arms=list(OPEN_MICROWAVE_TASK_TEMPLATE["blocks_arms"]),
+                unblocks_arms=list(OPEN_MICROWAVE_TASK_TEMPLATE["unblocks_arms"]),
+                score_token=str(OPEN_MICROWAVE_TASK_TEMPLATE["score_token"]),
+                max_score_count=int(OPEN_MICROWAVE_TASK_TEMPLATE["max_score_count"]),
+                validate_subtask_exists=False,
+            )
+            return True
+
+        return False
 
     def _queue_has_microwave_close_task(self) -> bool:
         for task in self._task_heap:
@@ -1489,14 +1818,69 @@ class Supervisor:
             validate_subtask_exists=False,
         )
 
+    def _queue_has_task_id(self, task_id: str) -> bool:
+        for task in self._task_heap:
+            if task.task_id == task_id:
+                return True
+        return False
+
+    def _enqueue_press_stop_for_food_if_needed(self, completed_task: QueuedTask):
+        """Queue canonical press-stop tasks after food is placed in microwave.
+
+        This reuses the same subtask name (`press_microwave_stop`) for each food
+        without requiring duplicate static entries in the autonomy graph.
+        """
+        by_put_task = {
+            "put_bowl": {
+                "task_id": PRESS_STOP_FOR_BOWL_TASK_ID,
+                "target_food": "microwavable_bowl",
+                "prerequisites": ["close_door", "put_bowl"],
+            },
+            "put_plate": {
+                "task_id": PRESS_STOP_FOR_PLATE_TASK_ID,
+                "target_food": "microwavable_plate",
+                "prerequisites": ["put_plate"],
+            },
+        }
+
+        cfg = by_put_task.get(completed_task.task_id)
+        if cfg is None:
+            return
+
+        task_id = str(cfg["task_id"])
+        if task_id in self._completed_tokens or self._queue_has_task_id(task_id):
+            return
+
+        self.queue_task(
+            name="press_microwave_stop",
+            points=1.0,
+            params={
+                "button": "stop",
+                "target_food": str(cfg["target_food"]),
+                "requires_resource_available_for": "table_area",
+                "requires_resource_item": "microwave_open",
+                "requires_resource_not_occupied_for": "table_area",
+                "requires_resource_not_item": "microwave_open",
+            },
+            task_id=task_id,
+            prerequisites=list(cfg["prerequisites"]),
+            arm="right",
+            blocks_arms=[],
+            unblocks_arms=[],
+            score_token="press_microwave_stop_with_food_inside",
+            max_score_count=2,
+            validate_subtask_exists=False,
+        )
+
     def _enqueue_dynamic_followups(self, completed_task: QueuedTask):
-        self._enqueue_close_after_open(completed_task)
+        self._enqueue_press_stop_for_food_if_needed(completed_task)
         self._enqueue_close_for_resource_release(completed_task)
 
     def run_autonomy(
         self,
         max_tasks: Optional[int] = None,
         parallel_arms: bool = True,
+        visualizer=None,
     ) -> List[Tuple[str, bool, float, str]]:
         """Run autonomy tasks with optional parallel per-arm execution.
 
@@ -1504,9 +1888,10 @@ class Supervisor:
         per arm. The same prerequisite/resource/blocking rules are respected.
         """
         if not parallel_arms:
-            return self._run_autonomy_sequential(max_tasks=max_tasks)
+            return self._run_autonomy_sequential(max_tasks=max_tasks, visualizer=visualizer)
 
         self._completed_tokens = set()
+        self._reset_visual_tracking()
         self._blocked_arms = {}
         self._resource_state = {resource: {} for resource in self._resource_constraints}
         self._grasped_object_by_arm = {"left": None, "right": None}
@@ -1517,7 +1902,16 @@ class Supervisor:
         dispatched = 0
         completed = 0
         arm_busy: Dict[str, bool] = {"left": False, "right": False}
+        running_by_arm: Dict[str, Optional[str]] = {"left": None, "right": None}
         consecutive_idle_by_arm: Dict[str, int] = {"left": 0, "right": 0}
+
+        self._push_visual_snapshot(
+            visualizer,
+            event="start",
+            arm_busy=arm_busy,
+            running_by_arm=running_by_arm,
+            message="autonomy run started",
+        )
 
         work_queues = {
             "left": queue.Queue(),
@@ -1562,29 +1956,43 @@ class Supervisor:
 
                     for arm_name in reserved_arms:
                         arm_busy[arm_name] = False
+                        running_by_arm[arm_name] = None
 
                     if err is not None:
+                        self._rollback_resource_start_if_needed(task)
                         pending_exception = err
                         break
 
                     if ok:
                         self._record_score_if_applicable(task, current_points)
-                        self._apply_resource_action(task)
+                        self._apply_resource_action_on_end(task)
                         self._apply_gripper_state(task)
                         if task.name != "_idle_wait":
                             self._completed_tokens.add(task.task_id)
                             self._completed_tokens.add(task.name)
+                            self._completed_task_ids.add(task.task_id)
                             for arm in task.unblocks_arms:
                                 self._blocked_arms.pop(arm, None)
                             for arm in task.blocks_arms:
                                 self._blocked_arms[arm] = task.task_id
                             self._enqueue_dynamic_followups(task)
+                    else:
+                        self._rollback_resource_start_if_needed(task)
 
                     results.append((task.name, ok, current_points, task.task_id))
                     completed += 1
+                    self._push_visual_snapshot(
+                        visualizer,
+                        event="complete",
+                        arm_busy=arm_busy,
+                        running_by_arm=running_by_arm,
+                        message=f"completed {task.task_id} ok={ok}",
+                    )
 
                 if pending_exception is not None:
                     break
+
+                self._enqueue_open_for_right_arm_if_needed(arm_busy, running_by_arm)
 
                 # Stop dispatching when max-tasks cap reached; allow in-flight tasks to finish.
                 dispatch_allowed = max_tasks is None or dispatched < max_tasks
@@ -1641,11 +2049,21 @@ class Supervisor:
 
                     for arm_name in reserved_arms:
                         arm_busy[arm_name] = True
+                        running_by_arm[arm_name] = selected.task_id
+
+                    self._apply_resource_action_on_start(selected)
 
                     current_points = self._effective_points(selected)
                     work_queues[dispatch_arm].put((selected, current_points, reserved_arms))
                     dispatched += 1
                     dispatched_any = True
+                    self._push_visual_snapshot(
+                        visualizer,
+                        event="dispatch",
+                        arm_busy=arm_busy,
+                        running_by_arm=running_by_arm,
+                        message=f"dispatched {selected.task_id} on {dispatch_arm}",
+                    )
 
                     if selected.name == "_idle_wait":
                         consecutive_idle_by_arm[dispatch_arm] = (
@@ -1670,29 +2088,49 @@ class Supervisor:
                     task, current_points, reserved_arms, ok, err = completion_queue.get()
                     for arm_name in reserved_arms:
                         arm_busy[arm_name] = False
+                        running_by_arm[arm_name] = None
 
                     if err is not None:
+                        self._rollback_resource_start_if_needed(task)
                         pending_exception = err
                         break
 
                     if ok:
                         self._record_score_if_applicable(task, current_points)
-                        self._apply_resource_action(task)
+                        self._apply_resource_action_on_end(task)
                         self._apply_gripper_state(task)
                         if task.name != "_idle_wait":
                             self._completed_tokens.add(task.task_id)
                             self._completed_tokens.add(task.name)
+                            self._completed_task_ids.add(task.task_id)
                             for arm in task.unblocks_arms:
                                 self._blocked_arms.pop(arm, None)
                             for arm in task.blocks_arms:
                                 self._blocked_arms[arm] = task.task_id
                             self._enqueue_dynamic_followups(task)
+                    else:
+                        self._rollback_resource_start_if_needed(task)
 
                     results.append((task.name, ok, current_points, task.task_id))
                     completed += 1
+                    self._push_visual_snapshot(
+                        visualizer,
+                        event="complete",
+                        arm_busy=arm_busy,
+                        running_by_arm=running_by_arm,
+                        message=f"completed {task.task_id} ok={ok}",
+                    )
 
             if pending_exception is not None:
                 raise pending_exception
+
+            self._push_visual_snapshot(
+                visualizer,
+                event="final",
+                arm_busy=arm_busy,
+                running_by_arm=running_by_arm,
+                message="autonomy run finished",
+            )
 
             return results
         finally:
@@ -1701,9 +2139,10 @@ class Supervisor:
             for t in workers.values():
                 t.join(timeout=1.0)
 
-    def _run_autonomy_sequential(self, max_tasks: Optional[int] = None) -> List[Tuple[str, bool, float, str]]:
+    def _run_autonomy_sequential(self, max_tasks: Optional[int] = None, visualizer=None) -> List[Tuple[str, bool, float, str]]:
         """Original sequential autonomy loop."""
         self._completed_tokens = set()
+        self._reset_visual_tracking()
         self._blocked_arms = {}
         self._resource_state = {resource: {} for resource in self._resource_constraints}
         self._grasped_object_by_arm = {"left": None, "right": None}
@@ -1711,10 +2150,22 @@ class Supervisor:
         self._earned_points_total = 0.0
         results: List[Tuple[str, bool, float, str]] = []
         executed = 0
+        arm_busy: Dict[str, bool] = {"left": False, "right": False}
+        running_by_arm: Dict[str, Optional[str]] = {"left": None, "right": None}
+
+        self._push_visual_snapshot(
+            visualizer,
+            event="start",
+            arm_busy=arm_busy,
+            running_by_arm=running_by_arm,
+            message="sequential autonomy run started",
+        )
 
         while self._task_heap:
             if max_tasks is not None and executed >= max_tasks:
                 break
+
+            self._enqueue_open_for_right_arm_if_needed(arm_busy, running_by_arm)
 
             self._refresh_queue_weights()
             deferred: List[QueuedTask] = []
@@ -1734,21 +2185,49 @@ class Supervisor:
                 break
 
             current_points = self._effective_points(queued)
+            running_by_arm[queued.arm if queued.arm in {"left", "right"} else "left"] = queued.task_id
+            self._apply_resource_action_on_start(queued)
+            self._push_visual_snapshot(
+                visualizer,
+                event="dispatch",
+                arm_busy=arm_busy,
+                running_by_arm=running_by_arm,
+                message=f"dispatched {queued.task_id}",
+            )
             ok = self.run_subtask(queued.name, params=queued.params)
             if ok:
                 self._record_score_if_applicable(queued, current_points)
-                self._apply_resource_action(queued)
+                self._apply_resource_action_on_end(queued)
                 self._apply_gripper_state(queued)
                 self._completed_tokens.add(queued.task_id)
                 self._completed_tokens.add(queued.name)
+                self._completed_task_ids.add(queued.task_id)
                 for arm in queued.unblocks_arms:
                     self._blocked_arms.pop(arm, None)
                 for arm in queued.blocks_arms:
                     self._blocked_arms[arm] = queued.task_id
                 self._enqueue_dynamic_followups(queued)
+            else:
+                self._rollback_resource_start_if_needed(queued)
 
             results.append((queued.name, ok, current_points, queued.task_id))
             executed += 1
+            running_by_arm = {"left": None, "right": None}
+            self._push_visual_snapshot(
+                visualizer,
+                event="complete",
+                arm_busy=arm_busy,
+                running_by_arm=running_by_arm,
+                message=f"completed {queued.task_id} ok={ok}",
+            )
+
+        self._push_visual_snapshot(
+            visualizer,
+            event="final",
+            arm_busy=arm_busy,
+            running_by_arm=running_by_arm,
+            message="sequential autonomy run finished",
+        )
 
         return results
 
@@ -1793,16 +2272,17 @@ class Supervisor:
                 )
         return blockers
 
-    def simulate_autonomy(self, max_tasks: Optional[int] = None, parallel_arms: bool = True) -> dict:
+    def simulate_autonomy(self, max_tasks: Optional[int] = None, parallel_arms: bool = True, visualizer=None) -> dict:
         """Simulate scheduler progression without running subtasks.
 
         When parallel_arms=True, simulation mirrors the coordinated two-lane
         (left/right) dispatcher used by run_autonomy.
         """
         if not parallel_arms:
-            return self._simulate_autonomy_sequential(max_tasks=max_tasks)
+            return self._simulate_autonomy_sequential(max_tasks=max_tasks, visualizer=visualizer)
 
         self._completed_tokens = set()
+        self._reset_visual_tracking()
         self._blocked_arms = {}
         self._resource_state = {resource: {} for resource in self._resource_constraints}
         self._grasped_object_by_arm = {"left": None, "right": None}
@@ -1812,12 +2292,24 @@ class Supervisor:
         progression: List[dict] = []
         dispatched = 0
         arm_busy: Dict[str, bool] = {"left": False, "right": False}
+        running_by_arm: Dict[str, Optional[str]] = {"left": None, "right": None}
         consecutive_idle_by_arm: Dict[str, int] = {"left": 0, "right": 0}
         tick = 0
+
+        self._push_visual_snapshot(
+            visualizer,
+            event="start",
+            arm_busy=arm_busy,
+            running_by_arm=running_by_arm,
+            message="simulation started",
+            tick=tick,
+        )
 
         while self._task_heap or any(arm_busy.values()):
             if max_tasks is not None and dispatched >= max_tasks:
                 break
+
+            self._enqueue_open_for_right_arm_if_needed(arm_busy, running_by_arm)
 
             launched: List[Tuple[QueuedTask, float, str, List[str]]] = []
             dispatch_allowed = max_tasks is None or dispatched < max_tasks
@@ -1871,10 +2363,21 @@ class Supervisor:
 
                 for arm_name in reserved_arms:
                     arm_busy[arm_name] = True
+                    running_by_arm[arm_name] = selected.task_id
+
+                self._apply_resource_action_on_start(selected)
 
                 current_points = self._effective_points(selected)
                 launched.append((selected, current_points, dispatch_arm, reserved_arms))
                 dispatched += 1
+                self._push_visual_snapshot(
+                    visualizer,
+                    event="dispatch",
+                    arm_busy=arm_busy,
+                    running_by_arm=running_by_arm,
+                    message=f"sim dispatch {selected.task_id} on {dispatch_arm}",
+                    tick=tick,
+                )
                 if selected.name == "_idle_wait":
                     consecutive_idle_by_arm[dispatch_arm] = (
                         consecutive_idle_by_arm.get(dispatch_arm, 0) + 1
@@ -1893,11 +2396,12 @@ class Supervisor:
             # Complete all launched tasks for this simulation tick.
             for queued, current_points, dispatch_arm, reserved_arms in launched:
                 self._record_score_if_applicable(queued, current_points)
-                self._apply_resource_action(queued)
+                self._apply_resource_action_on_end(queued)
                 self._apply_gripper_state(queued)
                 if queued.name != "_idle_wait":
                     self._completed_tokens.add(queued.task_id)
                     self._completed_tokens.add(queued.name)
+                    self._completed_task_ids.add(queued.task_id)
                     for arm in queued.unblocks_arms:
                         self._blocked_arms.pop(arm, None)
                     for arm in queued.blocks_arms:
@@ -1906,6 +2410,7 @@ class Supervisor:
 
                 for arm_name in reserved_arms:
                     arm_busy[arm_name] = False
+                    running_by_arm[arm_name] = None
 
                 progression.append(
                     {
@@ -1925,10 +2430,26 @@ class Supervisor:
                         "max_score_count": queued.max_score_count,
                     }
                 )
+                self._push_visual_snapshot(
+                    visualizer,
+                    event="complete",
+                    arm_busy=arm_busy,
+                    running_by_arm=running_by_arm,
+                    message=f"sim complete {queued.task_id}",
+                    tick=tick,
+                )
 
         pending = len(self._task_heap)
         deadlocked = pending > 0
         blockers = self._pending_blockers() if deadlocked else []
+        self._push_visual_snapshot(
+            visualizer,
+            event="final",
+            arm_busy=arm_busy,
+            running_by_arm=running_by_arm,
+            message="simulation finished",
+            tick=tick,
+        )
         return {
             "executed": progression,
             "executed_count": len(progression),
@@ -1941,9 +2462,10 @@ class Supervisor:
             "earned_points_total": self._earned_points_total,
         }
 
-    def _simulate_autonomy_sequential(self, max_tasks: Optional[int] = None) -> dict:
+    def _simulate_autonomy_sequential(self, max_tasks: Optional[int] = None, visualizer=None) -> dict:
         """Original sequential simulator semantics."""
         self._completed_tokens = set()
+        self._reset_visual_tracking()
         self._blocked_arms = {}
         self._resource_state = {resource: {} for resource in self._resource_constraints}
         self._grasped_object_by_arm = {"left": None, "right": None}
@@ -1952,10 +2474,22 @@ class Supervisor:
 
         progression: List[dict] = []
         executed = 0
+        arm_busy: Dict[str, bool] = {"left": False, "right": False}
+        running_by_arm: Dict[str, Optional[str]] = {"left": None, "right": None}
+
+        self._push_visual_snapshot(
+            visualizer,
+            event="start",
+            arm_busy=arm_busy,
+            running_by_arm=running_by_arm,
+            message="sequential simulation started",
+        )
 
         while self._task_heap:
             if max_tasks is not None and executed >= max_tasks:
                 break
+
+            self._enqueue_open_for_right_arm_if_needed(arm_busy, running_by_arm)
 
             self._refresh_queue_weights()
             deferred: List[QueuedTask] = []
@@ -1975,11 +2509,21 @@ class Supervisor:
                 break
 
             current_points = self._effective_points(queued)
+            running_by_arm[queued.arm if queued.arm in {"left", "right"} else "left"] = queued.task_id
+            self._apply_resource_action_on_start(queued)
+            self._push_visual_snapshot(
+                visualizer,
+                event="dispatch",
+                arm_busy=arm_busy,
+                running_by_arm=running_by_arm,
+                message=f"sim dispatch {queued.task_id}",
+            )
             self._record_score_if_applicable(queued, current_points)
-            self._apply_resource_action(queued)
+            self._apply_resource_action_on_end(queued)
             self._apply_gripper_state(queued)
             self._completed_tokens.add(queued.task_id)
             self._completed_tokens.add(queued.name)
+            self._completed_task_ids.add(queued.task_id)
             for arm in queued.unblocks_arms:
                 self._blocked_arms.pop(arm, None)
             for arm in queued.blocks_arms:
@@ -2002,10 +2546,25 @@ class Supervisor:
                 }
             )
             executed += 1
+            running_by_arm = {"left": None, "right": None}
+            self._push_visual_snapshot(
+                visualizer,
+                event="complete",
+                arm_busy=arm_busy,
+                running_by_arm=running_by_arm,
+                message=f"sim complete {queued.task_id}",
+            )
 
         pending = len(self._task_heap)
         deadlocked = pending > 0
         blockers = self._pending_blockers() if deadlocked else []
+        self._push_visual_snapshot(
+            visualizer,
+            event="final",
+            arm_busy=arm_busy,
+            running_by_arm=running_by_arm,
+            message="sequential simulation finished",
+        )
         return {
             "executed": progression,
             "executed_count": len(progression),
@@ -2071,8 +2630,8 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default="",
         help=(
-            "Path to master task-graph JSON file. When provided, "
-            "primary_task/autonomy_queue/runtime are loaded from file and "
+            "Path to autonomy task-graph JSON file. When provided, "
+            "autonomy_queue (and optional primary_task/runtime) are loaded from file and "
             "--params-json + --autonomy-queue-json are ignored."
         ),
     )
@@ -2082,6 +2641,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Simulate autonomy task selection/progression without running subtasks. "
             "Useful for deadlock detection from prerequisites/blocking."
+        ),
+    )
+    run_task.add_argument(
+        "--autonomy-visualizer",
+        type=str,
+        default="off",
+        choices=["off", "auto", "simulate", "live"],
+        help=(
+            "Task-graph visualizer mode. 'simulate' records scheduler simulation timeline, "
+            "'live' tracks real scheduler state with optional live-follow playback toggle. "
+            "'auto' selects simulate/live based on --autonomy-simulate."
         ),
     )
 
@@ -2112,6 +2682,32 @@ def main(argv: Optional[List[str]] = None):
     if args.command == "run-subtask":
         params = json.loads(args.params_json)
         if args.autonomy_mode:
+            visualizer = None
+            visualizer_mode = "off"
+            if args.autonomy_visualizer != "off":
+                visualizer_mode = args.autonomy_visualizer
+                if visualizer_mode == "auto":
+                    visualizer_mode = "simulate" if args.autonomy_simulate else "live"
+
+                if TaskGraphStateVisualizer is None:
+                    print("warning: task visualizer unavailable; continuing without visualization")
+                    visualizer_mode = "off"
+                else:
+                    try:
+                        visualizer = TaskGraphStateVisualizer(
+                            mode=visualizer_mode,
+                            title=(
+                                "UR5 Task Graph Visualizer (simulation)"
+                                if visualizer_mode == "simulate"
+                                else "UR5 Task Graph Visualizer (live scheduler)"
+                            ),
+                        )
+                        visualizer.start()
+                    except Exception as exc:
+                        print(f"warning: failed to start task visualizer: {exc}")
+                        visualizer = None
+                        visualizer_mode = "off"
+
             def _queue_item(item: dict, default_task_id: str):
                 if not isinstance(item, dict) or "name" not in item:
                     raise ValueError("Each queued task must be an object with at least a 'name' field")
@@ -2142,19 +2738,29 @@ def main(argv: Optional[List[str]] = None):
                 supervisor.configure_points_map(graph.get("points_map", {}))
                 supervisor.configure_resource_constraints(graph.get("resource_constraints", {}))
 
-                primary_task = graph.get("primary_task", {})
-                if not isinstance(primary_task, dict) or "name" not in primary_task:
-                    raise ValueError("Autonomy graph must include object 'primary_task' with a 'name'")
-                if primary_task.get("name") == "total_replay":
-                    raise ValueError("--autonomy-mode cannot be used with 'total_replay'")
+                queued_from_graph = 0
 
-                _queue_item(primary_task, default_task_id=f"{primary_task['name']}:primary")
+                primary_task = graph.get("primary_task", None)
+                if primary_task is not None:
+                    if not isinstance(primary_task, dict) or "name" not in primary_task:
+                        raise ValueError("If provided, 'primary_task' must be an object with a 'name'")
+                    if primary_task.get("name") == "total_replay":
+                        raise ValueError("--autonomy-mode cannot be used with 'total_replay'")
+                    _queue_item(primary_task, default_task_id=f"{primary_task['name']}:primary")
+                    queued_from_graph += 1
 
                 extra_queue = graph.get("autonomy_queue", [])
                 if not isinstance(extra_queue, list):
                     raise ValueError("Autonomy graph 'autonomy_queue' must be a JSON array")
                 for idx, item in enumerate(extra_queue):
                     _queue_item(item, default_task_id=f"queued:{idx}")
+                    queued_from_graph += 1
+
+                if queued_from_graph <= 0:
+                    raise ValueError(
+                        "Autonomy graph must define at least one task via 'autonomy_queue' "
+                        "or optional 'primary_task'"
+                    )
 
                 runtime_cfg = graph.get("runtime", {})
                 if not isinstance(runtime_cfg, dict):
@@ -2202,7 +2808,7 @@ def main(argv: Optional[List[str]] = None):
                 max_tasks = args.autonomy_max_tasks if args.autonomy_max_tasks > 0 else None
 
             if args.autonomy_simulate:
-                report = supervisor.simulate_autonomy(max_tasks=max_tasks)
+                report = supervisor.simulate_autonomy(max_tasks=max_tasks, visualizer=visualizer)
                 print("autonomy simulation mode: no subtasks were executed")
                 for step_idx, step in enumerate(report["executed"], start=1):
                     tick_info = f", tick={step['sim_tick']}" if "sim_tick" in step else ""
@@ -2250,7 +2856,7 @@ def main(argv: Optional[List[str]] = None):
                     f"score_counts={report['score_counts']}"
                 )
             else:
-                results = supervisor.run_autonomy(max_tasks=max_tasks)
+                results = supervisor.run_autonomy(max_tasks=max_tasks, visualizer=visualizer)
                 for task_name, ok, points, task_id in results:
                     print(f"autonomy task '{task_name}' (id={task_id}, points={points}) -> {ok}")
                 pending = supervisor.pending_autonomy_tasks()
@@ -2264,6 +2870,13 @@ def main(argv: Optional[List[str]] = None):
                     f"autonomy scoring summary: total_points={score_status['earned_points_total']} "
                     f"score_counts={score_status['score_counts']}"
                 )
+
+            if visualizer is not None:
+                if visualizer_mode == "live":
+                    print("live scheduler visualizer remains open for playback; close it when finished")
+                else:
+                    print("simulation visualizer ready; close the window when finished reviewing playback")
+                visualizer.wait_until_closed()
         else:
             ok = supervisor.run_subtask(args.name, params=params)
             print(f"subtask '{args.name}' -> {ok}")

@@ -706,7 +706,7 @@ function main()
     # Three observables: left TCP, right TCP, and vision detections.
     left_tcp_data_obs = Observable((Point3f[], RGBf[]))
     right_tcp_data_obs = Observable((Point3f[], RGBf[]))
-    vision_data_obs = Observable((Point3f[], RGBf[]))
+    vision_data_obs = Observable((Point3f[], RGBAf[]))
 
     scatter!(ax, @lift($left_tcp_data_obs[1]); color = @lift($left_tcp_data_obs[2]), markersize = 5, marker = :circle, label = "Left TCP")
     scatter!(ax, @lift($right_tcp_data_obs[1]); color = @lift($right_tcp_data_obs[2]), markersize = 5, marker = :utriangle, label = "Right TCP")
@@ -764,18 +764,50 @@ function main()
     vision_timestamps = Float64[]
     vision_labels = String[]
     vision_color_names = String[]
-    vision_cols = RGBf[]
+    vision_cols = RGBAf[]
     vision_packet_count = 0
 
     # Color map for vision detections by color name
     color_map = Dict(
-        "red"    => RGBf(0.9, 0.1, 0.1),
-        "yellow" => RGBf(0.9, 0.85, 0.0),
-        "green"  => RGBf(0.1, 0.8, 0.1),
-        "blue"   => RGBf(0.1, 0.3, 0.9),
-        "purple" => RGBf(0.6, 0.1, 0.8),
-        "tan"    => RGBf(0.82, 0.71, 0.55),
+        "red"    => RGBAf(0.9, 0.1, 0.1, 1.0),
+        "yellow" => RGBAf(0.9, 0.85, 0.0, 1.0),
+        "green"  => RGBAf(0.1, 0.8, 0.1, 1.0),
+        "blue"   => RGBAf(0.1, 0.3, 0.9, 1.0),
+        "purple" => RGBAf(0.6, 0.1, 0.8, 1.0),
+        "tan"    => RGBAf(0.82, 0.71, 0.55, 1.0),
     )
+    color_priority = ["red", "yellow", "green", "blue", "purple", "tan"]
+    stale_vision_color = RGBAf(0.45, 0.45, 0.45, 0.5)
+    unknown_latest_vision_color = RGBAf(0.92, 0.92, 0.92, 1.0)
+
+    function resolve_base_color_name(raw_name::AbstractString)
+        txt = lowercase(strip(String(raw_name)))
+        if isempty(txt)
+            return "unknown"
+        end
+        for cname in color_priority
+            if occursin(cname, txt)
+                return cname
+            end
+        end
+        return txt
+    end
+
+    function refresh_vision_colors!()
+        empty!(vision_cols)
+        n = length(vision_color_names)
+        if n == 0
+            return
+        end
+        for i in 1:n
+            if i == n
+                cname = resolve_base_color_name(vision_color_names[i])
+                push!(vision_cols, get(color_map, cname, unknown_latest_vision_color))
+            else
+                push!(vision_cols, stale_vision_color)
+            end
+        end
+    end
 
     bootstrap = load_bootstrap_trace_jld2(bootstrap_jld2_path)
     if bootstrap !== nothing
@@ -815,9 +847,7 @@ function main()
         append!(vision_timestamps, bootstrap["vision_ts"])
         append!(vision_labels, bootstrap["vision_labels"])
         append!(vision_color_names, bootstrap["vision_color_names"])
-        for color_name in bootstrap["vision_color_names"]
-            push!(vision_cols, get(color_map, color_name, RGBf(0.5, 0.5, 0.5)))
-        end
+        refresh_vision_colors!()
 
         append!(left_q0, bootstrap["left_q0"])
         append!(left_q1, bootstrap["left_q1"])
@@ -1242,6 +1272,17 @@ function main()
                             end
 
                             x, y, z = Float32(pos[1]), Float32(pos[2]), Float32(pos[3])
+
+                            # For XZ-camera streams, keep Python-provided y (calibrated offset)
+                            # and only fall back z from pos[2] when needed for legacy packets.
+                            axis_pair_second = ""
+                            if haskey(det, :axis_pair) && length(det.axis_pair) >= 2
+                                axis_pair_second = lowercase(String(det.axis_pair[2]))
+                            end
+                            if axis_pair_second == "z"
+                                z = abs(Float32(pos[3])) > Float32(1e-6) ? Float32(pos[3]) : Float32(pos[2])
+                            end
+
                             if !(isfinite(x) && isfinite(y) && isfinite(z))
                                 continue
                             end
@@ -1250,20 +1291,21 @@ function main()
                             push!(vision_timestamps, frame_ts)
                             label_name = haskey(det, :label) ? String(det.label) : ""
                             color_name = haskey(det, :color) ? String(det.color) : "unknown"
-                            col = get(color_map, color_name, RGBf(0.5, 0.5, 0.5))
+                            spec_key_log = haskey(det, :spec_key) ? Int(det.spec_key) : -1
                             push!(vision_labels, label_name)
-                            push!(vision_cols, col)
                             push!(vision_color_names, color_name)
 
                             if length(vision_xs) > max_points
                                 popfirst!(vision_xs); popfirst!(vision_ys); popfirst!(vision_zs)
                                 popfirst!(vision_timestamps)
                                 popfirst!(vision_labels)
-                                popfirst!(vision_cols); popfirst!(vision_color_names)
+                                popfirst!(vision_color_names)
                             end
 
+                            refresh_vision_colors!()
+
                             vision_packet_count += 1
-                            println("[Vision #$vision_packet_count] pos=($x, $y, $z) m  label=$label_name color=$color_name")
+                            println("[Vision #$vision_packet_count] pos=($x, $y, $z) m  label=$label_name color=$color_name spec_key=$spec_key_log")
                         end
 
                         if !first_vision_logged
@@ -1286,17 +1328,17 @@ function main()
                                 push!(vision_timestamps, Float64(get(pkt, :timestamp, 0.0)))
 
                                 color_name = get(pkt, :color, "unknown")
-                                col = get(color_map, color_name, RGBf(0.5, 0.5, 0.5))
                                 push!(vision_labels, String(get(pkt, :label, "")))
-                                push!(vision_cols, col)
                                 push!(vision_color_names, color_name)
 
                                 if length(vision_xs) > max_points
                                     popfirst!(vision_xs); popfirst!(vision_ys); popfirst!(vision_zs)
                                     popfirst!(vision_timestamps)
                                     popfirst!(vision_labels)
-                                    popfirst!(vision_cols); popfirst!(vision_color_names)
+                                    popfirst!(vision_color_names)
                                 end
+
+                                refresh_vision_colors!()
 
                                 vision_packet_count += 1
                                 println("[Vision #$vision_packet_count] pos=($x, $y, $z) m  color=$color_name")

@@ -41,6 +41,25 @@ VISION_CAMERA_SCAN_MAX_INDEX = 6
 VISION_EXCLUDED_CAMERA_INDICES = {0}
 VISION_FIRST_FRAME_TIMEOUT_S = 5.0
 
+DEFAULT_XY_CALIBRATION = {
+    "x_scale": 1.0,
+    "x_offset_m": 0.0,
+    "y_scale": 1.0,
+    "y_offset_m": 0.0,
+    "xy_cross": 0.0,
+    "yx_cross": 0.0,
+}
+
+DEFAULT_XZ_CALIBRATION = {
+    "x_scale": 1.0,
+    "x_offset_m": 0.0,
+    "y_offset_m": 0.36,
+    "z_scale": 1.0,
+    "z_offset_m": 0.06,
+    "xz_cross": 0.0,
+    "zx_cross": 0.0,
+}
+
 CAMERA_TARGET_SPECS = {
     2: {
         "axis_pair": ("x", "y"),
@@ -114,6 +133,49 @@ def _camera_point_from_pixel(xc, yc, axis_pair):
     }
 
 
+def _default_plane_calibration(axis_pair):
+    second = str(axis_pair[1]).lower() if len(axis_pair) >= 2 else "y"
+    if second == "z":
+        return dict(DEFAULT_XZ_CALIBRATION)
+    return dict(DEFAULT_XY_CALIBRATION)
+
+
+def _coerce_float(value, default):
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _sanitize_plane_calibration(raw, axis_pair):
+    second = str(axis_pair[1]).lower() if len(axis_pair) >= 2 else "y"
+    defaults = _default_plane_calibration(axis_pair)
+    payload = raw if isinstance(raw, dict) else {}
+
+    sanitized = {
+        "x_scale": _coerce_float(payload.get("x_scale", defaults["x_scale"]), defaults["x_scale"]),
+        "x_offset_m": _coerce_float(payload.get("x_offset_m", defaults["x_offset_m"]), defaults["x_offset_m"]),
+    }
+    if second == "z":
+        sanitized["y_offset_m"] = _coerce_float(payload.get("y_offset_m", defaults["y_offset_m"]), defaults["y_offset_m"])
+        sanitized["z_scale"] = _coerce_float(payload.get("z_scale", defaults["z_scale"]), defaults["z_scale"])
+        sanitized["z_offset_m"] = _coerce_float(payload.get("z_offset_m", defaults["z_offset_m"]), defaults["z_offset_m"])
+        sanitized["xz_cross"] = _coerce_float(payload.get("xz_cross", defaults["xz_cross"]), defaults["xz_cross"])
+        sanitized["zx_cross"] = _coerce_float(payload.get("zx_cross", defaults["zx_cross"]), defaults["zx_cross"])
+        raw_target_offsets = payload.get("target_z_offset_m", {})
+        target_offsets = {}
+        if isinstance(raw_target_offsets, dict):
+            for target_name, raw_val in raw_target_offsets.items():
+                target_offsets[str(target_name)] = _coerce_float(raw_val, 0.0)
+        sanitized["target_z_offset_m"] = target_offsets
+    else:
+        sanitized["y_scale"] = _coerce_float(payload.get("y_scale", defaults["y_scale"]), defaults["y_scale"])
+        sanitized["y_offset_m"] = _coerce_float(payload.get("y_offset_m", defaults["y_offset_m"]), defaults["y_offset_m"])
+        sanitized["xy_cross"] = _coerce_float(payload.get("xy_cross", defaults["xy_cross"]), defaults["xy_cross"])
+        sanitized["yx_cross"] = _coerce_float(payload.get("yx_cross", defaults["yx_cross"]), defaults["yx_cross"])
+    return sanitized
+
+
 class _DualCameraVisionFeeds:
     def __init__(
         self,
@@ -132,11 +194,13 @@ class _DualCameraVisionFeeds:
         self._window_names = {}
         self._view_modes = {}
         self._trackbar_ready = {}
+        self._trackbar_seeded = {}
         self._last_spec_for_camera = {}
         self._settings_file_path = None
         self._settings_dirty = False
         self._last_settings_save_ts = 0.0
         self._settings_save_interval_s = 0.5
+        self._camera_plane_calibration = {}
 
         self._excluded_camera_indices = set(VISION_EXCLUDED_CAMERA_INDICES)
         if excluded_camera_indices is not None:
@@ -161,6 +225,9 @@ class _DualCameraVisionFeeds:
             self._view_modes[camera_index] = "dashboard"
             self._window_names[camera_index] = f"vision_cam_{camera_index}"
             self._trackbar_ready[camera_index] = False
+            self._trackbar_seeded[camera_index] = False
+            axis_pair = tuple(CAMERA_TARGET_SPECS.get(self._active_spec_key(camera_index), {}).get("axis_pair", ("x", "y")))
+            self._camera_plane_calibration[camera_index] = _default_plane_calibration(axis_pair)
 
         for spec in CAMERA_TARGET_SPECS.values():
             for color_name, target_label in self._iter_target_pairs_for_spec(spec):
@@ -227,13 +294,38 @@ class _DualCameraVisionFeeds:
         self._load_settings_from_disk()
 
     def _settings_payload(self):
+        camera_orientation = {}
+        camera_plane_calibration = {}
+        for cam_idx in self._available_camera_indices:
+            spec_key = self._active_spec_key(cam_idx)
+            spec = CAMERA_TARGET_SPECS.get(spec_key, {}) if spec_key is not None else {}
+            axis_pair = tuple(spec.get("axis_pair", ("x", "y")))
+            plane = "xz" if (len(axis_pair) >= 2 and str(axis_pair[1]).lower() == "z") else "xy"
+            calibration = _sanitize_plane_calibration(self._camera_plane_calibration.get(cam_idx, {}), axis_pair)
+            self._camera_plane_calibration[cam_idx] = calibration
+            camera_orientation[str(cam_idx)] = {
+                "axis_pair": [str(axis_pair[0]), str(axis_pair[1])],
+                "plane": plane,
+            }
+            if plane == "xz":
+                camera_plane_calibration[str(cam_idx)] = {
+                    "x_scale": float(calibration.get("x_scale", 1.0)),
+                    "x_offset_m": float(calibration.get("x_offset_m", 0.0)),
+                    "y_offset_m": float(calibration.get("y_offset_m", 0.36)),
+                    "z_scale": float(calibration.get("z_scale", 1.0)),
+                    "z_offset_m": float(calibration.get("z_offset_m", 0.06)),
+                    "xz_cross": float(calibration.get("xz_cross", 0.0)),
+                    "zx_cross": float(calibration.get("zx_cross", 0.0)),
+                    "target_z_offset_m": {
+                        str(k): float(v)
+                        for k, v in dict(calibration.get("target_z_offset_m", {})).items()
+                    },
+                }
+
         return {
             "version": 1,
-            "available_cameras": list(self._available_camera_indices),
-            "camera_enabled": {
-                str(cam_idx): int(enabled)
-                for cam_idx, enabled in self._camera_enabled.items()
-            },
+            "camera_orientation": camera_orientation,
+            "camera_plane_calibration": camera_plane_calibration,
             "camera_spec_selection": {
                 str(cam_idx): int(sel)
                 for cam_idx, sel in self._camera_spec_selection.items()
@@ -269,6 +361,11 @@ class _DualCameraVisionFeeds:
         if not isinstance(payload, dict):
             return
 
+        # Optional metadata-only field for downstream tooling; accepted for compatibility.
+        raw_camera_orientation = payload.get("camera_orientation", {})
+        if raw_camera_orientation is not None and not isinstance(raw_camera_orientation, dict):
+            raw_camera_orientation = {}
+
         raw_spec_sel = payload.get("camera_spec_selection", {})
         if isinstance(raw_spec_sel, dict):
             for cam_key, sel in raw_spec_sel.items():
@@ -281,16 +378,18 @@ class _DualCameraVisionFeeds:
                     continue
                 self._camera_spec_selection[cam_idx] = max(0, min(sel_idx, max(0, len(self._spec_choices) - 1)))
 
-        raw_enabled = payload.get("camera_enabled", {})
-        if isinstance(raw_enabled, dict):
-            for cam_key, enabled in raw_enabled.items():
+        raw_plane_calib = payload.get("camera_plane_calibration", {})
+        if isinstance(raw_plane_calib, dict):
+            for cam_key, raw_calib in raw_plane_calib.items():
                 try:
                     cam_idx = int(cam_key)
-                    enabled_int = 1 if int(enabled) > 0 else 0
                 except Exception:
                     continue
-                if cam_idx in self._camera_enabled:
-                    self._camera_enabled[cam_idx] = enabled_int
+                if cam_idx not in self._camera_spec_selection:
+                    continue
+                spec_key = self._active_spec_key(cam_idx)
+                axis_pair = tuple(CAMERA_TARGET_SPECS.get(spec_key, {}).get("axis_pair", ("x", "y")))
+                self._camera_plane_calibration[cam_idx] = _sanitize_plane_calibration(raw_calib, axis_pair)
 
         raw_items = payload.get("item_settings", {})
         if isinstance(raw_items, dict):
@@ -362,6 +461,11 @@ class _DualCameraVisionFeeds:
         if self._trackbar_ready.get(camera_index):
             return
 
+        # If persisted settings are available, ensure in-memory values are hydrated
+        # before creating UI controls so default slider values don't clobber disk state.
+        if self._settings_file_path is not None and self._settings_file_path.exists() and not self._settings_dirty:
+            self._load_settings_from_disk()
+
         window_name = self._window_name(camera_index)
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
         cv2.createTrackbar("enabled", window_name, int(self._camera_enabled.get(camera_index, 0)), 1, lambda _v: None)
@@ -377,7 +481,26 @@ class _DualCameraVisionFeeds:
         cv2.createTrackbar("kernel", window_name, CAMERA_DEFAULT_KERNEL_SIZE, 31, lambda _v: None)
         cv2.createTrackbar("open_iter", window_name, CAMERA_DEFAULT_OPEN_ITER, 10, lambda _v: None)
         cv2.createTrackbar("close_iter", window_name, CAMERA_DEFAULT_CLOSE_ITER, 10, lambda _v: None)
+        cv2.createTrackbar("y_offset_cm", window_name, 36, 100, lambda _v: None)
+        cv2.createTrackbar("z_offset_cm", window_name, 6, 100, lambda _v: None)
+
+        cv2.setTrackbarPos("enabled", window_name, int(self._camera_enabled.get(camera_index, 0)))
+        cv2.setTrackbarPos("spec_idx", window_name, int(self._camera_spec_selection.get(camera_index, 0)))
+        axis_pair = tuple(CAMERA_TARGET_SPECS.get(self._active_spec_key(camera_index), {}).get("axis_pair", ("x", "y")))
+        calibration = _sanitize_plane_calibration(self._camera_plane_calibration.get(camera_index, {}), axis_pair)
+        self._camera_plane_calibration[camera_index] = calibration
+        cv2.setTrackbarPos(
+            "y_offset_cm",
+            window_name,
+            max(0, min(100, int(round(float(calibration.get("y_offset_m", 0.36)) * 100.0)))),
+        )
+        cv2.setTrackbarPos(
+            "z_offset_cm",
+            window_name,
+            max(0, min(100, int(round(float(calibration.get("z_offset_m", 0.06)) * 100.0)))),
+        )
         self._trackbar_ready[camera_index] = True
+        self._trackbar_seeded[camera_index] = False
 
     def _safe_get_trackbar(self, camera_index, name, default=0):
         window_name = self._window_name(camera_index)
@@ -495,9 +618,12 @@ class _DualCameraVisionFeeds:
         if cv2 is None or np is None:
             print("[vision] OpenCV/numpy unavailable; camera-aware offsets disabled")
             return
+        self._stop.clear()
         for camera_index in self._available_camera_indices:
-            if camera_index in self._threads:
+            existing = self._threads.get(camera_index)
+            if existing is not None and existing.is_alive():
                 continue
+            self._threads.pop(camera_index, None)
             t = threading.Thread(target=self._run_camera_loop, args=(camera_index,), daemon=True)
             self._threads[camera_index] = t
             t.start()
@@ -509,7 +635,6 @@ class _DualCameraVisionFeeds:
             print(f"[vision] Warning: camera index {camera_index} unavailable; terminating camera thread")
             with self._lock:
                 self._camera_enabled[camera_index] = 0
-                self._settings_dirty = True
                 if camera_index in self._buffers:
                     self._buffers[camera_index]["enabled"] = 0
                     self._buffers[camera_index]["targets"] = {}
@@ -522,6 +647,7 @@ class _DualCameraVisionFeeds:
 
         first_frame_deadline = time.time() + VISION_FIRST_FRAME_TIMEOUT_S
         got_any_frame = False
+        gui_disable_deadline = None
 
         last_selected_target_name = ""
 
@@ -533,7 +659,6 @@ class _DualCameraVisionFeeds:
                     print(f"[vision] Warning: camera index {camera_index} lost and failed to reinitialize; terminating camera thread")
                     with self._lock:
                         self._camera_enabled[camera_index] = 0
-                        self._settings_dirty = True
                         if camera_index in self._buffers:
                             self._buffers[camera_index]["enabled"] = 0
                             self._buffers[camera_index]["targets"] = {}
@@ -551,7 +676,6 @@ class _DualCameraVisionFeeds:
                     )
                     with self._lock:
                         self._camera_enabled[camera_index] = 0
-                        self._settings_dirty = True
                         if camera_index in self._buffers:
                             self._buffers[camera_index]["enabled"] = 0
                             self._buffers[camera_index]["targets"] = {}
@@ -563,9 +687,29 @@ class _DualCameraVisionFeeds:
             got_any_frame = True
 
             enabled_now = 1 if self._safe_get_trackbar(camera_index, "enabled", self._camera_enabled.get(camera_index, 0)) > 0 else 0
-            if self._camera_enabled.get(camera_index, 0) != enabled_now:
+            enabled_prev = int(self._camera_enabled.get(camera_index, 0))
+            if enabled_prev != enabled_now:
                 self._camera_enabled[camera_index] = enabled_now
-                self._settings_dirty = True
+                if enabled_now == 0:
+                    gui_disable_deadline = time.time() + VISION_FIRST_FRAME_TIMEOUT_S
+                    print(
+                        f"[vision] camera {camera_index} disabled in UI; "
+                        f"terminating thread in {VISION_FIRST_FRAME_TIMEOUT_S:.1f}s"
+                    )
+                else:
+                    gui_disable_deadline = None
+
+            if enabled_now == 0 and gui_disable_deadline is not None and time.time() >= gui_disable_deadline:
+                print(
+                    f"[vision] camera {camera_index} remained disabled for "
+                    f"{VISION_FIRST_FRAME_TIMEOUT_S:.1f}s; terminating camera thread"
+                )
+                with self._lock:
+                    self._camera_enabled[camera_index] = 0
+                    if camera_index in self._buffers:
+                        self._buffers[camera_index]["enabled"] = 0
+                        self._buffers[camera_index]["targets"] = {}
+                break
 
             spec_idx_max = max(0, len(self._spec_choices) - 1)
             selected_spec_idx = self._safe_get_trackbar(camera_index, "spec_idx", 0)
@@ -580,6 +724,22 @@ class _DualCameraVisionFeeds:
 
             spec_key = self._active_spec_key(camera_index)
             spec = CAMERA_TARGET_SPECS.get(spec_key)
+            axis_pair = tuple(spec.get("axis_pair", ("x", "y"))) if spec is not None else ("x", "y")
+            self._camera_plane_calibration[camera_index] = _sanitize_plane_calibration(
+                self._camera_plane_calibration.get(camera_index, {}),
+                axis_pair,
+            )
+            calibration_before = dict(self._camera_plane_calibration[camera_index])
+            y_offset_cm = self._safe_get_trackbar(camera_index, "y_offset_cm", int(round(float(calibration_before.get("y_offset_m", 0.36)) * 100.0)))
+            calibration_after = dict(calibration_before)
+            calibration_after["y_offset_m"] = max(0.0, min(1.0, float(y_offset_cm) / 100.0))
+            axis_pair_second = str(axis_pair[1]).lower() if len(axis_pair) >= 2 else "y"
+            if axis_pair_second == "z":
+                z_offset_cm = self._safe_get_trackbar(camera_index, "z_offset_cm", int(round(float(calibration_before.get("z_offset_m", 0.06)) * 100.0)))
+                calibration_after["z_offset_m"] = max(0.0, min(1.0, float(z_offset_cm) / 100.0))
+            if calibration_after != calibration_before:
+                self._camera_plane_calibration[camera_index] = calibration_after
+                self._settings_dirty = True
             if self._last_spec_for_camera.get(camera_index) != spec_key:
                 self._last_spec_for_camera[camera_index] = spec_key
                 print(f"[vision] camera {camera_index} now using target spec {spec_key if spec_key is not None else 'none'}")
@@ -605,7 +765,10 @@ class _DualCameraVisionFeeds:
                 if selected_target_name != last_selected_target_name:
                     self._sync_trackbars_from_item(camera_index, selected_item)
                     last_selected_target_name = selected_target_name
-                if self._read_item_settings_from_trackbars(camera_index, selected_item):
+                    self._trackbar_seeded[camera_index] = False
+                elif not self._trackbar_seeded.get(camera_index, False):
+                    self._trackbar_seeded[camera_index] = True
+                elif self._read_item_settings_from_trackbars(camera_index, selected_item):
                     self._settings_dirty = True
 
             targets = {}
@@ -641,6 +804,7 @@ class _DualCameraVisionFeeds:
                 if detections:
                     det = detections[0]
                     point = _camera_point_from_pixel(det["xc"], det["yc"], spec["axis_pair"])
+                    point = self._apply_plane_calibration(camera_index, axis_pair, point, target_name)
                     point.update(
                         {
                             "camera_index": camera_index,
@@ -701,6 +865,50 @@ class _DualCameraVisionFeeds:
             pass
         with self._lock:
             self._threads.pop(camera_index, None)
+
+    def _apply_plane_calibration(self, camera_index, axis_pair, point, target_name=""):
+        calibration = _sanitize_plane_calibration(
+            self._camera_plane_calibration.get(camera_index, {}),
+            axis_pair,
+        )
+        second = str(axis_pair[1]).lower() if len(axis_pair) >= 2 else "y"
+
+        x_raw = float(point.get("x", 0.0))
+        second_raw = float(point.get(second, 0.0))
+
+        if second == "z":
+            x_out = (
+                calibration["x_scale"] * x_raw
+                + calibration.get("zx_cross", 0.0) * second_raw
+                + calibration["x_offset_m"]
+            )
+            z_out = (
+                calibration["z_scale"] * second_raw
+                + calibration.get("xz_cross", 0.0) * x_raw
+                + calibration["z_offset_m"]
+            )
+            target_z_offset_m = calibration.get("target_z_offset_m", {})
+            if isinstance(target_z_offset_m, dict):
+                z_out += float(target_z_offset_m.get(str(target_name), 0.0))
+            point["x"] = float(x_out)
+            point["y"] = float(calibration.get("y_offset_m", 0.36))
+            point["z"] = float(z_out)
+        else:
+            x_out = (
+                calibration["x_scale"] * x_raw
+                + calibration.get("yx_cross", 0.0) * second_raw
+                + calibration["x_offset_m"]
+            )
+            y_out = (
+                calibration["y_scale"] * second_raw
+                + calibration.get("xy_cross", 0.0) * x_raw
+                + calibration["y_offset_m"]
+            )
+            point["x"] = float(x_out)
+            point["y"] = float(y_out)
+
+        point["calibration"] = dict(calibration)
+        return point
 
     def _open_capture(self, camera_index):
         # On Windows laptops, built-in webcams often behave better with DirectShow.
@@ -769,28 +977,53 @@ def _get_or_start_vision_feeds(params=None):
     with _VISION_FEEDS_LOCK:
         params = params or {}
         settings_path = _resolve_vision_specs_path(params)
-        if _VISION_FEEDS is None:
-            max_scan_index = int(params.get("vision_camera_scan_max_index", VISION_CAMERA_SCAN_MAX_INDEX))
-            excluded_raw = params.get("vision_excluded_camera_indices", None)
-            if excluded_raw is None:
-                excluded = set(VISION_EXCLUDED_CAMERA_INDICES)
-            elif isinstance(excluded_raw, (list, tuple, set)):
-                excluded = {int(v) for v in excluded_raw}
-            else:
-                excluded = {
-                    int(v.strip())
-                    for v in str(excluded_raw).split(",")
-                    if str(v).strip() != ""
-                }
+        max_scan_index = int(params.get("vision_camera_scan_max_index", VISION_CAMERA_SCAN_MAX_INDEX))
+        excluded_raw = params.get("vision_excluded_camera_indices", None)
+        if excluded_raw is None:
+            excluded = set(VISION_EXCLUDED_CAMERA_INDICES)
+        elif isinstance(excluded_raw, (list, tuple, set)):
+            excluded = {int(v) for v in excluded_raw}
+        else:
+            excluded = {
+                int(v.strip())
+                for v in str(excluded_raw).split(",")
+                if str(v).strip() != ""
+            }
 
+        should_recreate = _VISION_FEEDS is None
+        if not should_recreate:
+            try:
+                should_recreate = bool(_VISION_FEEDS._stop.is_set())
+            except Exception:
+                should_recreate = True
+
+        if not should_recreate:
+            try:
+                current_excluded = set(getattr(_VISION_FEEDS, "_excluded_camera_indices", set()))
+                if current_excluded != excluded:
+                    should_recreate = True
+                else:
+                    discovered_now = _VISION_FEEDS._discover_available_camera_indices(max_scan_index)
+                    discovered_now = [idx for idx in discovered_now if idx not in excluded]
+                    current_indices = list(getattr(_VISION_FEEDS, "_available_camera_indices", []))
+                    if discovered_now != current_indices:
+                        should_recreate = True
+            except Exception:
+                should_recreate = True
+
+        if should_recreate:
+            if _VISION_FEEDS is not None:
+                try:
+                    _VISION_FEEDS.stop()
+                except Exception:
+                    pass
             _VISION_FEEDS = _DualCameraVisionFeeds(
                 max_camera_index=max_scan_index,
                 excluded_camera_indices=excluded,
             )
-            _VISION_FEEDS.configure_persistence(settings_path)
-            _VISION_FEEDS.start()
-        else:
-            _VISION_FEEDS.configure_persistence(settings_path)
+        _VISION_FEEDS.configure_persistence(settings_path)
+        # Always ensure all available camera threads are started on each call.
+        _VISION_FEEDS.start()
         return _VISION_FEEDS
 
 

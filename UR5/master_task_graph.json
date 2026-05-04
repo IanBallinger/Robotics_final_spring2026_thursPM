@@ -73,28 +73,6 @@
       ]
     }
   },
-  "primary_task": {
-    "name": "open_microwave_door",
-    "task_id": "open_door",
-    "points": 1,
-    "score_token": "open_microwave_door",
-    "max_score_count": 3,
-    "arm": "left",
-    "blocks_arms": [
-      "left"
-    ],
-    "unblocks_arms": [],
-    "prerequisites": [],
-    "points_if_completed": {},
-    "params": {
-      "door_handle_pose_source": "vision",
-      "safe_approach_offset_m": 0.1,
-      "requires_resource_available_for": "table_area",
-      "resource_action": "acquire",
-      "resource": "table_area",
-      "resource_item": "microwave_open"
-    }
-  },
   "autonomy_queue": [
     {
       "name": "acquire_bowl",
@@ -143,10 +121,10 @@
       "unblocks_arms": [],
       "prerequisites": [
         "acquire_bowl",
-        "open_door"
+        "door_open_for_load"
       ],
       "points_if_completed": {
-        "open_door": 0,
+        "door_open_for_load": 0,
         "acquire_bowl": 0
       },
       "params": {
@@ -169,10 +147,10 @@
       "unblocks_arms": [],
       "prerequisites": [
         "acquire_plate",
-        "open_door"
+        "door_open_for_load"
       ],
       "points_if_completed": {
-        "open_door": 0,
+        "door_open_for_load": 0,
         "acquire_plate": 0
       },
       "params": {
@@ -205,50 +183,10 @@
         "close_force": 15,
         "resource_action": "release",
         "resource": "table_area",
-        "resource_item": "microwave_open"
-      }
-    },
-    {
-      "name": "press_microwave_stop",
-      "task_id": "press_stop_plate",
-      "points": 1,
-      "score_token": "press_microwave_stop_with_food_inside",
-      "max_score_count": 2,
-      "arm": "right",
-      "blocks_arms": [],
-      "unblocks_arms": [],
-      "prerequisites": [
-        "put_plate"
-      ],
-      "points_if_completed": {},
-      "params": {
-        "button": "stop",
-        "target_food": "microwavable_plate",
-        "requires_resource_available_for": "table_area",
-        "requires_resource_item": "microwave_open"
-      }
-    },
-    {
-      "name": "press_microwave_stop",
-      "task_id": "press_stop_bowl",
-      "points": 1,
-      "score_token": "press_microwave_stop_with_food_inside",
-      "max_score_count": 2,
-      "arm": "right",
-      "blocks_arms": [],
-      "unblocks_arms": [],
-      "prerequisites": [
-        "close_door",
-        "put_bowl"
-      ],
-      "points_if_completed": {
-        "close_door": 0
-      },
-      "params": {
-        "button": "stop",
-        "target_food": "microwavable_bowl",
-        "requires_resource_available_for": "table_area",
-        "requires_resource_item": "microwave_open"
+        "resource_item": "microwave_open",
+        "pose_trace_csv_left": "trace_close_microwave_door_left.csv",
+        "pose_trace_csv_right": "trace_close_microwave_door_right.csv",
+        "named_waypoints_csv": "UR5/waypoints_close_door.csv"
       }
     },
     {
@@ -261,7 +199,7 @@
       "blocks_arms": [],
       "unblocks_arms": [],
       "prerequisites": [
-        "press_microwave_stop"
+        "press_stop_for_bowl"
       ],
       "points_if_completed": {},
       "params": {
@@ -271,30 +209,10 @@
         "requires_resource_available_for": "table_area",
         "resource_action": "acquire",
         "resource": "table_area",
-        "resource_item": "microwave_open"
-      }
-    },
-    {
-      "name": "open_microwave_door",
-      "task_id": "door_open_for_plate_unload",
-      "points": 1,
-      "score_token": "open_microwave_door",
-      "max_score_count": 3,
-      "arm": "left",
-      "blocks_arms": [],
-      "unblocks_arms": [],
-      "prerequisites": [
-        "press_stop_plate"
-      ],
-      "points_if_completed": {},
-      "params": {
-        "door_handle_pose_source": "vision",
-        "safe_approach_offset_m": 0.1,
-        "requires_resource_occupied_for": "microwave_slot",
-        "requires_resource_available_for": "table_area",
-        "resource_action": "acquire",
-        "resource": "table_area",
-        "resource_item": "microwave_open"
+        "resource_item": "microwave_open",
+        "pose_trace_csv_left": "trace_open_microwave_door_left.csv",
+        "pose_trace_csv_right": "trace_open_microwave_door_right.csv",
+        "named_waypoints_csv": "UR5/waypoints_door_open_for_unload.csv"
       }
     },
     {
@@ -415,8 +333,8 @@
       "blocks_arms": [],
       "unblocks_arms": [],
       "prerequisites": [
-        "press_stop_plate",
-        "door_open_for_plate_unload",
+        "press_stop_for_plate",
+        "door_open_for_unload",
         "put_plate"
       ],
       "points_if_completed": {},
@@ -440,7 +358,7 @@
       "blocks_arms": [],
       "unblocks_arms": [],
       "prerequisites": [
-        "press_stop_bowl",
+        "press_stop_for_bowl",
         "door_open_for_unload",
         "put_bowl"
       ],
