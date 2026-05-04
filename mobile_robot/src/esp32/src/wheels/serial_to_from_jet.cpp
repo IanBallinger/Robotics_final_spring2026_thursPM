@@ -92,7 +92,7 @@ double integral_max = 1e6;
 double measured_vel[num_wheels] = {0.0, 0.0, 0.0, 0.0};
 double control_effort[num_wheels] = {0.0, 0.0, 0.0, 0.0};
 
-constexpr float ENCODER_POS_MAX_SPEED_RAD_S = 3.0f;
+constexpr float ENCODER_POS_MAX_SPEED_RAD_S = 10.0f;
 constexpr float ENCODER_POS_JUMP_MARGIN_RAD = 0.25f;
 constexpr float ENCODER_VEL_ESTIMATE_TAU_S = 0.05f;
 bool validated_encoder_state_initialized[num_wheels] = {false, false, false, false};
@@ -395,7 +395,7 @@ void sendIMU() {
   const unsigned long now = millis();
   float dt = 0.0f;
   if (last_accel_filter_ms == 0) {
-    filtered_ax = static_cast<float>(a.ax) + ax_bias;
+    filtered_ax = static_cast<float>(a.ax);
     filtered_ay = static_cast<float>(a.ay);
     filtered_az = static_cast<float>(a.az);
   } else {
