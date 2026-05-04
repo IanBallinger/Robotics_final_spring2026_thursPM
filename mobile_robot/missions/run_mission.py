@@ -1101,10 +1101,15 @@ class MissionRuntime:
                 if path_blocked:
                     cmd = self._zero_drive_command()
 
-                # wheel_rates are in canonical ESP32 order:
-                # (w1, w2, w3, w4) = (left_front, right_front, left_rear, right_rear)
-                self.serial.send_wheel_cmd(*cmd.wheel_rates)
-                self.serial.flush_tx()
+                # Only publish wheel commands while deployed or during all-stop.
+                # When deploy=False, do not stream zero commands; that allows the
+                # wheel ESP32 joystick path to remain in control instead of being
+                # continuously overridden by serial autonomy commands.
+                if self.deploy or self.allstop:
+                    # wheel_rates are in canonical ESP32 order:
+                    # (w1, w2, w3, w4) = (left_front, right_front, left_rear, right_rear)
+                    self.serial.send_wheel_cmd(*cmd.wheel_rates)
+                    self.serial.flush_tx()
 
                 goal_error, heading_error = self._update_blackboard(current_task)
                 self._publish_telemetry(
