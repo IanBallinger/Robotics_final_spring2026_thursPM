@@ -76,7 +76,7 @@ map:
       position:
         x: 2.595
         y: 3.545
-      heading: 0
+      heading: -1.57
     - name: front_wall
       id: 9
       position:
