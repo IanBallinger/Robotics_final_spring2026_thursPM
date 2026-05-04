@@ -154,13 +154,22 @@ CENTER_Y  = 337.5
 VISION_Z  = 0.1         # fixed z: top-down camera (metres above table plane)
 
 
-def run_camera_detection(udp_socket, udp_target, stop_event, udp_send_lock, camera_index=2, color_to_target_label=None):
+def _send_stream_packet(stream_socket, stream_send_lock, packet):
+    """Send one JSON packet over TCP as a newline-delimited message."""
+    if stream_socket is None:
+        return
+    payload = (json.dumps(packet, separators=(",", ":")) + "\n").encode("utf-8")
+    with stream_send_lock:
+        stream_socket.sendall(payload)
+
+
+def run_camera_detection(stream_socket, stream_target, stop_event, stream_send_lock, camera_index=2, color_to_target_label=None):
     """Background thread: detect coloured objects and stream vision packets."""
     cap = cv2.VideoCapture(camera_index)
     kernel = np.ones((5, 5), np.uint8)
     iters = 3
     packet_count = 0
-    print(f"Camera thread started (index {camera_index}). Streaming to {udp_target}.")
+    print(f"Camera thread started (index {camera_index}). Streaming to {stream_target} via TCP.")
     try:
         while not stop_event.is_set():
             ret, frame = cap.read()
@@ -216,10 +225,9 @@ def run_camera_detection(udp_socket, udp_target, stop_event, udp_send_lock, came
                     "detections": frame_detections,
                 }
                 try:
-                    with udp_send_lock:
-                        udp_socket.sendto(json.dumps(packet).encode("utf-8"), udp_target)
+                    _send_stream_packet(stream_socket, stream_send_lock, packet)
                 except Exception as e:
-                    print(f"Vision UDP send error: {e}")
+                    print(f"Vision TCP send error: {e}")
 
             cv2.imshow("Camera (record.py)", frame)
             cv2.waitKey(3)
@@ -268,21 +276,21 @@ def parse_args(args):
         "-f",
         "--frequency",
         dest="frequency",
-        help="the frequency at which the data is recorded (default is 500Hz)",
+        help="the frequency at which the data is recorded (default is 30Hz)",
         type=float,
-        default=500.0,
+        default=30.0,
         metavar="<frequency>")
     parser.add_argument(
         "--stream-udp-host",
         dest="stream_udp_host",
-        help="optional host for UDP live stream (example: 127.0.0.1)",
+        help="optional host for TCP live stream (legacy flag name; example: 127.0.0.1)",
         type=str,
         default="",
         metavar="<udp host>")
     parser.add_argument(
         "--stream-udp-port",
         dest="stream_udp_port",
-        help="optional port for UDP live stream (default: 9999)",
+        help="optional port for TCP live stream (legacy flag name; default: 9999)",
         type=int,
         default=9999,
         metavar="<udp port>")
@@ -352,7 +360,7 @@ def _safe_task_name_for_filename(task_name, fallback_task_id=""):
 def load_task_context(task_graph_file, task_id):
     context = {
         "task_id": task_id,
-        "task_name": "",
+        "task_name": str(task_id or ""),
         "dependent_item_label": "",
         "target_coloring": {},
     }
@@ -478,32 +486,40 @@ def main(args):
             f"dependent_item_label={dependent_item_label or '<none>'}"
         )
 
-    udp_socket = None
-    udp_target = None
+    stream_socket = None
+    stream_target = None
     if args.stream_udp_host:
-        udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        udp_target = (args.stream_udp_host, args.stream_udp_port)
-    udp_send_lock = threading.Lock()
+        stream_target = (args.stream_udp_host, args.stream_udp_port)
+        try:
+            stream_socket = socket.create_connection(stream_target, timeout=5.0)
+            stream_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            stream_socket.settimeout(None)
+            print(f"Connected TCP stream to {stream_target[0]}:{stream_target[1]}")
+        except Exception as exc:
+            print(f"Warning: could not connect TCP stream to {stream_target[0]}:{stream_target[1]}: {exc}")
+            stream_socket = None
+            stream_target = None
+    stream_send_lock = threading.Lock()
 
     # --- Camera thread (runs in both robot and no-robot modes when UDP target is set) ---
     camera_stop = threading.Event()
     camera_thread = None
     # Default: camera ON unless explicitly disabled via --no-camera.
     use_camera = not args.no_camera
-    if use_camera and udp_socket and udp_target:
+    if use_camera and stream_socket and stream_target:
         camera_thread = threading.Thread(
             target=run_camera_detection,
-            args=(udp_socket, udp_target, camera_stop, udp_send_lock, args.camera_index, color_to_target_label),
+            args=(stream_socket, stream_target, camera_stop, stream_send_lock, args.camera_index, color_to_target_label),
             daemon=True,
         )
         camera_thread.start()
-    elif use_camera and not (udp_socket and udp_target):
-        print("Warning: camera enabled but UDP target is missing; vision packets will not be sent.")
+    elif use_camera and not (stream_socket and stream_target):
+        print("Warning: camera enabled but TCP stream target is missing; vision packets will not be sent.")
 
     # --- No-robot mode: camera-only, no RTDE/gripper/CSV ---
     if args.no_robot:
         print("Running in --no-robot mode. Camera vision only.")
-        if not (udp_socket and udp_target):
+        if not (stream_socket and stream_target):
             print("Warning: no --stream-udp-host specified; camera data will not be sent.")
         try:
             while True:
@@ -514,8 +530,8 @@ def main(args):
             camera_stop.set()
             if camera_thread:
                 camera_thread.join(timeout=2)
-            if udp_socket:
-                udp_socket.close()
+            if stream_socket:
+                stream_socket.close()
             print("No-robot mode stopped.")
         return
 
@@ -570,9 +586,9 @@ def main(args):
 
     rtde_r_left.startFileRecording(left_output, variables)
     rtde_r_right.startFileRecording(right_output, variables)
-    if udp_target:
+    if stream_target:
         print(
-            f"Data recording started (+ UDP stream to {udp_target[0]}:{udp_target[1]}), "
+            f"Data recording started (+ TCP stream to {stream_target[0]}:{stream_target[1]}), "
             "press [Ctrl-C] or Delete to end recording."
         )
     else:
@@ -602,7 +618,7 @@ def main(args):
                 curr_gripper_state_L = bool(gripper_state_L)
                 curr_gripper_state_R = bool(gripper_state_R)
 
-            if udp_socket and udp_target:
+            if stream_socket and stream_target:
                 packet = {
                     # Backward compatibility: keep original key as LEFT arm pose.
                     "timestamp": left_timestamp,
@@ -625,8 +641,7 @@ def main(args):
                     "left_gripper_open": curr_gripper_state_L,
                     "right_gripper_open": curr_gripper_state_R,
                 }
-                with udp_send_lock:
-                    udp_socket.sendto(json.dumps(packet).encode("utf-8"), udp_target)
+                _send_stream_packet(stream_socket, stream_send_lock, packet)
 
             marks_to_send = 0
             with waypoint_lock:
@@ -686,9 +701,8 @@ def main(args):
                     "tracked_items": tracked_items_snapshot,
                     "named_waypoints_csv": args.named_waypoints_csv,
                 }
-                if udp_socket and udp_target:
-                    with udp_send_lock:
-                        udp_socket.sendto(json.dumps(waypoint_packet).encode("utf-8"), udp_target)
+                if stream_socket and stream_target:
+                    _send_stream_packet(stream_socket, stream_send_lock, waypoint_packet)
                 print(
                     f"Waypoint #{waypoint_index} marked "
                     f"(dependent={dependent_item_label or 'none'}, "
@@ -739,8 +753,8 @@ def main(args):
         camera_stop.set()
         if camera_thread:
             camera_thread.join(timeout=2)
-        if udp_socket:
-            udp_socket.close()
+        if stream_socket:
+            stream_socket.close()
 
         try:
             shutil.copy2(left_output, left_output_copy)

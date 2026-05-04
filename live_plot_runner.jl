@@ -638,6 +638,8 @@ function main()
     bootstrap_jld2_path = arg_value("--bootstrap-jld2", "")
     active_named_waypoints_csv = named_waypoints_csv
     active_task_name = ""
+    active_task_id = ""
+    active_dependent_item_label = ""
 
     GLMakie.activate!()
 
@@ -715,10 +717,12 @@ function main()
     screen = GLMakie.Screen(start_renderloop = true)
     display(screen, fig)
 
-    # Single UDP socket - receives both TCP pose packets and vision packets
-    sock = UDPSocket()
-    bind(sock, host, port)
-    println("Listening on ", host, ":", port, " (TCP poses + vision detections)")
+    # Single TCP listener receives all pose/vision/waypoint packets from Python.
+    server = listen(host, port)
+    println("Listening on ", host, ":", port, " (TCP stream: poses + vision + waypoints)")
+    println("Waiting for TCP stream client connection...")
+    sock = accept(server)
+    println("TCP stream client connected.")
     println("Close the plot window or press Ctrl+C to stop.")
     println("Named waypoint CSV: ", named_waypoints_csv)
     println("Observed joint limits file: ", observed_limits_path)
@@ -901,37 +905,70 @@ function main()
         wp = popfirst!(pending_waypoints)
         wp["waypoint_name"] = waypoint_name
         append_named_waypoint_row(active_named_waypoints_csv, wp)
-        waypoint_status.text[] = "Saved waypoint '" * waypoint_name * "'. Pending waypoint marks: " * string(length(pending_waypoints))
+        task_display = !isempty(strip(active_task_name)) ? active_task_name : (isempty(strip(active_task_id)) ? "<unknown-task>" : active_task_id)
+        dep_display = isempty(strip(active_dependent_item_label)) ? "none" : active_dependent_item_label
+        waypoint_status.text[] = "Saved waypoint '" * waypoint_name * "' for " * task_display * " (dep=" * dep_display * "). Pending waypoint marks: " * string(length(pending_waypoints))
         waypoint_name_box.displayed_string[] = nothing
     end
 
     # === PURE SINGLE-THREAD EVENT LOOP ===
-    # Based on learnings from docs/explorations/makie.md:
     # - Single Julia thread enforced (julia --threads 1)
-    # - recvfrom() for non-blocking UDP on Windows (readavailable() does not work for UDP)
+    # - TCP stream packets are newline-delimited JSON from Python
     # - Explicit yield() ensures GLMakie's internal renderloop gets CPU cycles
     # - No @async/@spawn/@Task to avoid fragile async+renderloop interactions
     # - All data updates atomic via tuple observables (prevents sync races)
 
+    tcp_rx_buffer = ""
+
     Base.exit_on_sigint(false)
     try
         while isopen(screen)
-            # Receive next UDP packet (recvfrom works for UDP on Windows; wraps any error as "no data")
-            addr, data = try
-                recvfrom(sock)
-            catch
-                (nothing, UInt8[])
+            packet_lines = String[]
+            if bytesavailable(sock) > 0
+                chunk = try
+                    String(readavailable(sock))
+                catch
+                    ""
+                end
+                if !isempty(chunk)
+                    tcp_rx_buffer *= chunk
+                    while true
+                        nl = findfirst('\n', tcp_rx_buffer)
+                        nl === nothing && break
+                        line = strip(tcp_rx_buffer[1:(nl - 1)])
+                        if nl >= lastindex(tcp_rx_buffer)
+                            tcp_rx_buffer = ""
+                        else
+                            tcp_rx_buffer = tcp_rx_buffer[(nl + 1):end]
+                        end
+                        if !isempty(line)
+                            push!(packet_lines, line)
+                        end
+                    end
+                end
+            elseif eof(sock)
+                println("TCP stream disconnected.")
+                break
             end
 
-            if !isempty(data)
-                pkt = try JSON3.read(String(data)) catch; nothing end
+            for raw_line in packet_lines
+                pkt = try JSON3.read(raw_line) catch; nothing end
 
                 if pkt !== nothing
                     # --- Waypoint mark packet ---
                     if haskey(pkt, :packet_type) && String(pkt.packet_type) == "waypoint_mark"
+                        packet_task_id = String(get(pkt, :task_id, ""))
                         packet_task_name = String(get(pkt, :task_name, ""))
+                        packet_dependent_item_label = String(get(pkt, :dependent_item_label, ""))
+
+                        if !isempty(packet_task_id)
+                            active_task_id = packet_task_id
+                        end
                         if !isempty(packet_task_name)
                             active_task_name = packet_task_name
+                        end
+                        if !isempty(packet_dependent_item_label)
+                            active_dependent_item_label = packet_dependent_item_label
                         end
 
                         packet_waypoint_csv = String(get(pkt, :named_waypoints_csv, active_named_waypoints_csv))
@@ -955,9 +992,9 @@ function main()
 
                         row = Dict{String, Any}(
                             "waypoint_index" => get(pkt, :waypoint_index, 0),
-                            "task_id" => String(get(pkt, :task_id, "")),
-                            "task_name" => String(get(pkt, :task_name, "")),
-                            "dependent_item_label" => String(get(pkt, :dependent_item_label, "")),
+                            "task_id" => (!isempty(packet_task_id) ? packet_task_id : active_task_id),
+                            "task_name" => (!isempty(packet_task_name) ? packet_task_name : active_task_name),
+                            "dependent_item_label" => (!isempty(packet_dependent_item_label) ? packet_dependent_item_label : active_dependent_item_label),
                             "left_gripper_open" => get(pkt, :left_gripper_open, ""),
                             "right_gripper_open" => get(pkt, :right_gripper_open, ""),
                             "left_x" => length(left_pose) >= 1 ? left_pose[1] : "",
@@ -1008,7 +1045,9 @@ function main()
                             "waypoint_mark_time" => get(pkt, :waypoint_mark_time, ""),
                         )
                         push!(pending_waypoints, row)
-                        waypoint_status.text[] = "Pending waypoint marks: " * string(length(pending_waypoints))
+                        task_display = !isempty(strip(active_task_name)) ? active_task_name : (isempty(strip(active_task_id)) ? "<unknown-task>" : active_task_id)
+                        dep_display = isempty(strip(active_dependent_item_label)) ? "none" : active_dependent_item_label
+                        waypoint_status.text[] = "Pending waypoint marks: " * string(length(pending_waypoints)) * " | task=" * task_display * " dep=" * dep_display
 
                     # --- Left/Right TCP pose packet ---
                     elseif haskey(pkt, :left_actual_TCP_pose) || haskey(pkt, :right_actual_TCP_pose) || haskey(pkt, :actual_TCP_pose)
@@ -1285,6 +1324,7 @@ function main()
     finally
         Base.disable_sigint() do
             try; close(sock); catch; end
+            try; close(server); catch; end
             try; GLMakie.closeall(); catch; end
         end
         Base.exit_on_sigint(true)
@@ -1297,7 +1337,7 @@ function main()
             println("WARNING: could not create traces directory '$traces_dir': $e")
         end
 
-        task_slug = safe_task_name_for_filename(active_task_name)
+        task_slug = safe_task_name_for_filename(active_task_name, active_task_id)
         save_path = joinpath(traces_dir, "trace_$(task_slug).jld2")
         try
             jldsave(save_path;
