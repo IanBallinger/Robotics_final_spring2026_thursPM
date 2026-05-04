@@ -92,7 +92,7 @@ double integral_max = 1e6;
 double measured_vel[num_wheels] = {0.0, 0.0, 0.0, 0.0};
 double control_effort[num_wheels] = {0.0, 0.0, 0.0, 0.0};
 
-constexpr float ENCODER_POS_MAX_SPEED_RAD_S = 30.0f;
+constexpr float ENCODER_POS_MAX_SPEED_RAD_S = 3.0f;
 constexpr float ENCODER_POS_JUMP_MARGIN_RAD = 0.25f;
 constexpr float ENCODER_VEL_ESTIMATE_TAU_S = 0.05f;
 bool validated_encoder_state_initialized[num_wheels] = {false, false, false, false};
@@ -493,22 +493,22 @@ void loop() {
       last_cmd_apply_ms = now;
     }
   } 
-  // else if (now - last_joystick_apply_ms >= JOYSTICK_APPLY_PERIOD_MS) {
-  //   if (now - last_controller_rx_ms > CONTROLLER_TIMEOUT_MS) {
-  //     stopMotors();
-  //     Serial.println("ERR,CONTROLLER_TIMEOUT");
-  //   } else {
-  //     DesiredWheelVel joystick_cmd;
-  //     if (joystickToWheelCommand(controllerMessage, joystick_cmd)) {
-  //       latest_rx_cmd = joystick_cmd;
-  //       applyWheelCommand(lowPassWheelCommand(latest_rx_cmd, now));
-  //       ack_dirty = true;
-  //     } else {
-  //       Serial.println("ERR,BAD_JOYSTICK_CMD");
-  //     }
-  //   }
-  //   last_joystick_apply_ms = now;
-  // }
+  else if (now - last_joystick_apply_ms >= JOYSTICK_APPLY_PERIOD_MS) {
+    if (now - last_controller_rx_ms > CONTROLLER_TIMEOUT_MS) {
+      stopMotors();
+      Serial.println("ERR,CONTROLLER_TIMEOUT");
+    } else {
+      DesiredWheelVel joystick_cmd;
+      if (joystickToWheelCommand(controllerMessage, joystick_cmd)) {
+        latest_rx_cmd = joystick_cmd;
+        applyWheelCommand(lowPassWheelCommand(latest_rx_cmd, now));
+        ack_dirty = true;
+      } else {
+        Serial.println("ERR,BAD_JOYSTICK_CMD");
+      }
+    }
+    last_joystick_apply_ms = now;
+  }
 
   if (ack_dirty && (now - last_ack_publish_ms >= ACK_PUBLISH_PERIOD_MS)) {
     printWheelAck(latest_applied_cmd);
