@@ -47,7 +47,7 @@ constexpr float ENCODER_SIGN[num_wheels] = {1.0f, -1.0f, 1.0f, -1.0f};
 #endif
 
 constexpr float JOYSTICK_DEADBAND = 0.1f;
-constexpr float JOYSTICK_MAX_FORWARD = 6.0f;
+constexpr float JOYSTICK_MAX_FORWARD = 3.0f;
 constexpr float JOYSTICK_MAX_TURN = 3.0f;
 
 // User-defined serial/control rates.
@@ -92,13 +92,10 @@ double integral_max = 1e6;
 double measured_vel[num_wheels] = {0.0, 0.0, 0.0, 0.0};
 double control_effort[num_wheels] = {0.0, 0.0, 0.0, 0.0};
 
-constexpr float ENCODER_POS_MAX_SPEED_RAD_S = 10.0f;
-constexpr float ENCODER_POS_JUMP_MARGIN_RAD = 0.25f;
-constexpr float ENCODER_VEL_ESTIMATE_TAU_S = 0.05f;
+constexpr float ENCODER_MAX_VALID_SPEED_RAD_S = 10.0f;
+constexpr float ENCODER_VEL_JUMP_MARGIN_RAD_S = 2.0f;
 bool validated_encoder_state_initialized[num_wheels] = {false, false, false, false};
-float validated_encoder_position_rad[num_wheels] = {0.0f, 0.0f, 0.0f, 0.0f};
 float validated_encoder_velocity_rad_s[num_wheels] = {0.0f, 0.0f, 0.0f, 0.0f};
-unsigned long last_encoder_state_ms[num_wheels] = {0, 0, 0, 0};
 
 DesiredWheelVel latest_rx_cmd;
 DesiredWheelVel latest_applied_cmd;
@@ -208,10 +205,8 @@ static void stopMotors() {
   for (uint8_t i = 0; i < num_wheels; ++i) {
     control_effort[i] = 0.0;
     measured_vel[i] = 0.0;
-    validated_encoder_position_rad[i] = 0.0f;
     validated_encoder_velocity_rad_s[i] = 0.0f;
     validated_encoder_state_initialized[i] = false;
-    last_encoder_state_ms[i] = 0;
     wheels[i].drive(0.0);
   }
 }
@@ -235,39 +230,18 @@ static DesiredWheelVel lowPassWheelCommand(const DesiredWheelVel& target,
 }
 
 static float readValidatedWheelVelocity(uint8_t wheel_index) {
-  const unsigned long now_ms = millis();
-  const float raw_position_rad =
-      ENCODER_SIGN[wheel_index] * encoders[wheel_index].getPosition();
+  const float raw_velocity_rad_s =
+      ENCODER_SIGN[wheel_index] * encoders[wheel_index].getVelocity();
 
   if (!validated_encoder_state_initialized[wheel_index]) {
-    validated_encoder_position_rad[wheel_index] = raw_position_rad;
     validated_encoder_velocity_rad_s[wheel_index] = 0.0f;
     validated_encoder_state_initialized[wheel_index] = true;
-    last_encoder_state_ms[wheel_index] = now_ms;
-    return validated_encoder_velocity_rad_s[wheel_index];
   }
 
-  const float dt_s = (last_encoder_state_ms[wheel_index] == 0 ||
-                      now_ms <= last_encoder_state_ms[wheel_index])
-                         ? 0.0f
-                         : (now_ms - last_encoder_state_ms[wheel_index]) * 0.001f;
-  last_encoder_state_ms[wheel_index] = now_ms;
-
-  if (dt_s <= 0.0f) {
-    return validated_encoder_velocity_rad_s[wheel_index];
-  }
-
-  const float raw_delta_rad =
-      raw_position_rad - validated_encoder_position_rad[wheel_index];
-  const float max_allowed_delta_rad =
-      ENCODER_POS_MAX_SPEED_RAD_S * dt_s + ENCODER_POS_JUMP_MARGIN_RAD;
-
-  if (fabsf(raw_delta_rad) <= max_allowed_delta_rad) {
-    const float raw_velocity_rad_s = raw_delta_rad / dt_s;
-    const float alpha = dt_s / (ENCODER_VEL_ESTIMATE_TAU_S + dt_s);
-    validated_encoder_velocity_rad_s[wheel_index] +=
-        alpha * (raw_velocity_rad_s - validated_encoder_velocity_rad_s[wheel_index]);
-    validated_encoder_position_rad[wheel_index] = raw_position_rad;
+  const float max_allowed_speed =
+      ENCODER_MAX_VALID_SPEED_RAD_S + ENCODER_VEL_JUMP_MARGIN_RAD_S;
+  if (fabsf(raw_velocity_rad_s) <= max_allowed_speed) {
+    validated_encoder_velocity_rad_s[wheel_index] = raw_velocity_rad_s;
   }
 
   return validated_encoder_velocity_rad_s[wheel_index];
@@ -280,8 +254,11 @@ static void applyWheelCommand(const DesiredWheelVel& cmd) {
     measured_vel[i] = readValidatedWheelVelocity(i);
 
     if (setpoints[i] == 0.0f) {
-      wheels[i].drive(0.0f);
-      control_effort[i] = 0.0f;
+      control_effort[i] = 0.0;
+      measured_vel[i] = 0.0;
+      validated_encoder_velocity_rad_s[i] = 0.0f;
+      validated_encoder_state_initialized[i] = false;
+      wheels[i].drive(0.0);
     } else {
       control_effort[i] = pids[i].calculateParallel(measured_vel[i], setpoints[i]);
       wheels[i].drive(control_effort[i]);

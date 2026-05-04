@@ -58,7 +58,12 @@ from localization import (  # noqa: E402
     WheelTwistMeasurement,
 )
 
-from camera import CameraIntrinsics, OpenCVCamera, RealSenseCamera, StreamConfig  # noqa: E402
+from camera import (
+    CameraIntrinsics,
+    OpenCVCamera,
+    RealSenseCamera,
+    StreamConfig,
+)  # noqa: E402
 from localization.april_tag_pose_est import AprilTagPoseEst
 from localization.person_detection import PersonDetector
 
@@ -187,7 +192,7 @@ class MissionRuntime:
         ) = self._load_config(
             self.tasks_path, self.localization_cfg_path, self.camera_cfg_path
         )
-        
+
         self.planned_tasks = self._plan_tasks(self.map_, self.tasks)
         self.planned_lookup = {
             planned.task.name: planned for planned in self.planned_tasks
@@ -514,6 +519,7 @@ class MissionRuntime:
             return
         try:
             pose = self.apriltag_estimator.get_pose_estimate()
+            print(f"AprilTag pose: {pose}")
         except Exception as exc:  # pragma: no cover
             print(f"WARN: AprilTag update failed: {exc}")
             return
@@ -831,10 +837,14 @@ class MissionRuntime:
         else:
             imu_msg = imu_packets[-1]
             ax_meas = (
-                imu_msg.ax if self.localization_config.use_imu_accel_in_prediction else 0.0
+                imu_msg.ax
+                if self.localization_config.use_imu_accel_in_prediction
+                else 0.0
             )
             ay_meas = (
-                imu_msg.ay if self.localization_config.use_imu_accel_in_prediction else 0.0
+                imu_msg.ay
+                if self.localization_config.use_imu_accel_in_prediction
+                else 0.0
             )
             imu = IMUMeasurement(ax=ax_meas, ay=ay_meas, wz=imu_msg.gz)
             self.localization_filter.predict(imu, dt)
@@ -949,9 +959,7 @@ class MissionRuntime:
         if self._last_task_for_timer != current_task_name:
             self._last_task_for_timer = current_task_name
             self._active_task_start_time = now
-        self.blackboard.set(
-            "task_elapsed_s", float(now - self._active_task_start_time)
-        )
+        self.blackboard.set("task_elapsed_s", float(now - self._active_task_start_time))
 
     def _update_manipulator_from_serial(
         self,
@@ -1075,9 +1083,11 @@ class MissionRuntime:
                     )
                 else:
                     cmd = self._zero_drive_command()
-                path_blocked = self._path_intersects_dynamic_obstacle(
-                    current_task, state, now=now
-                ) if self.deploy and not self.allstop else False
+                path_blocked = (
+                    self._path_intersects_dynamic_obstacle(current_task, state, now=now)
+                    if self.deploy and not self.allstop
+                    else False
+                )
                 if path_blocked:
                     cmd = self._zero_drive_command()
 
