@@ -182,6 +182,23 @@ bool handleWheelCommand(const String& line, DesiredWheelVel& des_wheel_spd) {
   return true;
 }
 
+bool handleModeCommand(const String& line) {
+  if (line == "MODE,AUTONOMY") {
+    autonomy_enabled = true;
+    stopMotors();
+    Serial.println("MODE,AUTONOMY");
+    return true;
+  }
+  if (line == "MODE,JOYSTICK") {
+    autonomy_enabled = false;
+    stopMotors();
+    has_pending_cmd = false;
+    Serial.println("MODE,JOYSTICK");
+    return true;
+  }
+  return false;
+}
+
 static void printDebugTiming(const char* tag, unsigned long& last_ms) {
   if (!SERIAL_DEBUG_TIMING) {
     return;
@@ -458,17 +475,21 @@ void loop() {
       rx_line.trim();
 
       DesiredWheelVel cmd;
-      if (rx_line.length() > 0 && handleWheelCommand(rx_line, cmd)) {
-        latest_rx_cmd = cmd;
-        has_pending_cmd = true;
-        last_cmd_rx_ms = millis();
-        if (!autonomy_enabled) {
-          autonomy_enabled = true;
-          stopMotors();
+      if (rx_line.length() > 0) {
+        if (handleModeCommand(rx_line)) {
+          // Mode-only command handled above.
+        } else if (handleWheelCommand(rx_line, cmd)) {
           latest_rx_cmd = cmd;
           has_pending_cmd = true;
           last_cmd_rx_ms = millis();
-          Serial.println("MODE,AUTONOMY_SERIAL");
+          if (!autonomy_enabled) {
+            autonomy_enabled = true;
+            stopMotors();
+            latest_rx_cmd = cmd;
+            has_pending_cmd = true;
+            last_cmd_rx_ms = millis();
+            Serial.println("MODE,AUTONOMY_SERIAL");
+          }
         }
       }
 

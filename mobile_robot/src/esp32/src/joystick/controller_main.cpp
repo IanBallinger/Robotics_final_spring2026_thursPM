@@ -56,7 +56,7 @@ static JoystickReading lowPassReading(JoystickReading current,
 
 static void printDebug(const JoystickReading& leftStick, const JoystickReading& rightStick) {
     Serial.printf(
-        "POTS raw_fb=%d raw_turn=%d mapped_fb=%.3f mapped_turn=%.3f joy1(x,y)=(%.3f, %.3f) joy2(x,y)=(%.3f, %.3f)\n",
+        "POTS raw_fb=%d raw_turn=%d mapped_fb=%.3f mapped_turn=%.3f joy1(x,y)=(%.3f, %.3f) joy2(x,y)=(%.3f, %.3f) buttons(L,R)=(%d,%d)\n",
         joystickRangeToAnalog(leftStick.y),
         joystickRangeToAnalog(rightStick.y),
         leftStick.y,
@@ -64,7 +64,9 @@ static void printDebug(const JoystickReading& leftStick, const JoystickReading& 
         controllerMessage.joystick1.x,
         controllerMessage.joystick1.y,
         controllerMessage.joystick2.x,
-        controllerMessage.joystick2.y);
+        controllerMessage.joystick2.y,
+        controllerMessage.buttonL ? 1 : 0,
+        controllerMessage.buttonR ? 1 : 0);
 }
 
 void setup() {

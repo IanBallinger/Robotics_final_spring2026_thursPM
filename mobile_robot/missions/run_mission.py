@@ -152,6 +152,7 @@ class TelemetryPacket:
     distance_to_goal: float
     heading_error: float
     deploy: bool
+    manual_control: bool
     allstop: bool
     paused: bool
     dynamic_obstacles: list[DynamicObstaclePacket]
@@ -222,6 +223,7 @@ class MissionRuntime:
                 "gripper_closed": True,
                 "previous_task_complete": True,
                 "deploy": False,
+                "manual_control": False,
                 "allstop": False,
                 "paused": True,
                 "task_elapsed_s": 0.0,
@@ -331,7 +333,9 @@ class MissionRuntime:
 
         self.last_loop_time = time.monotonic()
         self.deploy = False
+        self.manual_control = False
         self.allstop = False
+        self._last_wheel_mode: Optional[str] = None
         self.telemetry_host = telemetry_host
         self.telemetry_port = telemetry_port
         self.telemetry_period = (
@@ -923,8 +927,9 @@ class MissionRuntime:
             distance_to_goal=float(distance_to_goal),
             heading_error=float(heading_error),
             deploy=bool(self.deploy),
+            manual_control=bool(self.manual_control),
             allstop=bool(self.allstop),
-            paused=bool((not self.deploy) or self.allstop),
+            paused=bool((not self.deploy) or self.allstop or (not self.manual_control)),
             dynamic_obstacles=list(self._dynamic_obstacle_packets),
         )
         payload = json.dumps(asdict(packet)).encode("utf-8")
@@ -949,13 +954,19 @@ class MissionRuntime:
 
             if "deploy" in message:
                 self.deploy = bool(message["deploy"])
+            if "manual_control" in message:
+                self.manual_control = bool(message["manual_control"])
             if "allstop" in message:
                 self.allstop = bool(message["allstop"])
             self.blackboard.set("deploy", self.deploy)
+            self.blackboard.set("manual_control", self.manual_control)
             self.blackboard.set("allstop", self.allstop)
-            self.blackboard.set("paused", (not self.deploy) or self.allstop)
+            self.blackboard.set(
+                "paused", (not self.deploy) or self.allstop or (not self.manual_control)
+            )
             print(
-                f"control rx {addr[0]}:{addr[1]} deploy={self.deploy} allstop={self.allstop}"
+                f"control rx {addr[0]}:{addr[1]} deploy={self.deploy} "
+                f"manual_control={self.manual_control} allstop={self.allstop}"
             )
 
     def _update_task_timer(
@@ -1051,6 +1062,13 @@ class MissionRuntime:
         is_final_waypoint = planned.waypoint_index == len(planned.waypoints) - 1
         return goal_wp, is_final_waypoint
 
+    def _update_wheel_mode(self) -> None:
+        desired_mode = "AUTONOMY" if (self.allstop or (self.deploy and self.manual_control)) else "JOYSTICK"
+        if desired_mode == self._last_wheel_mode:
+            return
+        self.serial.send_raw_line(f"MODE,{desired_mode}", force=True)
+        self._last_wheel_mode = desired_mode
+
     def run(self, max_ticks: Optional[int] = None) -> None:
         period = 1.0 / self.runtime_config.control_rate_hz
         tick = 0
@@ -1072,19 +1090,24 @@ class MissionRuntime:
                 self._maybe_capture_wheel_debug_lines()
                 self._maybe_update_apriltag()
                 self._poll_control_socket()
+                autonomy_active = self.deploy and self.manual_control and not self.allstop
                 self.blackboard.set("deploy", self.deploy)
+                self.blackboard.set("manual_control", self.manual_control)
                 self.blackboard.set("allstop", self.allstop)
-                self.blackboard.set("paused", (not self.deploy) or self.allstop)
+                self.blackboard.set(
+                    "paused", (not self.deploy) or self.allstop or (not self.manual_control)
+                )
+                self._update_wheel_mode()
                 # Person detection is intentionally lazy: it runs only when we
                 # actually need dynamic-obstacle information for path blocking.
                 self._update_manipulator_from_serial(
                     current_task,
                     now=now,
-                    active=self.deploy and not self.allstop,
+                    active=autonomy_active,
                 )
 
                 state = self._current_state_for_controller()
-                if self.deploy and not self.allstop:
+                if autonomy_active:
                     goal_wp, final_pose_mode = self._active_goal_waypoint(
                         current_task, state
                     )
@@ -1095,17 +1118,16 @@ class MissionRuntime:
                     cmd = self._zero_drive_command()
                 path_blocked = (
                     self._path_intersects_dynamic_obstacle(current_task, state, now=now)
-                    if self.deploy and not self.allstop
+                    if autonomy_active
                     else False
                 )
                 if path_blocked:
                     cmd = self._zero_drive_command()
 
-                # Only publish wheel commands while deployed or during all-stop.
-                # When deploy=False, do not stream zero commands; that allows the
-                # wheel ESP32 joystick path to remain in control instead of being
-                # continuously overridden by serial autonomy commands.
-                if self.deploy or self.allstop:
+                # Only publish wheel commands while autonomy is actively driving
+                # or during all-stop. In joystick mode, leave the ESP32 in its
+                # local joystick path and do not override it with serial commands.
+                if autonomy_active or self.allstop:
                     # wheel_rates are in canonical ESP32 order:
                     # (w1, w2, w3, w4) = (left_front, right_front, left_rear, right_rear)
                     self.serial.send_wheel_cmd(*cmd.wheel_rates)
@@ -1118,7 +1140,7 @@ class MissionRuntime:
                     distance_to_goal=goal_error,
                     heading_error=heading_error,
                 )
-                if self.deploy and not self.allstop:
+                if autonomy_active:
                     self.tree.tick()
                 new_task = self.blackboard.get("current_task")
 
@@ -1127,7 +1149,8 @@ class MissionRuntime:
                 print(
                     f"tick={tick:04d} dt={dt:.3f} task={new_task} pos=({state.x:.3f}, {state.y:.3f}) "
                     f"yaw={state.heading:.3f} goal_err={goal_error:.3f} "
-                    f"heading_err={heading_error:.3f} deploy={self.deploy} allstop={self.allstop} "
+                    f"heading_err={heading_error:.3f} deploy={self.deploy} "
+                    f"manual_control={self.manual_control} allstop={self.allstop} "
                     f"wheel_rates={tuple(round(v, 3) for v in cmd.wheel_rates)}"
                     f" vx_cmd={cmd.vx:.3f} omega_cmd={cmd.omega:.3f}"
                 )
@@ -1151,6 +1174,7 @@ class MissionRuntime:
                 self.serial.send_wheel_cmd(0.0, 0.0, 0.0, 0.0, force=True)
                 self.serial.flush_tx(force=True)
                 time.sleep(0.02)
+            self.serial.send_raw_line("MODE,JOYSTICK", force=True)
             self.serial.close()
             if self.elevator_serial is not None:
                 self.elevator_serial.close()

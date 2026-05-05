@@ -158,11 +158,14 @@ def setup_plot(map_: Map, tasks: list[Any]):
     ax.set_aspect("equal", adjustable="box")
     ax.grid(True, alpha=0.25)
     ax.legend(loc="upper left", fontsize=8)
-    deploy_ax = fig.add_axes([0.12, 0.03, 0.18, 0.07])
-    allstop_ax = fig.add_axes([0.34, 0.03, 0.18, 0.07])
+    deploy_ax = fig.add_axes([0.08, 0.03, 0.18, 0.07])
+    manual_ax = fig.add_axes([0.30, 0.03, 0.22, 0.07])
+    allstop_ax = fig.add_axes([0.56, 0.03, 0.18, 0.07])
     deploy_button = Button(deploy_ax, "DEPLOY: OFF")
+    manual_button = Button(manual_ax, "AUTO DRIVE: OFF")
     allstop_button = Button(allstop_ax, "ALLSTOP: OFF")
     _button_style(deploy_button, active=False, on_color="tab:green", off_color="0.85")
+    _button_style(manual_button, active=False, on_color="tab:blue", off_color="0.85")
     _button_style(allstop_button, active=False, on_color="tab:red", off_color="0.85")
 
     fig.tight_layout(rect=(0.0, 0.12, 1.0, 1.0))
@@ -175,6 +178,7 @@ def setup_plot(map_: Map, tasks: list[Any]):
         cell_patch,
         status_text,
         deploy_button,
+        manual_button,
         allstop_button,
     )
 
@@ -231,6 +235,7 @@ def update_visualization(
             f"heading_error: {float(telemetry.get('heading_error', float('nan'))):.3f}",
             f"localization_ok: {telemetry.get('localization_ok')}",
             f"deploy: {telemetry.get('deploy')}",
+            f"manual_control: {telemetry.get('manual_control')}",
             f"allstop: {telemetry.get('allstop')}",
             f"paused: {telemetry.get('paused')}",
             f"dynamic_obstacles: {len(telemetry.get('dynamic_obstacles', []))}",
@@ -289,6 +294,7 @@ def main() -> None:
         cell_patch,
         status_text,
         deploy_button,
+        manual_button,
         allstop_button,
     ) = setup_plot(map_, tasks)
     if not args.no_show:
@@ -305,7 +311,7 @@ def main() -> None:
     traj_y: list[float] = []
     latest: Optional[dict[str, Any]] = None
     latest_sender_host: Optional[str] = None
-    control_state = {"deploy": False, "allstop": False}
+    control_state = {"deploy": False, "manual_control": False, "allstop": False}
     t0 = time.monotonic()
 
     def control_target_host() -> Optional[str]:
@@ -319,12 +325,16 @@ def main() -> None:
         payload = json.dumps(control_state).encode("utf-8")
         control_sock.sendto(payload, (host, args.control_port))
         print(
-            f"control tx {host}:{args.control_port} deploy={control_state['deploy']} allstop={control_state['allstop']}"
+            f"control tx {host}:{args.control_port} deploy={control_state['deploy']} "
+            f"manual_control={control_state['manual_control']} allstop={control_state['allstop']}"
         )
 
     def refresh_buttons() -> None:
         deploy_button.label.set_text(
             f"DEPLOY: {'ON' if control_state['deploy'] else 'OFF'}"
+        )
+        manual_button.label.set_text(
+            f"AUTO DRIVE: {'ON' if control_state['manual_control'] else 'OFF'}"
         )
         allstop_button.label.set_text(
             f"ALLSTOP: {'ON' if control_state['allstop'] else 'OFF'}"
@@ -333,6 +343,12 @@ def main() -> None:
             deploy_button,
             active=control_state['deploy'],
             on_color="tab:green",
+            off_color="0.85",
+        )
+        _button_style(
+            manual_button,
+            active=control_state['manual_control'],
+            on_color="tab:blue",
             off_color="0.85",
         )
         _button_style(
@@ -348,12 +364,18 @@ def main() -> None:
         refresh_buttons()
         send_control_state()
 
+    def on_manual_control(_event) -> None:
+        control_state["manual_control"] = not control_state["manual_control"]
+        refresh_buttons()
+        send_control_state()
+
     def on_allstop(_event) -> None:
         control_state["allstop"] = not control_state["allstop"]
         refresh_buttons()
         send_control_state()
 
     deploy_button.on_clicked(on_deploy)
+    manual_button.on_clicked(on_manual_control)
     allstop_button.on_clicked(on_allstop)
     refresh_buttons()
 
@@ -368,6 +390,7 @@ def main() -> None:
                 traj_x.append(float(latest["x"]))
                 traj_y.append(float(latest["y"]))
                 control_state["deploy"] = bool(latest.get("deploy", control_state["deploy"]))
+                control_state["manual_control"] = bool(latest.get("manual_control", control_state["manual_control"]))
                 control_state["allstop"] = bool(latest.get("allstop", control_state["allstop"]))
                 refresh_buttons()
                 print(
