@@ -135,6 +135,8 @@ bool freshWirelessData = false;
 ControllerMessage controllerMessage;
 RobotMessage robotMessage;
 
+static void stopMotors();
+
 void onSendData(const uint8_t* mac_addr, esp_now_send_status_t status) {
   if (Serial) {
     Serial.print("ESP_NOW_SEND,");
