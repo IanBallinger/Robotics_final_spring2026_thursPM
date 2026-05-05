@@ -67,8 +67,10 @@ constexpr int PINCH_RIGHT_SERVO_PIN = 41;
 constexpr int SERVO_MIN_US = 544;
 constexpr int SERVO_MAX_US = 2400;
 constexpr float RAD_TO_DEG_FACTOR = 180.0f / PI;
-constexpr float PINCH_OPEN_ANGLE_DEG = 0.0f;
-constexpr float PINCH_CLOSE_ANGLE_DEG = 90.0f;
+constexpr float PINCH_OPEN_ANGLE_DEG_L = 0.0f;
+constexpr float PINCH_CLOSE_ANGLE_DEG_L = 90.0f;
+constexpr float PINCH_OPEN_ANGLE_DEG_R = -90.0f;
+constexpr float PINCH_CLOSE_ANGLE_DEG_R = 0.0f;
 constexpr float ARM_BASE_X_M = 0.0f;
 constexpr float ARM_BASE_Y_M = 0.0f;
 constexpr float ARM_LINK_1_M = 0.26f;
@@ -471,10 +473,12 @@ static bool commandArmToJointAngles(const DesiredArmJointAngles& cmd) {
 }
 
 static bool commandPinch(PinchCommand cmd) {
-  const float pinch_angle_deg =
-      (cmd == PinchCommand::CLOSE) ? PINCH_CLOSE_ANGLE_DEG : PINCH_OPEN_ANGLE_DEG;
-  const float left_angle_deg = clampFloat(-pinch_angle_deg, ELBOW_MIN_DEG, ELBOW_MAX_DEG);
-  const float right_angle_deg = clampFloat(pinch_angle_deg, ELBOW_MIN_DEG, ELBOW_MAX_DEG);
+  const float pinch_angle_deg_l =
+      (cmd == PinchCommand::CLOSE) ? PINCH_CLOSE_ANGLE_DEG_L : PINCH_OPEN_ANGLE_DEG_L;
+  const float pinch_angle_deg_r =
+      (cmd == PinchCommand::CLOSE) ? PINCH_CLOSE_ANGLE_DEG_R : PINCH_OPEN_ANGLE_DEG_R;
+  const float left_angle_deg = clampFloat(-pinch_angle_deg_l, ELBOW_MIN_DEG, ELBOW_MAX_DEG);
+  const float right_angle_deg = clampFloat(pinch_angle_deg_r, ELBOW_MIN_DEG, ELBOW_MAX_DEG);
 
   pinch_left_ms = convertElbowAngleToMicroseconds(left_angle_deg);
   pinch_right_ms = convertShoulderAngleToMicroseconds(right_angle_deg);
