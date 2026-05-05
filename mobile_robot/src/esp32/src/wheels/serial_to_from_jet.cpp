@@ -117,7 +117,11 @@ unsigned long last_ack_publish_ms = 0;
 
 unsigned long last_ack_debug_ms = 0;
 
-ControllerMessage controllerMessage;
+const uint8_t* peerAddr = controllerAddr;
+esp_now_peer_info_t peerInfo = {};
+bool freshWirelessData = false;
+ControllerMessage controllerMessage = {};
+RobotMessage robotMessage = {};
 
 static void stopMotors();
 
@@ -138,6 +142,7 @@ void onRecvData(const uint8_t* mac, const uint8_t* incomingData, int len) {
   }
 
   memcpy(&controllerMessage, incomingData, sizeof(controllerMessage));
+  freshWirelessData = true;
   last_controller_rx_ms = millis();
 }
 
