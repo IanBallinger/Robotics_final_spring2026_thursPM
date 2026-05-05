@@ -660,6 +660,10 @@ class MissionRuntime:
                 det: Optional[TagDetection] = None
                 center_error_px: Optional[float] = None
                 wheel_rates = self._zero_wheel_rates()
+                detections: dict[str, TagDetection] = {}
+
+                if self.apriltag_camera is not None:
+                    detections = self._detect_tags()
 
                 if task is None:
                     self._set_phase(MissionPhase.DONE)
@@ -679,7 +683,6 @@ class MissionRuntime:
                             self._set_phase(MissionPhase.STOP_FOR_OBSTACLE)
                             wheel_rates = self._zero_wheel_rates()
                         elif target is not None:
-                            detections = self._detect_tags()
                             wheel_rates, det, _distance_error_m, center_error_px = self._seek_tag_command(target, detections, now)
                     elif self.phase == MissionPhase.STOP_FOR_OBSTACLE:
                         wheel_rates = self._zero_wheel_rates()
