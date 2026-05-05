@@ -1,4 +1,6 @@
 #include <Bounce2.h>
+#include <Wire.h>
+#include "Adafruit_seesaw.h"
 #include "wireless.h"
 #include "util.h"
 #include "joystick.h"
@@ -8,10 +10,16 @@
 
 #define CONTROLLER_READ_PERIOD_MS 50
 #define DEBUG_PRINT_PERIOD_MS 100
+#define ROTARY_PRINT_PERIOD_MS 200
 #define POT_DEADBAND 0.08f
 #define COMMAND_FILTER_TAU_S 0.1f
+#define ROTARY_SEESAW_ADDR 0x49
 
 static unsigned long last_command_filter_ms = 0;
+
+static Adafruit_seesaw rotarySeesaw;
+static bool rotaryAvailable = false;
+static int32_t lastRotaryPosition = 0;
 
 ControllerMessage prevControllerMessage;
 
@@ -69,10 +77,45 @@ static void printDebug(const JoystickReading& leftStick, const JoystickReading& 
         controllerMessage.buttonR ? 1 : 0);
 }
 
+static void setupRotaryEncoderReadout() {
+    Wire.begin();
+    if (!rotarySeesaw.begin(ROTARY_SEESAW_ADDR)) {
+        Serial.printf(
+            "Rotary encoder not found on I2C at 0x%02X; skipping readout.\n",
+            ROTARY_SEESAW_ADDR);
+        rotaryAvailable = false;
+        return;
+    }
+
+    const uint32_t version = ((rotarySeesaw.getVersion() >> 16) & 0xFFFF);
+    Serial.printf(
+        "Rotary encoder connected on I2C addr 0x%02X, product=%lu\n",
+        ROTARY_SEESAW_ADDR,
+        static_cast<unsigned long>(version));
+    rotarySeesaw.setEncoderPosition(0);
+    rotaryAvailable = true;
+    lastRotaryPosition = 0;
+}
+
+static void printRotaryEncoderReadout() {
+    if (!rotaryAvailable) {
+        return;
+    }
+
+    const int32_t position = rotarySeesaw.getEncoderPosition();
+    if (position != lastRotaryPosition) {
+        Serial.printf("ROTARY pos=%ld delta=%ld\n",
+                      static_cast<long>(position),
+                      static_cast<long>(position - lastRotaryPosition));
+        lastRotaryPosition = position;
+    }
+}
+
 void setup() {
     Serial.begin(115200);
 
     setupWireless();
+    setupRotaryEncoderReadout();
 
     joystick1.setup();
     joystick2.setup();
@@ -121,5 +164,9 @@ void loop() {
 
     EVERY_N_MILLIS(DEBUG_PRINT_PERIOD_MS) {
         printDebug(filteredLeftCommand, filteredRightCommand);
+    }
+
+    EVERY_N_MILLIS(ROTARY_PRINT_PERIOD_MS) {
+        printRotaryEncoderReadout();
     }
 }
