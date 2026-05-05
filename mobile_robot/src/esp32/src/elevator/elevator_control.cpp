@@ -632,19 +632,17 @@ void setup() {
   pid.setParallelTunings(Kp, Ki, Kd, 0.1f, integral_min, integral_max);
   Serial.println("SETUP_PID");
 
-  shoulder_servo.setPeriodHertz(50);
-  elbow_servo.setPeriodHertz(50);
   pinch_left_servo.setPeriodHertz(50);
   pinch_right_servo.setPeriodHertz(50);
   Serial.println("SETUP_ELBOW");
   Serial.println("SETUP_PINCH_L");
   Serial.println("SETUP_PINCH_R");
 
-  shoulder_servo.attach(ARM_SHOULDER_SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
-  elbow_servo.attach(ARM_ELBOW_SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
+  // shoulder_servo.attach(ARM_SHOULDER_SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
+  // elbow_servo.attach(ARM_ELBOW_SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
   pinch_left_servo.attach(PINCH_LEFT_SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
   pinch_right_servo.attach(PINCH_RIGHT_SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
-  moveArmToJointAngles(0.0f, 0.0f);
+  // moveArmToJointAngles(0.0f, 0.0f);
   commandPinch(PinchCommand::OPEN);
   applied_shoulder_rad = 0.0f;
   applied_elbow_rad = 0.0f;
