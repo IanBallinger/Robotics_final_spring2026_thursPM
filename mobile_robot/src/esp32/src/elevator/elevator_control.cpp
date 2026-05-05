@@ -62,8 +62,6 @@ constexpr float ELEVATOR_ENCODER_SIGN = 1.0f;
 constexpr float ELEVATOR_METERS_PER_RAD = 0.018f;
 constexpr float ELEVATOR_METERS_BIAS = -0.02f;
 
-constexpr int ARM_SHOULDER_SERVO_PIN = 40;
-constexpr int ARM_ELBOW_SERVO_PIN = 41;
 constexpr int PINCH_LEFT_SERVO_PIN = 42;
 constexpr int PINCH_RIGHT_SERVO_PIN = 39;
 constexpr int SERVO_MIN_US = 544;
