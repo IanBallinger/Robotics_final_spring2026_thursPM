@@ -477,7 +477,7 @@ static bool commandPinch(PinchCommand cmd) {
   const float right_angle_deg = clampFloat(pinch_angle_deg, ELBOW_MIN_DEG, ELBOW_MAX_DEG);
 
   pinch_left_ms = convertElbowAngleToMicroseconds(left_angle_deg);
-  pinch_right_ms = convertElbowAngleToMicroseconds(right_angle_deg);
+  pinch_right_ms = convertShoulderAngleToMicroseconds(right_angle_deg);
 
   pinch_left_servo.writeMicroseconds(pinch_left_ms);
   pinch_right_servo.writeMicroseconds(pinch_right_ms);
