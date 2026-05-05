@@ -163,6 +163,7 @@ double pinch_left_ms = 0.0;
 double pinch_right_ms = 0.0;
 
 static bool handlePinchCommand(const String& line, PinchCommand& cmd);
+static float readEncoderHeightMeters();
 
 static void onElevatorWirelessSend(const uint8_t* mac_addr, esp_now_send_status_t status) {
   (void)mac_addr;
