@@ -669,18 +669,19 @@ void loop() {
       PinchCommand pinch_cmd = PinchCommand::OPEN;
       float measured_initial_height_m = NAN;
       if (rx_line.length() > 0) {
-        if (handleElevatorCommand(rx_line, cmd)) {
-          latest_rx_cmd = cmd;
-          has_valid_elevator_cmd = true;
-          last_cmd_rx_ms = millis();
-        } else if (handleEncoderHeightInitCommand(rx_line, measured_initial_height_m)) {
-          initializeEncoderHeightReference(measured_initial_height_m);
-          Serial.print("ELV_ENC_INIT_ACK,");
-          Serial.println(readEncoderHeightMeters(), 4);
-        } else if (handleArmCommand(rx_line, arm_cmd)) {
-          latest_arm_cmd = arm_cmd;
-          moveArmToXY(latest_arm_cmd);
-        } else if (handlePinchCommand(rx_line, pinch_cmd)) {
+        // if (handleElevatorCommand(rx_line, cmd)) {
+        //   latest_rx_cmd = cmd;
+        //   has_valid_elevator_cmd = true;
+        //   last_cmd_rx_ms = millis();
+        // } else if (handleEncoderHeightInitCommand(rx_line, measured_initial_height_m)) {
+        //   initializeEncoderHeightReference(measured_initial_height_m);
+        //   Serial.print("ELV_ENC_INIT_ACK,");
+        //   Serial.println(readEncoderHeightMeters(), 4);
+        // } else if (handleArmCommand(rx_line, arm_cmd)) {
+        //   latest_arm_cmd = arm_cmd;
+        //   moveArmToXY(latest_arm_cmd);
+        // } else 
+        if (handlePinchCommand(rx_line, pinch_cmd)) {
           commandPinch(pinch_cmd);
         } else {
           DesiredArmJointAngles arm_joint_angles_cmd;
@@ -706,31 +707,31 @@ void loop() {
     interrupts();
     commandPinch(pinch_cmd);
   }
-  updateArmMotion(now);
-  const float measured_height_m = readElevatorHeightMeters();
+  // updateArmMotion(now);
+  // const float measured_height_m = readElevatorHeightMeters();
 
-  if (now - last_cmd_rx_ms > CMD_TIMEOUT_MS) {
-    stopElevator();
-  }
+  // if (now - last_cmd_rx_ms > CMD_TIMEOUT_MS) {
+  //   stopElevator();
+  // }
 
-  if (has_valid_elevator_cmd && now - last_cmd_apply_ms >= CMD_APPLY_PERIOD_MS) {
-    if (!isnan(measured_height_m)) {
-      applyElevatorCommand(latest_rx_cmd, measured_height_m);
-    } else {
-      elevator_driver.drive(0.0);
-    }
-    ack_dirty = true;
-    last_cmd_apply_ms = now;
-  }
+  // if (has_valid_elevator_cmd && now - last_cmd_apply_ms >= CMD_APPLY_PERIOD_MS) {
+  //   if (!isnan(measured_height_m)) {
+  //     applyElevatorCommand(latest_rx_cmd, measured_height_m);
+  //   } else {
+  //     elevator_driver.drive(0.0);
+  //   }
+  //   ack_dirty = true;
+  //   last_cmd_apply_ms = now;
+  // }
 
-  if (ack_dirty && now - last_ack_publish_ms >= ACK_PUBLISH_PERIOD_MS) {
-    printElevatorAck(latest_applied_cmd);
-    ack_dirty = false;
-    last_ack_publish_ms = now;
-  }
+  // if (ack_dirty && now - last_ack_publish_ms >= ACK_PUBLISH_PERIOD_MS) {
+  //   printElevatorAck(latest_applied_cmd);
+  //   ack_dirty = false;
+  //   last_ack_publish_ms = now;
+  // }
 
-  if (!isnan(measured_height_m) && now - last_meas_publish_ms >= MEAS_PUBLISH_PERIOD_MS) {
-    publishElevatorMeasurement(measured_height_m);
-    last_meas_publish_ms = now;
+  // if (!isnan(measured_height_m) && now - last_meas_publish_ms >= MEAS_PUBLISH_PERIOD_MS) {
+  //   publishElevatorMeasurement(measured_height_m);
+  //   last_meas_publish_ms = now;
   }
 }
