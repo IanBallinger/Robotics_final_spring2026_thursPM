@@ -11,6 +11,7 @@ try:
         ElevatorHeightReading,
         parse_elevator_line,
         serialize_elevator_cmd,
+        serialize_pinch_cmd,
     )
     from .serialization import serialize_arm_cmd
 except ImportError:
@@ -18,6 +19,7 @@ except ImportError:
         ElevatorHeightReading,
         parse_elevator_line,
         serialize_elevator_cmd,
+        serialize_pinch_cmd,
     )
     from serialization import serialize_arm_cmd  # type: ignore[no-redef]
 
@@ -47,6 +49,7 @@ class ElevatorSerialConnect:
 
         self._pending_height_cmd: Optional[float] = None
         self._pending_arm_cmd: Optional[tuple[float, float]] = None
+        self._pending_pinch_cmd: Optional[tuple[float, float]] = None
         self._last_tx_time: Optional[float] = None
 
         self._latest_raw_line: Optional[str] = None
@@ -84,7 +87,11 @@ class ElevatorSerialConnect:
             print(f"[{tag}] dt={now - last:.6f}s")
 
     def _tx_due(self, now: float) -> bool:
-        has_pending = self._pending_height_cmd is not None or self._pending_arm_cmd is not None
+        has_pending = (
+            self._pending_height_cmd is not None
+            or self._pending_arm_cmd is not None
+            or self._pending_pinch_cmd is not None
+        )
         return has_pending and (
             self._tx_period <= 0.0
             or self._last_tx_time is None
@@ -100,7 +107,11 @@ class ElevatorSerialConnect:
 
     def _write_pending_if_due(self, force: bool = False) -> bool:
         now = time.monotonic()
-        if self._pending_height_cmd is None and self._pending_arm_cmd is None:
+        if (
+            self._pending_height_cmd is None
+            and self._pending_arm_cmd is None
+            and self._pending_pinch_cmd is None
+        ):
             return False
         if not force and not self._tx_due(now):
             return False
@@ -123,6 +134,14 @@ class ElevatorSerialConnect:
             self._pending_arm_cmd = None
             wrote_any = True
 
+        if self._pending_pinch_cmd is not None:
+            payload = serialize_pinch_cmd(*self._pending_pinch_cmd)
+            self.ser.write(payload.encode("ascii"))
+            if self.debug:
+                print(f"[TX PINCH_CMD] {payload.strip()}")
+            self._pending_pinch_cmd = None
+            wrote_any = True
+
         if wrote_any:
             self.ser.flush()
             self._last_tx_time = now
@@ -134,6 +153,10 @@ class ElevatorSerialConnect:
 
     def send_arm_cmd(self, x_m: float, y_m: float, force: bool = False) -> bool:
         self._pending_arm_cmd = (float(x_m), float(y_m))
+        return self._write_pending_if_due(force=force)
+
+    def send_pinch_cmd(self, theta1_rad: float, theta2_rad: float, force: bool = False) -> bool:
+        self._pending_pinch_cmd = (float(theta1_rad), float(theta2_rad))
         return self._write_pending_if_due(force=force)
 
     def flush_tx(self, force: bool = False) -> bool:

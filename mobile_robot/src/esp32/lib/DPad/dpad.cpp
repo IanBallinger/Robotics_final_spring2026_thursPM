@@ -8,7 +8,7 @@ void DPadReading::print(uint8_t nTabs) {
     printTabs(nTabs); Serial.printf("left: %s\n", left);
     printTabs(nTabs); Serial.printf("right: %s\n", right);
     printTabs(nTabs); Serial.printf("select: %s\n", select);
-    printTabs(nTabs); Serial.printf("encoder position: %.2f\n"); encoderPosition;
+    printTabs(nTabs); Serial.printf("encoder position: %ld\n", static_cast<long>(encoderPosition));
 }
 
 bool DPadReading::operator==(const DPadReading& other) {
