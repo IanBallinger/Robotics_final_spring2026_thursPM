@@ -1007,22 +1007,11 @@ void loop() {
   }
 
   const unsigned long now = millis();
-<<<<<<< HEAD
-  if (has_pending_wireless_pinch_cmd) {
-    noInterrupts();
-    const PinchCommand pinch_cmd = pending_wireless_pinch_cmd;
-    has_pending_wireless_pinch_cmd = false;
-    interrupts();
-    commandPinch(pinch_cmd);
-  }
-  updateArmMotion(now);
-=======
   if (pinch_slew_active) {
     updatePinchServoMotion(now);
   } else {
     updateArmMotion(now);
   }
->>>>>>> 7d44ee2 (added joystick pinch and serial pinch commands)
   const float measured_height_m = readElevatorHeightMeters();
 
   if (now - last_cmd_rx_ms > CMD_TIMEOUT_MS) {
