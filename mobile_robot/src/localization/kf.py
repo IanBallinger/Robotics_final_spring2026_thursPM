@@ -286,6 +286,15 @@ class _BaseLocalizationFilter:
         H[1, VY] = 1.0
         return H
 
+    def reset(self, state: np.ndarray, covariance: np.ndarray) -> np.ndarray:
+        self.state = self._coerce_initial_state(state)
+        self.covariance = self._coerce_square_matrix(
+            covariance,
+            default=np.eye(STATE_DIM, dtype=float) * 1e-2,
+        )
+        self.state[YAW] = wrap_angle(self.state[YAW])
+        return self.get_state()
+
     def get_state(self) -> np.ndarray:
         return self.state.copy()
 

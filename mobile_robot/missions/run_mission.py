@@ -91,6 +91,7 @@ class LocalizationConfig:
     gyro_measurement_noise: np.ndarray
     wheel_twist_measurement_noise: np.ndarray
     use_imu_accel_in_prediction: bool
+    apriltag_reinitialize_distance_m: float
 
 
 @dataclass
@@ -435,6 +436,9 @@ class MissionRuntime:
             use_imu_accel_in_prediction=bool(
                 loc.get("use_imu_accel_in_prediction", False)
             ),
+            apriltag_reinitialize_distance_m=float(
+                loc.get("apriltag_reinitialize_distance_m", 1.0)
+            ),
         )
         runtime_cfg = RuntimeConfig(
             control_rate_hz=float(runtime.get("control_rate_hz", 20.0)),
@@ -539,7 +543,26 @@ class MissionRuntime:
             return
         measurement = self._coerce_global_apriltag_measurement(pose)
         if measurement is not None:
-            self.localization_filter.update_apriltag(measurement)
+            est = self.localization_filter.get_state()
+            position_error_m = float(
+                np.hypot(measurement.x - float(est[0]), measurement.y - float(est[1]))
+            )
+            if position_error_m >= self.localization_config.apriltag_reinitialize_distance_m:
+                reset_state = self.localization_config.initial_state.copy()
+                reset_state[0] = measurement.x
+                reset_state[1] = measurement.y
+                reset_state[2] = measurement.yaw
+                self.localization_filter.reset(
+                    reset_state,
+                    self.localization_config.initial_covariance,
+                )
+                print(
+                    "INFO: Reinitialized localization from AprilTag "
+                    f"(position error {position_error_m:.3f} m >= "
+                    f"{self.localization_config.apriltag_reinitialize_distance_m:.3f} m)"
+                )
+            else:
+                self.localization_filter.update_apriltag(measurement)
 
     @staticmethod
     def _transform_from_rotation_translation(
