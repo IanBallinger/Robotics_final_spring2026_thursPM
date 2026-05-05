@@ -3,7 +3,6 @@
 #include <esp_now.h>
 #include <WiFi.h>
 
-#include "../../include/pinch_wireless.h"
 #include "controller_pinout.h"
 #include "display.h"
 #include "dpad.h"
@@ -26,14 +25,6 @@ enum class PinchState {
     CLOSE,
 };
 
-// ANO / seesaw encoder counts: rotate right -> open, left -> close (flip sign if reversed).
-#ifndef PINCH_ENCODER_OPEN_TICKS
-#define PINCH_ENCODER_OPEN_TICKS 1
-#endif
-#ifndef PINCH_ENCODER_CLOSE_TICKS
-#define PINCH_ENCODER_CLOSE_TICKS (-1)
-#endif
-
 static unsigned long last_command_filter_ms = 0;
 
 static DPad rotaryDPad(ROTARY_SEESAW_ADDR);
@@ -48,50 +39,6 @@ static PinchState lastPinchState = PinchState::NONE;
 // Use the original joystick abstraction/setup.
 Joystick joystick1(9, 6);
 Joystick joystick2(1, 5);
-
-// ANO Rotary Encoder with Adafruit Seesaw (default I2C 0x49); same stack as DPad class.
-static DPad dpad(0x49);
-static int8_t last_pinch_mode_sent = 127;
-
-static int8_t pinchModeFromEncoder(int32_t encoder_ticks) {
-#ifdef PINCH_ENCODER_INVERT
-  encoder_ticks = -encoder_ticks;
-#endif
-  if (encoder_ticks >= PINCH_ENCODER_OPEN_TICKS) {
-    return 1;
-  }
-  if (encoder_ticks <= PINCH_ENCODER_CLOSE_TICKS) {
-    return -1;
-  }
-  return 0;
-}
-
-static void addElevatorPinchPeerIfEnabled() {
-  if (elevatorAddr[0] == static_cast<uint8_t>(0xFF)) {
-    return;
-  }
-  esp_now_peer_info_t peer{};
-  memcpy(peer.peer_addr, elevatorAddr, 6);
-  peer.channel = 0;
-  peer.encrypt = false;
-  if (esp_now_add_peer(&peer) != ESP_OK) {
-    Serial.println("WARN,PINCH_ESPNOW_PEER_FAIL");
-  }
-}
-
-static void sendPinchPacketIfChanged(int8_t mode, int8_t* last_sent) {
-  if (elevatorAddr[0] == static_cast<uint8_t>(0xFF)) {
-    return;
-  }
-  if (mode == *last_sent) {
-    return;
-  }
-  PinchEspNowPacket pkt;
-  pkt.version = PINCH_ESPNOW_VERSION;
-  pkt.mode = mode;
-  esp_now_send(elevatorAddr, reinterpret_cast<uint8_t*>(&pkt), sizeof(pkt));
-  *last_sent = mode;
-}
 
 static float applyDeadband(float value, float deadband) {
     return (abs(value) < deadband) ? 0.0f : value;
@@ -146,15 +93,32 @@ static PinchState pinchStateFromJoystick(const JoystickReading& rightStick) {
     return PinchState::NONE;
 }
 
+static bool isZeroMac(const uint8_t* mac) {
+    for (int i = 0; i < 6; ++i) {
+        if (mac[i] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool sendPinchCommand(PinchState state) {
     if (state == PinchState::NONE) {
         return false;
     }
+    if (isZeroMac(elevatorAddr)) {
+        if (Serial) {
+            Serial.println("PINCH_TX,SKIP,UNCONFIGURED_MAC");
+        }
+        return false;
+    }
 
-    const char* pinch_cmd = (state == PinchState::OPEN) ? "PINCH_CMD,OPEN" : "PINCH_CMD,CLOSE";
-    const esp_err_t result = esp_now_send(elevatorAddr,
-                                          reinterpret_cast<const uint8_t*>(pinch_cmd),
-                                          strlen(pinch_cmd) + 1);
+    const char* pinch_cmd =
+        (state == PinchState::OPEN) ? "PINCH_CMD,OPEN" : "PINCH_CMD,CLOSE";
+    const esp_err_t result = esp_now_send(
+        elevatorAddr,
+        reinterpret_cast<const uint8_t*>(pinch_cmd),
+        strlen(pinch_cmd) + 1);
     if (Serial) {
         Serial.print("PINCH_TX,");
         Serial.print(pinchStateToString(state));
@@ -206,15 +170,10 @@ void setup() {
     Serial.begin(115200);
 
     setupWireless();
-<<<<<<< HEAD
     setupRotaryEncoderReadout();
-=======
-    addElevatorPinchPeerIfEnabled();
->>>>>>> 7d44ee2 (added joystick pinch and serial pinch commands)
 
     joystick1.setup();
     joystick2.setup();
-    dpad.setup();
 
     // Active-low buttons (pressed = LOW). Logical true in ControllerMessage = pressed.
     pinMode(BUTTON_L_PIN, INPUT_PULLUP);
@@ -234,10 +193,6 @@ void loop() {
                              : ((now - last_command_filter_ms) / 1000.0f);
         const float alpha = dt / (COMMAND_FILTER_TAU_S + dt);
         last_command_filter_ms = now;
-
-        dpad.update();
-        const DPadReading dpad_reading = dpad.read(false);
-        controllerMessage.dPad = dpad_reading;
 
         const JoystickReading leftStick = applyDeadband(joystick1.read());
         const JoystickReading rightStick = applyDeadband(joystick2.read());
@@ -259,16 +214,11 @@ void loop() {
         controllerMessage.buttonL = (digitalRead(BUTTON_L_PIN) == LOW);
         controllerMessage.buttonR = (digitalRead(BUTTON_R_PIN) == LOW);
 
-<<<<<<< HEAD
         const PinchState pinchState = pinchStateFromJoystick(filteredRightCommand);
         if (pinchState != lastPinchState) {
             sendPinchCommand(pinchState);
             lastPinchState = pinchState;
         }
-=======
-        const int8_t pinch_mode = pinchModeFromEncoder(dpad_reading.encoderPosition);
-        sendPinchPacketIfChanged(pinch_mode, &last_pinch_mode_sent);
->>>>>>> 7d44ee2 (added joystick pinch and serial pinch commands)
 
         if (!(prevControllerMessage == controllerMessage)) {
             sendControllerData();
