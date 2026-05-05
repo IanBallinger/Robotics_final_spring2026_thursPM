@@ -15,7 +15,7 @@ struct ControllerMessage { //This struct is defined for a complex controller, bu
     JoystickReading joystick2;
     DPadReading dPad;
     bool buttonL;
-    bool buttonR;
+    bool buttonR;  // Press edge on drive MCU toggles autonomy vs manual joystick
     TouchReading touchPoint;
 
     void print();

@@ -110,6 +110,10 @@ unsigned long last_button_change_ms = 0;
 unsigned long last_joystick_apply_ms = 0;
 unsigned long last_controller_rx_ms = 0;
 
+// Remote (ESP-NOW): BUTTON_R on controller toggles manual <-> autonomy on press edge.
+static bool prev_remote_mode_button = false;
+static unsigned long last_remote_toggle_ms = 0;
+
 unsigned long last_cmd_rx_ms = 0;
 unsigned long last_cmd_apply_ms = 0;
 unsigned long last_ack_publish_ms = 0;
@@ -312,6 +316,13 @@ static bool joystickToWheelCommand(const ControllerMessage& controller_msg,
   return handleWheelCommand(wheel_cmd_line, des_wheel_spd);
 }
 
+static void toggleAutonomyMode() {
+  autonomy_enabled = !autonomy_enabled;
+  stopMotors();
+  Serial.print("MODE,");
+  Serial.println(autonomy_enabled ? "AUTONOMY" : "JOYSTICK");
+}
+
 static void updateAutonomyToggle() {
   const unsigned long now = millis();
   const bool button_level = digitalRead(AUTONOMY_TOGGLE_BUTTON_PIN);
@@ -322,12 +333,22 @@ static void updateAutonomyToggle() {
     last_button_level = button_level;
 
     if (button_level == LOW) {
-      autonomy_enabled = !autonomy_enabled;
-      stopMotors();
-      Serial.print("MODE,");
-      Serial.println(autonomy_enabled ? "AUTONOMY" : "JOYSTICK");
+      toggleAutonomyMode();
     }
   }
+}
+
+static void updateRemoteAutonomyToggle() {
+  const unsigned long now = millis();
+  constexpr unsigned long REMOTE_TOGGLE_DEBOUNCE_MS = 400;
+
+  const bool pressed = controllerMessage.buttonR;
+  if (pressed && !prev_remote_mode_button &&
+      now - last_remote_toggle_ms >= REMOTE_TOGGLE_DEBOUNCE_MS) {
+    toggleAutonomyMode();
+    last_remote_toggle_ms = now;
+  }
+  prev_remote_mode_button = pressed;
 }
 
 static void printWheelAck(const DesiredWheelVel& cmd) {
@@ -428,6 +449,7 @@ void loop() {
   imu.update();
 
   updateAutonomyToggle();
+  updateRemoteAutonomyToggle();
 
   while (Serial.available()) {
     char c = static_cast<char>(Serial.read());
@@ -469,8 +491,7 @@ void loop() {
       has_pending_cmd = false;
       last_cmd_apply_ms = now;
     }
-  } 
-  else if (now - last_joystick_apply_ms >= JOYSTICK_APPLY_PERIOD_MS) {
+  } else if (now - last_joystick_apply_ms >= JOYSTICK_APPLY_PERIOD_MS) {
     if (now - last_controller_rx_ms > CONTROLLER_TIMEOUT_MS) {
       stopMotors();
       Serial.println("ERR,CONTROLLER_TIMEOUT");

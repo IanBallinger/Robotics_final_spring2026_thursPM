@@ -75,6 +75,10 @@ void setup() {
     joystick1.setup();
     joystick2.setup();
 
+    // Active-low buttons (pressed = LOW). Logical true in ControllerMessage = pressed.
+    pinMode(BUTTON_L_PIN, INPUT_PULLUP);
+    pinMode(BUTTON_R_PIN, INPUT_PULLUP);
+
     Serial.println("Two-pot joystick app ready.");
 }
 
@@ -101,6 +105,11 @@ void loop() {
         controllerMessage.joystick1.y = filteredLeftCommand.y;
         controllerMessage.joystick2.x = filteredRightCommand.x;
         controllerMessage.joystick2.y = filteredRightCommand.y;
+
+        // Remote: right button toggles manual/autonomy on the drive ESP32 (see
+        // serial_to_from_jet.cpp). Left button is available for future use.
+        controllerMessage.buttonL = (digitalRead(BUTTON_L_PIN) == LOW);
+        controllerMessage.buttonR = (digitalRead(BUTTON_R_PIN) == LOW);
 
         if (!(prevControllerMessage == controllerMessage)) {
             sendControllerData();
