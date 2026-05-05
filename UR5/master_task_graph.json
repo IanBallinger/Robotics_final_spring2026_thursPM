@@ -137,7 +137,10 @@
         "requires_resource_item": "microwave_open",
         "resource_action": "acquire",
         "resource": "microwave_slot",
-        "resource_item": "microwavable_bowl"
+        "resource_item": "microwavable_bowl",
+        "pose_trace_csv_left": "trace_place_bowl_in_microwave_left.csv",
+        "pose_trace_csv_right": "trace_place_bowl_in_microwave_right.csv",
+        "named_waypoints_csv": "UR5/waypoints_put_bowl.csv"
       }
     },
     {
@@ -399,6 +402,23 @@
         "pose_trace_csv_left": "trace_right_arm_safe_retract_left.csv",
         "pose_trace_csv_right": "trace_right_arm_safe_retract_right.csv",
         "named_waypoints_csv": "UR5/waypoints_right_retract.csv"
+      }
+    },
+    {
+      "name": "stir_cup",
+      "task_id": "stir_cup",
+      "points": 0,
+      "arm": "left",
+      "blocks_arms": [],
+      "unblocks_arms": [],
+      "prerequisites": [],
+      "points_if_completed": {},
+      "params": {
+        "resource": "table_area",
+        "resource_item": "cup_filling",
+        "pose_trace_csv_left": "trace_stir_cup_left.csv",
+        "pose_trace_csv_right": "trace_stir_cup_right.csv",
+        "named_waypoints_csv": "UR5/waypoints_stir_cup.csv"
       }
     }
   ],
