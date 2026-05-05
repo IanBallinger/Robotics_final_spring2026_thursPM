@@ -22,8 +22,6 @@ struct DesiredElevatorState {
   explicit DesiredElevatorState(float height_m_) : height_m(height_m_) {}
 };
 
-// Desired arms position measured from the base joint
-// TODO: will need to adjust for the position of the camera, will come from the Jetson
 struct DesiredArmPosition {
   float xE;
   float yE;
@@ -56,10 +54,6 @@ constexpr unsigned long CMD_TIMEOUT_MS = 250;
 constexpr bool SERIAL_DEBUG_TIMING = true;
 constexpr float MM_TO_M = 1.0f / 1000.0f;
 
-// Elevator encoder configuration.
-// By default this uses ENCODER1 on the elevator ESP32. Tune
-// ELEVATOR_METERS_PER_RAD and ELEVATOR_ENCODER_SIGN to match the pulley/lead
-// screw geometry and wiring direction.
 constexpr int ELEVATOR_ENCODER_A_PIN = 4;
 constexpr int ELEVATOR_ENCODER_B_PIN = 5;
 constexpr int ELEVATOR_ENCODER_CPR = CPR_312_RPM;
@@ -68,7 +62,6 @@ constexpr float ELEVATOR_ENCODER_SIGN = 1.0f;
 constexpr float ELEVATOR_METERS_PER_RAD = 0.018f;
 constexpr float ELEVATOR_METERS_BIAS = -0.02f;
 
-// Servo arm + pinch setup and constants
 constexpr int ARM_SHOULDER_SERVO_PIN = 40;
 constexpr int ARM_ELBOW_SERVO_PIN = 41;
 constexpr int PINCH_LEFT_SERVO_PIN = 42;
@@ -81,7 +74,7 @@ constexpr float PINCH_CLOSE_ANGLE_DEG = 90.0f;
 constexpr float ARM_BASE_X_M = 0.0f;
 constexpr float ARM_BASE_Y_M = 0.0f;
 constexpr float ARM_LINK_1_M = 0.26f;
-constexpr float ARM_LINK_2_M = 0.16f;  // TODO: need to add length of end effector
+constexpr float ARM_LINK_2_M = 0.16f;
 
 constexpr float SHOULDER_MIN_DEG = -180.0f;
 constexpr float SHOULDER_MAX_DEG = 180.0f;
@@ -153,7 +146,6 @@ double integral_max = 1e6;
 
 PID pid = {Kp, Ki, Kd, 0.0, 0.1f, false};
 
-// For debugging
 double shoulder_ms = 0.0;
 double elbow_ms = 0.0;
 double pinch_left_ms = 0.0;

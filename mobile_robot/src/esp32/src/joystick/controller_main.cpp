@@ -132,9 +132,9 @@ static void printDebug(const JoystickReading& leftStick, const JoystickReading& 
     Serial.printf(
         "POTS raw_fb=%d raw_turn=%d mapped_fb=%.3f mapped_turn=%.3f joy1(x,y)=(%.3f, %.3f) joy2(x,y)=(%.3f, %.3f) buttons(L,R)=(%d,%d) pinch=%s\n",
         joystickRangeToAnalog(leftStick.y),
-        joystickRangeToAnalog(rightStick.y),
+        joystickRangeToAnalog(leftStick.x),
         leftStick.y,
-        rightStick.y,
+        leftStick.x,
         controllerMessage.joystick1.x,
         controllerMessage.joystick1.y,
         controllerMessage.joystick2.x,
@@ -202,12 +202,13 @@ void loop() {
         controllerMessage.millis = now;
 
         // Differential-drive mapping:
-        // - left-stick forward/back comes from joystick1.y
-        // - right-stick up/down comes from joystick2.y and commands turn-in-place
+        // - left-stick y commands forward/back
+        // - left-stick x commands turn (published on joystick2.x for drive MCU compatibility)
+        // - right-stick y is used locally for pinch open/close thresholding
         controllerMessage.joystick1.x = filteredLeftCommand.x;
         controllerMessage.joystick1.y = filteredLeftCommand.y;
-        controllerMessage.joystick2.x = filteredRightCommand.x;
-        controllerMessage.joystick2.y = filteredRightCommand.y;
+        controllerMessage.joystick2.x = filteredLeftCommand.x;
+        controllerMessage.joystick2.y = 0.0f;
 
         // Remote: right button toggles manual/autonomy on the drive ESP32 (see
         // serial_to_from_jet.cpp). Left button is available for future use.
@@ -216,8 +217,10 @@ void loop() {
 
         const PinchState pinchState = pinchStateFromJoystick(filteredRightCommand);
         if (pinchState != lastPinchState) {
-            sendPinchCommand(pinchState);
-            lastPinchState = pinchState;
+            const bool pinch_sent = sendPinchCommand(pinchState);
+            if (pinchState == PinchState::NONE || pinch_sent) {
+                lastPinchState = pinchState;
+            }
         }
 
         if (!(prevControllerMessage == controllerMessage)) {
