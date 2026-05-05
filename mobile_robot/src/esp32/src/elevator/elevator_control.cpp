@@ -482,6 +482,19 @@ static bool commandPinch(PinchCommand cmd) {
   pinch_left_servo.writeMicroseconds(pinch_left_ms);
   pinch_right_servo.writeMicroseconds(pinch_right_ms);
 
+  Serial.print("PINCH_DBG,cmd,");
+  Serial.print((cmd == PinchCommand::CLOSE) ? "CLOSE" : "OPEN");
+  Serial.print(",pinch_angle_deg,");
+  Serial.print(pinch_angle_deg, 2);
+  Serial.print(",left_angle_deg,");
+  Serial.print(left_angle_deg, 2);
+  Serial.print(",right_angle_deg,");
+  Serial.print(right_angle_deg, 2);
+  Serial.print(",left_us,");
+  Serial.print(pinch_left_ms, 1);
+  Serial.print(",right_us,");
+  Serial.println(pinch_right_ms, 1);
+
   Serial.print("PINCH_ACK,");
   Serial.print((cmd == PinchCommand::CLOSE) ? "CLOSE" : "OPEN");
   Serial.print(",");
