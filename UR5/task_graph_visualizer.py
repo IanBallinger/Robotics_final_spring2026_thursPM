@@ -11,6 +11,7 @@ from __future__ import annotations
 import queue
 import threading
 import time
+import math
 from typing import Any, Callable, Dict, List, Optional
 
 
@@ -90,6 +91,8 @@ class TaskGraphStateVisualizer:
 
         selected_task_var = tk.StringVar(value="")
         action_status_var = tk.StringVar(value="Controls ready.")
+        layout_mode_var = tk.StringVar(value="grid")
+        bimanual_attempt_var = tk.BooleanVar(value=False)
 
         ttk.Label(controls_frame, text="Selected task id:").pack(side=tk.LEFT)
         task_id_entry = ttk.Entry(controls_frame, textvariable=selected_task_var, width=34)
@@ -113,6 +116,11 @@ class TaskGraphStateVisualizer:
                 return
             snapshot = self._history[selected_index] if self._history else {}
             selected_task = _find_selected_task()
+            if selected_task is not None and action_name == "run_selected_task" and bimanual_attempt_var.get():
+                selected_task = dict(selected_task)
+                task_params = dict(selected_task.get("params", {}) or {})
+                task_params["attempt_bimanual"] = True
+                selected_task["params"] = task_params
             try:
                 msg = self._control_callback(action_name, selected_task, dict(snapshot))
                 action_status_var.set(str(msg))
@@ -129,6 +137,11 @@ class TaskGraphStateVisualizer:
             text="Run Selected Task",
             command=lambda: _run_control_action("run_selected_task"),
         ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Checkbutton(
+            controls_frame,
+            text="Attempt bimanual (live)",
+            variable=bimanual_attempt_var,
+        ).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(
             controls_frame,
             text="Start Waypoint Tuning",
@@ -144,6 +157,8 @@ class TaskGraphStateVisualizer:
             text="Resume Scheduler",
             command=lambda: _run_control_action("resume"),
         ).pack(side=tk.LEFT, padx=(0, 6))
+        layout_button = ttk.Button(controls_frame, text="Layout: Grid")
+        layout_button.pack(side=tk.LEFT, padx=(0, 6))
         ttk.Label(controls_frame, textvariable=action_status_var).pack(side=tk.LEFT, padx=(10, 0))
 
         slider_var = tk.IntVar(value=0)
@@ -166,6 +181,24 @@ class TaskGraphStateVisualizer:
 
         selected_index = 0
         node_rects_by_task_id: Dict[str, tuple[int, int, int, int]] = {}
+        force_positions: Dict[str, List[float]] = {}
+        force_velocities: Dict[str, List[float]] = {}
+        dragged_task_id: Optional[str] = None
+        hovered_task_id: Optional[str] = None
+
+        def _toggle_layout_mode():
+            cur = layout_mode_var.get().strip().lower()
+            if cur == "grid":
+                layout_mode_var.set("force")
+                layout_button.configure(text="Layout: Force")
+                action_status_var.set("Force-directed layout enabled (drag nodes to demo graph structure).")
+            else:
+                layout_mode_var.set("grid")
+                layout_button.configure(text="Layout: Grid")
+                action_status_var.set("Grid layout enabled.")
+            render_snapshot(selected_index)
+
+        layout_button.configure(command=_toggle_layout_mode)
 
         def clamp_index(idx: int) -> int:
             if not self._history:
@@ -184,7 +217,7 @@ class TaskGraphStateVisualizer:
             return "#868e96"
 
         def render_snapshot(idx: int):
-            nonlocal selected_index
+            nonlocal selected_index, hovered_task_id
             if not self._history:
                 summary_text.delete("1.0", tk.END)
                 summary_text.insert(tk.END, "No timeline data yet.")
@@ -253,6 +286,7 @@ class TaskGraphStateVisualizer:
 
             canvas.delete("all")
             width = max(240, canvas.winfo_width())
+            height = max(220, canvas.winfo_height())
             col_count = 4
             node_w = max(190, int((width - 40) / col_count) - 10)
             node_h = 56
@@ -262,16 +296,124 @@ class TaskGraphStateVisualizer:
             y0 = 12
 
             positions: Dict[str, tuple[int, int, int, int]] = {}
-            for i, task in enumerate(tasks):
-                row = i // col_count
-                col = i % col_count
-                x = x0 + col * (node_w + x_gap)
-                y = y0 + row * (node_h + y_gap)
-                task_id = str(task.get("task_id", ""))
-                positions[task_id] = (x, y, x + node_w, y + node_h)
+            if layout_mode_var.get().strip().lower() == "force":
+                task_ids = [str(task.get("task_id", "")) for task in tasks if str(task.get("task_id", ""))]
+                task_set = set(task_ids)
+
+                # Keep only active nodes in simulation state.
+                for stale in list(force_positions.keys()):
+                    if stale not in task_set:
+                        force_positions.pop(stale, None)
+                        force_velocities.pop(stale, None)
+
+                if task_ids:
+                    cx = width * 0.5
+                    cy = height * 0.5
+                    radius = max(90.0, min(width, height) * 0.28)
+                    for i, tid in enumerate(task_ids):
+                        if tid in force_positions:
+                            continue
+                        theta = (2.0 * math.pi * i) / max(1, len(task_ids))
+                        force_positions[tid] = [cx + radius * math.cos(theta), cy + radius * math.sin(theta)]
+                        force_velocities[tid] = [0.0, 0.0]
+
+                    links: List[tuple[str, str]] = []
+                    for task in tasks:
+                        tid = str(task.get("task_id", ""))
+                        if not tid:
+                            continue
+                        for prereq in task.get("prerequisites", []):
+                            pid = str(prereq)
+                            if pid and pid in task_set:
+                                links.append((pid, tid))
+
+                    repulsion = 9000.0
+                    spring_k = 0.018
+                    rest_len = float(max(70.0, node_w * 0.62))
+                    damping = 0.83
+                    border = 24.0
+
+                    for i, aid in enumerate(task_ids):
+                        ap = force_positions[aid]
+                        av = force_velocities[aid]
+                        fx = 0.0
+                        fy = 0.0
+
+                        for bid in task_ids[i + 1 :]:
+                            bp = force_positions[bid]
+                            dx = ap[0] - bp[0]
+                            dy = ap[1] - bp[1]
+                            dist2 = max(40.0, dx * dx + dy * dy)
+                            dist = math.sqrt(dist2)
+                            f = repulsion / dist2
+                            nx = dx / dist
+                            ny = dy / dist
+                            fx += nx * f
+                            fy += ny * f
+                            bv = force_velocities[bid]
+                            bv[0] -= nx * f
+                            bv[1] -= ny * f
+
+                        for src, dst in links:
+                            if aid != src and aid != dst:
+                                continue
+                            other = dst if aid == src else src
+                            op = force_positions.get(other)
+                            if op is None:
+                                continue
+                            dx = op[0] - ap[0]
+                            dy = op[1] - ap[1]
+                            dist = max(1.0, math.sqrt(dx * dx + dy * dy))
+                            pull = (dist - rest_len) * spring_k
+                            fx += (dx / dist) * pull
+                            fy += (dy / dist) * pull
+
+                        # Centering force to keep graph visible.
+                        fx += (cx - ap[0]) * 0.003
+                        fy += (cy - ap[1]) * 0.003
+
+                        if dragged_task_id == aid:
+                            av[0] = 0.0
+                            av[1] = 0.0
+                            continue
+
+                        av[0] = (av[0] + fx) * damping
+                        av[1] = (av[1] + fy) * damping
+                        ap[0] += av[0]
+                        ap[1] += av[1]
+
+                        ap[0] = min(max(border, ap[0]), max(border, width - border))
+                        ap[1] = min(max(border, ap[1]), max(border, height - border))
+
+                    for tid in task_ids:
+                        cxn, cyn = force_positions[tid]
+                        x = int(cxn - (node_w / 2.0))
+                        y = int(cyn - (node_h / 2.0))
+                        positions[tid] = (x, y, x + node_w, y + node_h)
+            else:
+                for i, task in enumerate(tasks):
+                    row = i // col_count
+                    col = i % col_count
+                    x = x0 + col * (node_w + x_gap)
+                    y = y0 + row * (node_h + y_gap)
+                    task_id = str(task.get("task_id", ""))
+                    positions[task_id] = (x, y, x + node_w, y + node_h)
 
             node_rects_by_task_id.clear()
             node_rects_by_task_id.update(positions)
+
+            connected_edges: set[tuple[str, str]] = set()
+            connected_nodes: set[str] = set()
+            if hovered_task_id:
+                connected_nodes.add(hovered_task_id)
+                for task in tasks:
+                    tid = str(task.get("task_id", ""))
+                    for prereq in task.get("prerequisites", []):
+                        prereq_id = str(prereq)
+                        if tid == hovered_task_id or prereq_id == hovered_task_id:
+                            connected_edges.add((prereq_id, tid))
+                            connected_nodes.add(tid)
+                            connected_nodes.add(prereq_id)
 
             # Draw dependency links first.
             for task in tasks:
@@ -286,13 +428,14 @@ class TaskGraphStateVisualizer:
                     if px0y0 is None:
                         continue
                     px0, _py0, px1, py1 = px0y0
+                    is_hover_edge = (prereq_id, tid) in connected_edges
                     canvas.create_line(
                         (px0 + px1) // 2,
                         py1,
                         (tx0 + tx1) // 2,
                         ty0,
-                        fill="#495057",
-                        width=2,
+                        fill="#74c0fc" if is_hover_edge else "#495057",
+                        width=4 if is_hover_edge else 2,
                     )
 
             # Draw nodes.
@@ -304,6 +447,8 @@ class TaskGraphStateVisualizer:
                 rx0, ry0, rx1, ry1 = rect
                 state = str(task.get("state", "pending"))
                 fill = color_for_status(state)
+                if hovered_task_id and tid not in connected_nodes:
+                    fill = "#495057"
                 canvas.create_rectangle(rx0, ry0, rx1, ry1, fill=fill, outline="#ced4da", width=1)
                 canvas.create_text(
                     rx0 + 6,
@@ -337,15 +482,53 @@ class TaskGraphStateVisualizer:
         slider.configure(command=lambda _v: on_slider())
 
         def on_canvas_click(event):
+            nonlocal dragged_task_id
             ex = int(event.x)
             ey = int(event.y)
             for task_id, (x0r, y0r, x1r, y1r) in node_rects_by_task_id.items():
                 if x0r <= ex <= x1r and y0r <= ey <= y1r:
                     selected_task_var.set(task_id)
                     action_status_var.set(f"Selected task: {task_id}")
+                    if layout_mode_var.get().strip().lower() == "force":
+                        dragged_task_id = task_id
                     return
 
+        def on_canvas_hover(event):
+            nonlocal hovered_task_id
+            ex = int(event.x)
+            ey = int(event.y)
+            hit_task_id: Optional[str] = None
+            for task_id, (x0r, y0r, x1r, y1r) in node_rects_by_task_id.items():
+                if x0r <= ex <= x1r and y0r <= ey <= y1r:
+                    hit_task_id = task_id
+                    break
+            if hit_task_id != hovered_task_id:
+                hovered_task_id = hit_task_id
+                render_snapshot(selected_index)
+
+        def on_canvas_drag(event):
+            if layout_mode_var.get().strip().lower() != "force":
+                return
+            if dragged_task_id is None:
+                return
+            if dragged_task_id not in force_positions:
+                return
+            force_positions[dragged_task_id][0] = float(int(event.x))
+            force_positions[dragged_task_id][1] = float(int(event.y))
+            vel = force_velocities.get(dragged_task_id)
+            if vel is not None:
+                vel[0] = 0.0
+                vel[1] = 0.0
+            render_snapshot(selected_index)
+
+        def on_canvas_release(_event):
+            nonlocal dragged_task_id
+            dragged_task_id = None
+
         canvas.bind("<Button-1>", on_canvas_click)
+        canvas.bind("<Motion>", on_canvas_hover)
+        canvas.bind("<B1-Motion>", on_canvas_drag)
+        canvas.bind("<ButtonRelease-1>", on_canvas_release)
 
         def process_queue():
             nonlocal selected_index
@@ -373,6 +556,9 @@ class TaskGraphStateVisualizer:
                     render_snapshot(selected_index)
                 else:
                     render_snapshot(selected_index)
+            elif self._history and layout_mode_var.get().strip().lower() == "force":
+                # Keep animating force layout even when no new snapshots arrive.
+                render_snapshot(selected_index)
 
             if self._stop_event.is_set():
                 root.after(0, root.destroy)

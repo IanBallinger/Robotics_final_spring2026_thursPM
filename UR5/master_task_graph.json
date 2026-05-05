@@ -46,6 +46,18 @@
     "take_bowl_out_to_tray": {
       "points": 1,
       "max_score_count": 1
+    },
+    "stir_drink_with_utensil": {
+      "points": 1,
+      "max_score_count": 1
+    },
+    "bimanual_closed_chain_move_single_object": {
+      "points": 1,
+      "max_score_count": 3
+    },
+    "move_tray_with_items": {
+      "points": 1,
+      "max_score_count": 1
     }
   },
   "resource_constraints": {
@@ -125,10 +137,10 @@
       "unblocks_arms": [],
       "prerequisites": [
         "acquire_bowl",
-        "door_open_for_load"
+        "door_open_for_unload"
       ],
       "points_if_completed": {
-        "door_open_for_load": 0,
+        "door_open_for_unload": 0,
         "acquire_bowl": 0
       },
       "params": {
@@ -154,10 +166,10 @@
       "unblocks_arms": [],
       "prerequisites": [
         "acquire_plate",
-        "door_open_for_load"
+        "door_open_for_unload"
       ],
       "points_if_completed": {
-        "door_open_for_load": 0,
+        "door_open_for_unload": 0,
         "acquire_plate": 0
       },
       "params": {
@@ -226,13 +238,33 @@
       }
     },
     {
+      "name": "move_tray",
+      "task_id": "move_tray",
+      "points": 1,
+      "score_token": "move_tray_with_items",
+      "max_score_count": 1,
+      "arm": "right",
+      "blocks_arms": [],
+      "unblocks_arms": [],
+      "prerequisites": [
+        "plate_to_tray",
+        "bowl_to_tray"
+      ],
+      "points_if_completed": {},
+      "params": {
+        "named_waypoints_csv": "UR5/waypoints_move_tray.csv"
+      }
+    },
+    {
       "name": "acquire_cup",
       "task_id": "acquire_cup",
       "points": 0,
       "arm": "right",
       "blocks_arms": [],
       "unblocks_arms": [],
-      "prerequisites": [],
+      "prerequisites": [
+        "move_tray"
+      ],
       "points_if_completed": {},
       "params": {
         "target_label": "cup_for_drink",
@@ -255,7 +287,9 @@
       "arm": "left",
       "blocks_arms": [],
       "unblocks_arms": [],
-      "prerequisites": [],
+      "prerequisites": [
+        "move_tray"
+      ],
       "points_if_completed": {},
       "params": {
         "target_label": "bottle_to_fill_cup",
@@ -280,6 +314,7 @@
       "blocks_arms": [],
       "unblocks_arms": [],
       "prerequisites": [
+        "move_tray",
         "acquire_cup",
         "acquire_bottle"
       ],
@@ -320,7 +355,8 @@
       "unblocks_arms": [],
       "prerequisites": [
         "pour_drink",
-        "return_bottle"
+        "return_bottle",
+        "stir_cup"
       ],
       "points_if_completed": {},
       "params": {
@@ -407,11 +443,15 @@
     {
       "name": "stir_cup",
       "task_id": "stir_cup",
-      "points": 0,
+      "points": 1,
+      "score_token": "stir_drink_with_utensil",
+      "max_score_count": 1,
       "arm": "left",
       "blocks_arms": [],
       "unblocks_arms": [],
-      "prerequisites": [],
+      "prerequisites": [
+        "pour_drink"
+      ],
       "points_if_completed": {},
       "params": {
         "resource": "table_area",

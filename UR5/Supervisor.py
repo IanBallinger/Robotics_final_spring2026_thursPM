@@ -165,7 +165,9 @@ OPEN_MICROWAVE_TASK_TEMPLATE = {
     },
 }
 
-DOOR_OPEN_FOR_LOAD_TASK_ID = "door_open_for_load"
+# Unified canonical open-door task identity for both load/unload contexts.
+DOOR_OPEN_FOR_LOAD_TASK_ID = "door_open_for_unload"
+CLOSE_MICROWAVE_TASK_ID = "close_door"
 PRESS_STOP_FOR_BOWL_TASK_ID = "press_stop_for_bowl"
 PRESS_STOP_FOR_PLATE_TASK_ID = "press_stop_for_plate"
 
@@ -1009,6 +1011,37 @@ class Supervisor:
         self._score_counts[token] = self._score_counts.get(token, 0) + 1
         self._earned_points_total += awarded_points
 
+    def _record_bonus_token_if_applicable(self, token: str, default_points: float = 1.0, default_max_count: int = 1):
+        if not token:
+            return
+        mapped = self._points_map.get(token)
+        if mapped is not None:
+            points = float(mapped.get("points", default_points))
+            max_count = self._normalize_max_score_count(mapped.get("max_score_count", default_max_count))
+        else:
+            points = float(default_points)
+            max_count = self._normalize_max_score_count(default_max_count)
+
+        if points <= 0.0:
+            return
+        if max_count > 0 and self._score_counts.get(token, 0) >= max_count:
+            return
+
+        self._score_counts[token] = self._score_counts.get(token, 0) + 1
+        self._earned_points_total += points
+
+    def _record_completion_bonuses(self, task: QueuedTask):
+        params = task.params or {}
+
+        # Live sequencer can flag this to attempt closed-chain bimanual cup transfer.
+        attempt_bimanual = bool(params.get("attempt_bimanual", False))
+        if attempt_bimanual and task.task_id == "cup_on_tray":
+            self._record_bonus_token_if_applicable(
+                token="bimanual_closed_chain_move_single_object",
+                default_points=1.0,
+                default_max_count=3,
+            )
+
     def configure_points_map(self, points_map: Optional[dict]):
         self._points_map = {}
         if not points_map:
@@ -1526,6 +1559,11 @@ class Supervisor:
         if candidate.name == "_idle_wait":
             return False
 
+        # Prefer executing a ready microwave close immediately rather than
+        # stalling with idle_wait; this keeps door state transitions crisp.
+        if self._is_microwave_close_task(candidate):
+            return False
+
         if consecutive_idle_by_arm.get(arm_name, 0) >= self._max_consecutive_idle_per_arm:
             return False
 
@@ -1558,6 +1596,46 @@ class Supervisor:
     def _reset_visual_tracking(self):
         self._completed_task_ids = set()
         self._visual_step_counter = 0
+
+    def _reset_microwave_door_completion_flags(self):
+        """Ensure microwave door open/close tasks start as incomplete.
+
+        This guards against stale completion tokens across startup/reset paths and
+        keeps open/close modeled as mutually incomplete at run start.
+        """
+        stale_tokens = {
+            DOOR_OPEN_FOR_LOAD_TASK_ID,
+            "open_microwave_door",
+            "close_door",
+            "close_microwave_door",
+        }
+        self._completed_tokens.difference_update(stale_tokens)
+        self._completed_task_ids.discard(DOOR_OPEN_FOR_LOAD_TASK_ID)
+        self._completed_task_ids.discard("close_door")
+
+    def _clear_mutually_exclusive_microwave_door_tokens(self, task: QueuedTask):
+        """Keep open/close door completion tokens mutually exclusive.
+
+        This prevents stale open-door completion from making unload tasks appear
+        runnable while a later close has already invalidated that door-open state.
+        """
+        if task.name == "open_microwave_door" or task.task_id == DOOR_OPEN_FOR_LOAD_TASK_ID:
+            self._completed_tokens.discard("close_microwave_door")
+            self._completed_tokens.discard("close_door")
+            self._completed_task_ids.discard("close_door")
+            return
+
+        if self._is_microwave_close_task(task):
+            self._completed_tokens.discard("open_microwave_door")
+            self._completed_tokens.discard(DOOR_OPEN_FOR_LOAD_TASK_ID)
+            self._completed_task_ids.discard(DOOR_OPEN_FOR_LOAD_TASK_ID)
+
+    def _mark_task_completed(self, task: QueuedTask):
+        """Record task completion tokens with microwave open/close invalidation."""
+        self._clear_mutually_exclusive_microwave_door_tokens(task)
+        self._completed_tokens.add(task.task_id)
+        self._completed_tokens.add(task.name)
+        self._completed_task_ids.add(task.task_id)
 
     def bind_active_visualizer(self, visualizer, mode: str):
         self._active_visualizer = visualizer
@@ -1945,8 +2023,8 @@ class Supervisor:
 
         self._manual_arm_busy[arm_name] = True
         self._manual_running_by_arm[arm_name] = task.task_id
-        self._apply_resource_action_on_start(task)
         points = self._effective_points(task)
+        self._apply_resource_action_on_start(task)
 
         self._push_visual_snapshot(
             self._active_visualizer,
@@ -1965,12 +2043,11 @@ class Supervisor:
 
         if ok:
             self._record_score_if_applicable(task, points)
+            self._record_completion_bonuses(task)
             self._apply_resource_action_on_end(task)
             self._apply_gripper_state(task)
             if task.name != "_idle_wait":
-                self._completed_tokens.add(task.task_id)
-                self._completed_tokens.add(task.name)
-                self._completed_task_ids.add(task.task_id)
+                self._mark_task_completed(task)
                 for arm in task.unblocks_arms:
                     self._blocked_arms.pop(arm, None)
                 for arm in task.blocks_arms:
@@ -2000,6 +2077,7 @@ class Supervisor:
 
         self._reset_visual_tracking()
         self._completed_tokens = set()
+        self._reset_microwave_door_completion_flags()
         self._blocked_arms = {}
         self._resource_state = {resource: {} for resource in self._resource_constraints}
         self._grasped_object_by_arm = {"left": None, "right": None}
@@ -2188,7 +2266,11 @@ class Supervisor:
                 return True
         return False
 
-    def _enqueue_close_for_resource_release(self, completed_task: QueuedTask):
+    def _enqueue_close_for_resource_release(
+        self,
+        completed_task: QueuedTask,
+        running_by_arm: Optional[Dict[str, Optional[str]]] = None,
+    ):
         """Queue close task whenever microwave_open is held and no close is queued.
 
         This is resource-driven and not tied to any specific production task.
@@ -2202,6 +2284,19 @@ class Supervisor:
 
         if self._queue_has_microwave_close_task():
             return
+
+        if running_by_arm:
+            for running_task_id in running_by_arm.values():
+                if not running_task_id:
+                    continue
+                meta = self._task_catalog.get(running_task_id, {})
+                if (
+                    meta.get("name") == "close_microwave_door"
+                    and str(meta.get("resource_action", "")) == "release"
+                    and str(meta.get("resource", "")) == "table_area"
+                    and str(meta.get("resource_item", "")) == "microwave_open"
+                ):
+                    return
 
         # Keep microwave open while loading tasks are still pending.
         pending_put_ids = {"put_bowl", "put_plate"}
@@ -2217,7 +2312,7 @@ class Supervisor:
                 "resource": "table_area",
                 "resource_item": "microwave_open",
             },
-            task_id=f"close_microwave_for_resource#{self._task_sequence}",
+            task_id=CLOSE_MICROWAVE_TASK_ID,
             prerequisites=[completed_task.task_id],
             arm="left",
             blocks_arms=[],
@@ -2281,9 +2376,13 @@ class Supervisor:
             validate_subtask_exists=False,
         )
 
-    def _enqueue_dynamic_followups(self, completed_task: QueuedTask):
+    def _enqueue_dynamic_followups(
+        self,
+        completed_task: QueuedTask,
+        running_by_arm: Optional[Dict[str, Optional[str]]] = None,
+    ):
         self._enqueue_press_stop_for_food_if_needed(completed_task)
-        self._enqueue_close_for_resource_release(completed_task)
+        self._enqueue_close_for_resource_release(completed_task, running_by_arm=running_by_arm)
 
     def run_autonomy(
         self,
@@ -2304,6 +2403,7 @@ class Supervisor:
         self._autonomy_pause_event.clear()
         self._completed_tokens = set()
         self._reset_visual_tracking()
+        self._reset_microwave_door_completion_flags()
         self._blocked_arms = {}
         self._resource_state = {resource: {} for resource in self._resource_constraints}
         self._grasped_object_by_arm = {"left": None, "right": None}
@@ -2378,17 +2478,16 @@ class Supervisor:
 
                     if ok:
                         self._record_score_if_applicable(task, current_points)
+                        self._record_completion_bonuses(task)
                         self._apply_resource_action_on_end(task)
                         self._apply_gripper_state(task)
                         if task.name != "_idle_wait":
-                            self._completed_tokens.add(task.task_id)
-                            self._completed_tokens.add(task.name)
-                            self._completed_task_ids.add(task.task_id)
+                            self._mark_task_completed(task)
                             for arm in task.unblocks_arms:
                                 self._blocked_arms.pop(arm, None)
                             for arm in task.blocks_arms:
                                 self._blocked_arms[arm] = task.task_id
-                            self._enqueue_dynamic_followups(task)
+                            self._enqueue_dynamic_followups(task, running_by_arm=running_by_arm)
                     else:
                         self._rollback_resource_start_if_needed(task)
 
@@ -2464,9 +2563,8 @@ class Supervisor:
                         arm_busy[arm_name] = True
                         running_by_arm[arm_name] = selected.task_id
 
-                    self._apply_resource_action_on_start(selected)
-
                     current_points = self._effective_points(selected)
+                    self._apply_resource_action_on_start(selected)
                     work_queues[dispatch_arm].put((selected, current_points, reserved_arms))
                     dispatched += 1
                     dispatched_any = True
@@ -2510,6 +2608,7 @@ class Supervisor:
 
                     if ok:
                         self._record_score_if_applicable(task, current_points)
+                        self._record_completion_bonuses(task)
                         self._apply_resource_action_on_end(task)
                         self._apply_gripper_state(task)
                         if task.name != "_idle_wait":
@@ -2520,7 +2619,7 @@ class Supervisor:
                                 self._blocked_arms.pop(arm, None)
                             for arm in task.blocks_arms:
                                 self._blocked_arms[arm] = task.task_id
-                            self._enqueue_dynamic_followups(task)
+                            self._enqueue_dynamic_followups(task, running_by_arm=running_by_arm)
                     else:
                         self._rollback_resource_start_if_needed(task)
 
@@ -2559,6 +2658,7 @@ class Supervisor:
         self._completed_tokens = set()
         self._autonomy_pause_event.clear()
         self._reset_visual_tracking()
+        self._reset_microwave_door_completion_flags()
         self._blocked_arms = {}
         self._resource_state = {resource: {} for resource in self._resource_constraints}
         self._grasped_object_by_arm = {"left": None, "right": None}
@@ -2614,11 +2714,10 @@ class Supervisor:
             ok = self.run_subtask(queued.name, params=queued.params)
             if ok:
                 self._record_score_if_applicable(queued, current_points)
+                self._record_completion_bonuses(queued)
                 self._apply_resource_action_on_end(queued)
                 self._apply_gripper_state(queued)
-                self._completed_tokens.add(queued.task_id)
-                self._completed_tokens.add(queued.name)
-                self._completed_task_ids.add(queued.task_id)
+                self._mark_task_completed(queued)
                 for arm in queued.unblocks_arms:
                     self._blocked_arms.pop(arm, None)
                 for arm in queued.blocks_arms:
@@ -2700,6 +2799,7 @@ class Supervisor:
 
         self._completed_tokens = set()
         self._reset_visual_tracking()
+        self._reset_microwave_door_completion_flags()
         self._blocked_arms = {}
         self._resource_state = {resource: {} for resource in self._resource_constraints}
         self._grasped_object_by_arm = {"left": None, "right": None}
@@ -2782,9 +2882,8 @@ class Supervisor:
                     arm_busy[arm_name] = True
                     running_by_arm[arm_name] = selected.task_id
 
-                self._apply_resource_action_on_start(selected)
-
                 current_points = self._effective_points(selected)
+                self._apply_resource_action_on_start(selected)
                 launched.append((selected, current_points, dispatch_arm, reserved_arms))
                 dispatched += 1
                 self._push_visual_snapshot(
@@ -2813,17 +2912,16 @@ class Supervisor:
             # Complete all launched tasks for this simulation tick.
             for queued, current_points, dispatch_arm, reserved_arms in launched:
                 self._record_score_if_applicable(queued, current_points)
+                self._record_completion_bonuses(queued)
                 self._apply_resource_action_on_end(queued)
                 self._apply_gripper_state(queued)
                 if queued.name != "_idle_wait":
-                    self._completed_tokens.add(queued.task_id)
-                    self._completed_tokens.add(queued.name)
-                    self._completed_task_ids.add(queued.task_id)
+                    self._mark_task_completed(queued)
                     for arm in queued.unblocks_arms:
                         self._blocked_arms.pop(arm, None)
                     for arm in queued.blocks_arms:
                         self._blocked_arms[arm] = queued.task_id
-                    self._enqueue_dynamic_followups(queued)
+                    self._enqueue_dynamic_followups(queued, running_by_arm=running_by_arm)
 
                 for arm_name in reserved_arms:
                     arm_busy[arm_name] = False
@@ -2883,6 +2981,7 @@ class Supervisor:
         """Original sequential simulator semantics."""
         self._completed_tokens = set()
         self._reset_visual_tracking()
+        self._reset_microwave_door_completion_flags()
         self._blocked_arms = {}
         self._resource_state = {resource: {} for resource in self._resource_constraints}
         self._grasped_object_by_arm = {"left": None, "right": None}
@@ -2936,11 +3035,10 @@ class Supervisor:
                 message=f"sim dispatch {queued.task_id}",
             )
             self._record_score_if_applicable(queued, current_points)
+            self._record_completion_bonuses(queued)
             self._apply_resource_action_on_end(queued)
             self._apply_gripper_state(queued)
-            self._completed_tokens.add(queued.task_id)
-            self._completed_tokens.add(queued.name)
-            self._completed_task_ids.add(queued.task_id)
+            self._mark_task_completed(queued)
             for arm in queued.unblocks_arms:
                 self._blocked_arms.pop(arm, None)
             for arm in queued.blocks_arms:

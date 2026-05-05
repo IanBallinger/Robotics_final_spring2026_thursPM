@@ -1469,6 +1469,7 @@ def register_subtasks(registry):
         ("acquire_plate", "right", "UR5/waypoints_acquire_plate.csv"),
         ("place_plate_in_microwave", "right", "UR5/waypoints_place_plate_in_microwave.csv"),
         ("take_plate_out_to_tray", "right", "UR5/waypoints_take_plate_out_to_tray.csv"),
+        ("move_tray", "right", "UR5/waypoints_move_tray.csv"),
         ("acquire_cup", "right", "UR5/waypoints_acquire_cup.csv"),
         ("acquire_bottle", "right", "UR5/waypoints_acquire_bottle.csv"),
         ("pour_drink_into_cup", "right", "UR5/waypoints_pour_drink_into_cup.csv"),
