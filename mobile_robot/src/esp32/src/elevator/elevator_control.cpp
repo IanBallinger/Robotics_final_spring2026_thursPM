@@ -4,17 +4,14 @@
 #include <math.h>
 #include <ESP32Servo.h>
 #include "PID.h"
-#include <WiFi.h>
 #include <esp_now.h>
-#include <string.h>
-
-#include "../../include/pinch_wireless.h"
+#include <WiFi.h>
 #include "robot_pinout.h"
 #include "MotorDriver.h"
 #include "PID.h"
 #include "util.h"
-#include "EncoderVelocity.h"
 #include "arm_control.h"
+#include "EncoderVelocity.h"
 
 #define TCAADDR 0x70
 
@@ -47,9 +44,6 @@ enum class PinchCommand {
   OPEN,
   CLOSE,
 };
-
-volatile bool has_pending_wireless_pinch_cmd = false;
-volatile PinchCommand pending_wireless_pinch_cmd = PinchCommand::OPEN;
 
 Adafruit_VL53L0X lox = Adafruit_VL53L0X();
 String rx_line = "";
@@ -87,7 +81,7 @@ constexpr float PINCH_CLOSE_ANGLE_DEG = 90.0f;
 constexpr float ARM_BASE_X_M = 0.0f;
 constexpr float ARM_BASE_Y_M = 0.0f;
 constexpr float ARM_LINK_1_M = 0.26f;
-constexpr float ARM_LINK_2_M = 0.16f;
+constexpr float ARM_LINK_2_M = 0.16f;  // TODO: need to add length of end effector
 
 constexpr float SHOULDER_MIN_DEG = -180.0f;
 constexpr float SHOULDER_MAX_DEG = 180.0f;
@@ -97,18 +91,12 @@ constexpr unsigned long ARM_UPDATE_PERIOD_MS = 20;
 constexpr float ARM_SHOULDER_RATE_RAD_S = 1.2f;
 constexpr float ARM_ELBOW_RATE_RAD_S = 1.2f;
 constexpr float ARM_JOINT_REACHED_EPS_RAD = 0.01f;
-
-DesiredArmPosition latest_arm_cmd;
-DesiredArmJointAngles latest_arm_joint_angles_cmd;
-bool has_valid_arm_target = false;
-float target_shoulder_rad = 0.0f;
-float target_elbow_rad = 0.0f;
-float applied_shoulder_rad = 0.0f;
-float applied_elbow_rad = 0.0f;
-unsigned long last_arm_update_ms = 0;
+constexpr bool ELEVATOR_USE_TOF_SENSOR = true;
 
 DesiredElevatorState latest_rx_cmd;
 DesiredElevatorState latest_applied_cmd;
+DesiredArmPosition latest_arm_cmd;
+DesiredArmJointAngles latest_arm_joint_angles_cmd;
 bool has_valid_elevator_cmd = false;
 bool ack_dirty = false;
 unsigned long last_cmd_rx_ms = 0;
@@ -117,6 +105,13 @@ unsigned long last_meas_publish_ms = 0;
 unsigned long last_ack_publish_ms = 0;
 unsigned long last_ack_debug_ms = 0;
 unsigned long last_meas_debug_ms = 0;
+unsigned long last_arm_update_ms = 0;
+
+bool has_valid_arm_target = false;
+float target_shoulder_rad = 0.0f;
+float target_elbow_rad = 0.0f;
+float applied_shoulder_rad = 0.0f;
+float applied_elbow_rad = 0.0f;
 
 MotorDriver elevator_driver {B_DIR1, B_PWM1, 0};
 EncoderVelocity elevator_encoder {ELEVATOR_ENCODER_A_PIN,
@@ -127,8 +122,6 @@ Servo shoulder_servo;
 Servo elbow_servo;
 Servo pinch_left_servo;
 Servo pinch_right_servo;
-
-constexpr bool ELEVATOR_USE_TOF_SENSOR = true;
 
 bool tof_sensor_available = false;
 bool encoder_height_initialized = false;
@@ -147,6 +140,9 @@ float fused_elevator_height_m = NAN;
 float last_encoder_height_m = NAN;
 float last_tof_height_m = NAN;
 unsigned long last_height_update_ms = 0;
+
+volatile bool has_pending_wireless_pinch_cmd = false;
+volatile PinchCommand pending_wireless_pinch_cmd = PinchCommand::OPEN;
 
 #define Kp 3.5f
 #define Ki 0.1f
@@ -229,21 +225,6 @@ static void printDebugTiming(const char* tag, unsigned long& last_ms) {
   last_ms = now;
 }
 
-static bool handleElevatorCommand(const String& line, DesiredElevatorState& cmd) {
-  if (!line.startsWith("ELV_CMD,")) {
-    return false;
-  }
-
-  if (sscanf(line.c_str(), "ELV_CMD,%f", &cmd.height_m) != 1) {
-    Serial.println("WRONG_NUM_VALUES");
-    return false;
-  }
-
-  return true;
-}
-
-// Legacy shoulder/elbow motion (same Servo instances / pins as pinch — see pinch_slew_active).
-
 static float clampFloat(float value, float min_value, float max_value) {
   if (value < min_value) {
     return min_value;
@@ -260,6 +241,19 @@ static float convertShoulderAngleToMicroseconds(const float shoulder_angle) {
 
 static float convertElbowAngleToMicroseconds(const float elbow_angle) {
   return 1090 - elbow_angle * (599.0 / 90.0);
+}
+
+static bool handleElevatorCommand(const String& line, DesiredElevatorState& cmd) {
+  if (!line.startsWith("ELV_CMD,")) {
+    return false;
+  }
+
+  if (sscanf(line.c_str(), "ELV_CMD,%f", &cmd.height_m) != 1) {
+    Serial.println("WRONG_NUM_VALUES");
+    return false;
+  }
+
+  return true;
 }
 
 static bool handleArmCommand(const String& line, DesiredArmPosition& cmd) {
@@ -628,10 +622,6 @@ void setup() {
     tof_sensor_available = lox.begin();
     if (!tof_sensor_available) {
       Serial.println("ERR,VL53L0X_INIT_FAILED");
-      // TODO: fix I2C connection, this is just for debugging
-      // while (1) {
-      //   delay(100);
-      // }
     }
   }
 
@@ -641,11 +631,12 @@ void setup() {
 
   shoulder_servo.setPeriodHertz(50);
   elbow_servo.setPeriodHertz(50);
-  Serial.println("SETUP_ELBOW");
   pinch_left_servo.setPeriodHertz(50);
-  Serial.println("SETUP_PINCH_L");
   pinch_right_servo.setPeriodHertz(50);
+  Serial.println("SETUP_ELBOW");
+  Serial.println("SETUP_PINCH_L");
   Serial.println("SETUP_PINCH_R");
+
   shoulder_servo.attach(ARM_SHOULDER_SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
   elbow_servo.attach(ARM_ELBOW_SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
   pinch_left_servo.attach(PINCH_LEFT_SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
@@ -662,6 +653,7 @@ void setup() {
   last_cmd_apply_ms = now;
   last_meas_publish_ms = now;
   last_ack_publish_ms = now;
+  last_arm_update_ms = now;
 
   Serial.println("ELV_READY");
 }
@@ -694,10 +686,7 @@ void loop() {
           if (handleArmJointAnglesCommand(rx_line, arm_joint_angles_cmd)) {
             latest_arm_joint_angles_cmd = arm_joint_angles_cmd;
             commandArmToJointAngles(latest_arm_joint_angles_cmd);
-            last_cmd_rx_ms = millis();
-          } else if (!rx_line.startsWith("ARM_JOINT_ANGLES_CMD,") &&
-                     !rx_line.startsWith("ARM_CMD,") && !rx_line.startsWith("PINCH_CMD,") &&
-                     !rx_line.startsWith("ELV_CMD,")) {
+          } else {
             Serial.println("WRONG_START");
           }
         }
