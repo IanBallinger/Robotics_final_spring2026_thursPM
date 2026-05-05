@@ -395,7 +395,10 @@
       "points_if_completed": {},
       "params": {
         "target_pose": "right_home",
-        "requires_resource_occupied_for": "microwave_slot"
+        "requires_resource_occupied_for": "microwave_slot",
+        "pose_trace_csv_left": "trace_right_arm_safe_retract_left.csv",
+        "pose_trace_csv_right": "trace_right_arm_safe_retract_right.csv",
+        "named_waypoints_csv": "UR5/waypoints_right_retract.csv"
       }
     }
   ],

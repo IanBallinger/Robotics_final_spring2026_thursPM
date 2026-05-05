@@ -17,6 +17,7 @@ import importlib.util
 import json
 import queue
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -197,6 +198,8 @@ class Supervisor:
         self._completed_task_ids: Set[str] = set()
         self._task_catalog: Dict[str, Dict[str, Any]] = {}
         self._visual_step_counter: int = 0
+        self._autonomy_pause_event = threading.Event()
+        self._active_visualizer_mode: str = ""
         self.subtasks_dir = subtasks_dir or (_THIS_DIR / "subtasks")
         self._ensure_subtasks_dir()
         self.reload_subtasks()
@@ -1523,6 +1526,7 @@ class Supervisor:
             "arm": queued.arm,
             "sequence": queued.sequence,
             "prerequisites": list(queued.prerequisites),
+            "params": dict(queued.params or {}),
             "resource_action": queued.resource_action,
             "resource": queued.resource,
             "resource_item": queued.resource_item,
@@ -1565,6 +1569,7 @@ class Supervisor:
                     "name": meta["name"],
                     "arm": meta["arm"],
                     "prerequisites": list(meta["prerequisites"]),
+                    "params": dict(meta.get("params", {})),
                     "state": state,
                     "priority_score": priority,
                     "effective_points": effective,
@@ -1596,6 +1601,7 @@ class Supervisor:
             "earned_points_total": self._earned_points_total,
             "score_counts": dict(self._score_counts),
             "tasks": tasks,
+            "visualizer_mode": self._active_visualizer_mode,
         }
 
     def _push_visual_snapshot(
@@ -1617,6 +1623,223 @@ class Supervisor:
             tick=tick,
         )
         visualizer.push_snapshot(snapshot)
+
+    @staticmethod
+    def _task_slug(task_id: str, fallback_name: str = "") -> str:
+        raw = str(task_id or "").strip()
+        if not raw:
+            raw = str(fallback_name or "").strip()
+        if not raw:
+            raw = "unnamed_task"
+        safe = "".join(ch if (ch.isalnum() or ch in "._-") else "_" for ch in raw)
+        safe = safe.strip("._-")
+        return safe or "unnamed_task"
+
+    @staticmethod
+    def _task_cli_id(task_id: str, fallback_name: str = "") -> str:
+        base = str(task_id or "").strip()
+        if not base:
+            base = str(fallback_name or "").strip()
+        if not base:
+            return ""
+        for sep in (":", "#"):
+            if sep in base:
+                base = base.split(sep, 1)[0]
+        return base.strip()
+
+    def _spawn_tool_process(self, args: List[str]) -> str:
+        cmd = [str(a) for a in args if str(a).strip() != ""]
+        kwargs: Dict[str, Any] = {
+            "cwd": str(_THIS_DIR.parent),
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "stdin": subprocess.DEVNULL,
+        }
+        if sys.platform.startswith("win"):
+            kwargs["creationflags"] = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+        proc = subprocess.Popen(cmd, **kwargs)
+        return f"launched pid={proc.pid}: {' '.join(cmd)}"
+
+    @staticmethod
+    def _latest_trace_jld2() -> str:
+        traces_dir = _THIS_DIR.parent / "traces"
+        if not traces_dir.exists():
+            return ""
+        candidates = sorted(traces_dir.glob("*.jld2"), key=lambda p: p.stat().st_mtime, reverse=True)
+        return str(candidates[0]) if candidates else ""
+
+    @staticmethod
+    def _resolve_waypoint_csv(preferred: str, task_slug: str, task_cli_id: str) -> str:
+        candidates: List[Path] = []
+        if preferred:
+            candidates.append(Path(preferred))
+        if task_slug:
+            candidates.append(_THIS_DIR / f"waypoints_{task_slug}.csv")
+        if task_cli_id:
+            candidates.append(_THIS_DIR / f"waypoints_{task_cli_id}.csv")
+
+        for cand in candidates:
+            if cand.exists():
+                return str(cand)
+
+        any_waypoints = sorted(_THIS_DIR.glob("waypoints*.csv"))
+        if any_waypoints:
+            return str(any_waypoints[0])
+
+        return str(candidates[0]) if candidates else str(_THIS_DIR / "named_waypoints.csv")
+
+    def _halt_robot_motion_best_effort(self) -> str:
+        notes: List[str] = []
+        for arm_name, ip in (("left", self.left_ip), ("right", self.right_ip)):
+            arm = None
+            try:
+                arm = UR5Arm(ip, verbose=False)
+                ok = arm.stop_arm(deceleration=10.0, asynchronous=False, use_linear=True)
+                notes.append(f"{arm_name} stop={ok}")
+            except Exception as exc:
+                notes.append(f"{arm_name} stop error={exc}")
+            finally:
+                try:
+                    if arm is not None:
+                        arm.disconnect()
+                except Exception:
+                    pass
+        return " | ".join(notes)
+
+    def handle_visualizer_control(
+        self,
+        action: str,
+        task: Optional[Dict[str, Any]],
+        snapshot: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        action_name = str(action or "").strip().lower()
+        task = task or {}
+        snapshot = snapshot or {}
+        params = dict(task.get("params", {}) or {})
+        task_id = str(task.get("task_id", "")).strip()
+        task_name = str(task.get("name", "")).strip()
+        task_slug = self._task_slug(task_id, fallback_name=task_name)
+        task_cli_id = self._task_cli_id(task_id, fallback_name=task_name)
+        visualizer_mode = str(snapshot.get("visualizer_mode", "")).strip().lower()
+        offline_mode = visualizer_mode == "simulate"
+
+        if action_name == "pause_halt":
+            self.pause()
+            self._autonomy_pause_event.set()
+            if offline_mode:
+                halt_msg = "offline simulate mode: hardware stop skipped"
+            else:
+                halt_msg = self._halt_robot_motion_best_effort()
+            return f"pause/halt requested ({halt_msg})"
+
+        if action_name == "resume":
+            self.play()
+            self._autonomy_pause_event.clear()
+            return "scheduler resume requested"
+
+        if action_name == "start_recording":
+            preferred_csv = str(params.get("named_waypoints_csv") or (_THIS_DIR / f"waypoints_{task_slug}.csv"))
+            named_csv = self._resolve_waypoint_csv(preferred_csv, task_slug, task_cli_id)
+
+            live_plot_args = [
+                "julia",
+                "--startup-file=no",
+                "--compile=min",
+                "-O0",
+                "--threads",
+                "1",
+                str(_THIS_DIR.parent / "live_plot_runner.jl"),
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "9999",
+                "--named-waypoints-csv",
+                named_csv,
+                "--fast-start",
+                "true",
+            ]
+            if offline_mode:
+                latest_jld2 = self._latest_trace_jld2()
+                if latest_jld2:
+                    live_plot_args.extend(["--bootstrap-jld2", latest_jld2])
+                # Offline simulate mode can idle with little/no incoming stream data;
+                # keep render workload bounded to avoid GPU/CPU saturation.
+                live_plot_args.extend([
+                    "--max-points",
+                    "120000",
+                    "--refresh-every",
+                    "12",
+                    "--packet-log-every",
+                    "300",
+                    "--observed-limits-save-sec",
+                    "3.0",
+                    "--idle-sleep-ms",
+                    "3",
+                    "--lock-windowed",
+                    "true",
+                ])
+
+            ui_launch_msg = self._spawn_tool_process(live_plot_args)
+
+            args = [
+                sys.executable,
+                str(_DEMO_DIR / "record.py"),
+                "--stream-udp-host",
+                "127.0.0.1",
+                "--stream-udp-port",
+                "9999",
+                "--task-graph-file",
+                "UR5/master_task_graph.json",
+                "--task-id",
+                task_cli_id,
+                "--named-waypoints-csv",
+                named_csv,
+                "--write-task-graph-labels",
+            ]
+            if offline_mode:
+                args.extend(["--no-robot", "--no-camera"])
+            recorder_launch_msg = self._spawn_tool_process(args)
+            return f"{ui_launch_msg} | {recorder_launch_msg}"
+
+        if action_name == "start_tuning":
+            arm_side = str(task.get("arm", params.get("arm", "right"))).strip().lower()
+            if arm_side not in {"left", "right"}:
+                arm_side = "right"
+            preferred_csv = str(params.get("named_waypoints_csv") or (_THIS_DIR / f"waypoints_{task_slug}.csv"))
+            named_csv = self._resolve_waypoint_csv(preferred_csv, task_slug, task_cli_id)
+            args = [
+                sys.executable,
+                str(_THIS_DIR / "waypoint_tuning_runner.py"),
+                "--waypoints-csv",
+                named_csv,
+                "--task-id",
+                task_cli_id,
+                "--arm-side",
+                arm_side,
+            ]
+            if offline_mode:
+                args.extend([
+                    "--mock-robot",
+                    "--mock-state-file",
+                    "traces/mock_robot_state.json",
+                ])
+            return self._spawn_tool_process(args)
+
+        step = ""
+        if isinstance(snapshot, dict):
+            step = str(snapshot.get("step", ""))
+        return f"unknown action '{action_name}' at step={step}"
+
+    def _wait_if_paused(self, visualizer=None, arm_busy=None, running_by_arm=None):
+        while self._autonomy_pause_event.is_set():
+            self._push_visual_snapshot(
+                visualizer,
+                event="paused",
+                arm_busy=arm_busy,
+                running_by_arm=running_by_arm,
+                message="manual pause/halt requested from scheduler viewer",
+            )
+            time.sleep(0.1)
 
     def queue_task(
         self,
@@ -1864,7 +2087,7 @@ class Supervisor:
             },
             task_id=task_id,
             prerequisites=list(cfg["prerequisites"]),
-            arm="right",
+            arm="left",
             blocks_arms=[],
             unblocks_arms=[],
             score_token="press_microwave_stop_with_food_inside",
@@ -1890,6 +2113,7 @@ class Supervisor:
         if not parallel_arms:
             return self._run_autonomy_sequential(max_tasks=max_tasks, visualizer=visualizer)
 
+        self._autonomy_pause_event.clear()
         self._completed_tokens = set()
         self._reset_visual_tracking()
         self._blocked_arms = {}
@@ -1947,6 +2171,7 @@ class Supervisor:
         pending_exception: Optional[Exception] = None
         try:
             while True:
+                self._wait_if_paused(visualizer=visualizer, arm_busy=arm_busy, running_by_arm=running_by_arm)
                 # Drain completed task notifications first so gates can open promptly.
                 while True:
                     try:
@@ -2142,6 +2367,7 @@ class Supervisor:
     def _run_autonomy_sequential(self, max_tasks: Optional[int] = None, visualizer=None) -> List[Tuple[str, bool, float, str]]:
         """Original sequential autonomy loop."""
         self._completed_tokens = set()
+        self._autonomy_pause_event.clear()
         self._reset_visual_tracking()
         self._blocked_arms = {}
         self._resource_state = {resource: {} for resource in self._resource_constraints}
@@ -2162,6 +2388,7 @@ class Supervisor:
         )
 
         while self._task_heap:
+            self._wait_if_paused(visualizer=visualizer, arm_busy=arm_busy, running_by_arm=running_by_arm)
             if max_tasks is not None and executed >= max_tasks:
                 break
 
@@ -2701,12 +2928,15 @@ def main(argv: Optional[List[str]] = None):
                                 if visualizer_mode == "simulate"
                                 else "UR5 Task Graph Visualizer (live scheduler)"
                             ),
+                            control_callback=supervisor.handle_visualizer_control,
                         )
+                        supervisor._active_visualizer_mode = visualizer_mode
                         visualizer.start()
                     except Exception as exc:
                         print(f"warning: failed to start task visualizer: {exc}")
                         visualizer = None
                         visualizer_mode = "off"
+                        supervisor._active_visualizer_mode = ""
 
             def _queue_item(item: dict, default_task_id: str):
                 if not isinstance(item, dict) or "name" not in item:
@@ -2877,6 +3107,7 @@ def main(argv: Optional[List[str]] = None):
                 else:
                     print("simulation visualizer ready; close the window when finished reviewing playback")
                 visualizer.wait_until_closed()
+                supervisor._active_visualizer_mode = ""
         else:
             ok = supervisor.run_subtask(args.name, params=params)
             print(f"subtask '{args.name}' -> {ok}")

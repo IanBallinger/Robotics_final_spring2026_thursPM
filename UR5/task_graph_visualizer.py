@@ -11,13 +11,18 @@ from __future__ import annotations
 import queue
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 class TaskGraphStateVisualizer:
     """Threaded task graph visualizer with timeline playback."""
 
-    def __init__(self, mode: str = "simulate", title: str = "Task Graph Visualizer"):
+    def __init__(
+        self,
+        mode: str = "simulate",
+        title: str = "Task Graph Visualizer",
+        control_callback: Optional[Callable[[str, Optional[Dict[str, Any]], Dict[str, Any]], str]] = None,
+    ):
         mode_norm = str(mode).strip().lower()
         if mode_norm not in {"simulate", "live"}:
             raise ValueError("mode must be one of: simulate, live")
@@ -29,6 +34,7 @@ class TaskGraphStateVisualizer:
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._closed_event = threading.Event()
+        self._control_callback = control_callback
 
     def start(self):
         if self._thread is not None:
@@ -79,6 +85,62 @@ class TaskGraphStateVisualizer:
         status_label = ttk.Label(top_frame, textvariable=status_var)
         status_label.pack(side=tk.RIGHT)
 
+        controls_frame = ttk.Frame(root)
+        controls_frame.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(0, 8))
+
+        selected_task_var = tk.StringVar(value="")
+        action_status_var = tk.StringVar(value="Controls ready.")
+
+        ttk.Label(controls_frame, text="Selected task id:").pack(side=tk.LEFT)
+        task_id_entry = ttk.Entry(controls_frame, textvariable=selected_task_var, width=34)
+        task_id_entry.pack(side=tk.LEFT, padx=(4, 10))
+
+        def _find_selected_task() -> Optional[Dict[str, Any]]:
+            if not self._history:
+                return None
+            snap = self._history[selected_index]
+            selected_task_id = str(selected_task_var.get()).strip()
+            if not selected_task_id:
+                return None
+            for task in snap.get("tasks", []):
+                if str(task.get("task_id", "")).strip() == selected_task_id:
+                    return dict(task)
+            return None
+
+        def _run_control_action(action_name: str):
+            if self._control_callback is None:
+                action_status_var.set("No control callback configured for this viewer.")
+                return
+            snapshot = self._history[selected_index] if self._history else {}
+            selected_task = _find_selected_task()
+            try:
+                msg = self._control_callback(action_name, selected_task, dict(snapshot))
+                action_status_var.set(str(msg))
+            except Exception as exc:
+                action_status_var.set(f"Action failed: {exc}")
+
+        ttk.Button(
+            controls_frame,
+            text="Start Waypoint Recording",
+            command=lambda: _run_control_action("start_recording"),
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            controls_frame,
+            text="Start Waypoint Tuning",
+            command=lambda: _run_control_action("start_tuning"),
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            controls_frame,
+            text="Pause/Halt Robot",
+            command=lambda: _run_control_action("pause_halt"),
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            controls_frame,
+            text="Resume Scheduler",
+            command=lambda: _run_control_action("resume"),
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(controls_frame, textvariable=action_status_var).pack(side=tk.LEFT, padx=(10, 0))
+
         slider_var = tk.IntVar(value=0)
         slider = ttk.Scale(root, from_=0, to=0, orient=tk.HORIZONTAL, variable=slider_var)
         slider.pack(side=tk.TOP, fill=tk.X, padx=8)
@@ -98,6 +160,7 @@ class TaskGraphStateVisualizer:
         canvas.pack(fill=tk.BOTH, expand=True)
 
         selected_index = 0
+        node_rects_by_task_id: Dict[str, tuple[int, int, int, int]] = {}
 
         def clamp_index(idx: int) -> int:
             if not self._history:
@@ -127,6 +190,17 @@ class TaskGraphStateVisualizer:
             selected_index = clamp_index(idx)
             slider_var.set(selected_index)
             snap = self._history[selected_index]
+
+            if selected_task_var.get().strip() == "":
+                running_task_id = ""
+                for running_id in (snap.get("running_by_arm", {}) or {}).values():
+                    if running_id:
+                        running_task_id = str(running_id)
+                        break
+                if running_task_id:
+                    selected_task_var.set(running_task_id)
+                elif snap.get("tasks"):
+                    selected_task_var.set(str(snap.get("tasks", [{}])[0].get("task_id", "")))
 
             step = snap.get("step", selected_index)
             event = str(snap.get("event", ""))
@@ -191,19 +265,22 @@ class TaskGraphStateVisualizer:
                 task_id = str(task.get("task_id", ""))
                 positions[task_id] = (x, y, x + node_w, y + node_h)
 
+            node_rects_by_task_id.clear()
+            node_rects_by_task_id.update(positions)
+
             # Draw dependency links first.
             for task in tasks:
                 tid = str(task.get("task_id", ""))
                 x1y1 = positions.get(tid)
                 if x1y1 is None:
                     continue
-                tx0, ty0, tx1, ty1 = x1y1
+                tx0, ty0, tx1, _ty1 = x1y1
                 for prereq in task.get("prerequisites", []):
                     prereq_id = str(prereq)
                     px0y0 = positions.get(prereq_id)
                     if px0y0 is None:
                         continue
-                    px0, py0, px1, py1 = px0y0
+                    px0, _py0, px1, py1 = px0y0
                     canvas.create_line(
                         (px0 + px1) // 2,
                         py1,
@@ -253,6 +330,17 @@ class TaskGraphStateVisualizer:
             render_snapshot(idx)
 
         slider.configure(command=lambda _v: on_slider())
+
+        def on_canvas_click(event):
+            ex = int(event.x)
+            ey = int(event.y)
+            for task_id, (x0r, y0r, x1r, y1r) in node_rects_by_task_id.items():
+                if x0r <= ex <= x1r and y0r <= ey <= y1r:
+                    selected_task_var.set(task_id)
+                    action_status_var.set(f"Selected task: {task_id}")
+                    return
+
+        canvas.bind("<Button-1>", on_canvas_click)
 
         def process_queue():
             nonlocal selected_index

@@ -1,7 +1,6 @@
 venv
 __pycache__
 **/*.npz
-**/*.jld2
 .pio
 .pyc
 *.pyc

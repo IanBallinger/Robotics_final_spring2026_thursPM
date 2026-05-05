@@ -1,5 +1,3 @@
-import Pkg
-
 # GLMakie/GLFW on Windows requires all GL calls on thread 1.
 # Julia must be started with --threads 1:
 #   julia --threads 1 live_plot_runner.jl
@@ -7,13 +5,6 @@ if Threads.nthreads() > 1
     println("ERROR: Run with julia --threads 1 to avoid GLFW threading issues.")
     println("  julia --threads 1 live_plot_runner.jl --host 127.0.0.1 --port 9999")
     exit(1)
-end
-
-# Install required packages if missing.
-for pkg in ["GLMakie", "Colors", "JSON3", "JLD2"]
-    if Base.find_package(pkg) === nothing
-        Pkg.add(pkg)
-    end
 end
 
 using Sockets
@@ -59,6 +50,44 @@ function arg_int(flag::String, default::Int)
         println("Invalid value for ", flag, ": ", raw, ". Using ", default, ".")
         return default
     end
+end
+
+function arg_float(flag::String, default::Float64)
+    raw = arg_value(flag, string(default))
+    try
+        return parse(Float64, raw)
+    catch
+        println("Invalid value for ", flag, ": ", raw, ". Using ", default, ".")
+        return default
+    end
+end
+
+function arg_bool(flag::String, default::Bool)
+    raw = lowercase(strip(string(arg_value(flag, default ? "true" : "false"))))
+    if raw in ("1", "true", "yes", "on")
+        return true
+    elseif raw in ("0", "false", "no", "off")
+        return false
+    else
+        println("Invalid value for ", flag, ": ", raw, ". Using ", default, ".")
+        return default
+    end
+end
+
+function enforce_window_lock!(screen)
+    glfw = GLMakie.GLFW
+    win = GLMakie.to_native(screen)
+
+    # Force-disable resize/maximize at the native GLFW layer.
+    glfw.SetWindowAttrib(win, glfw.RESIZABLE, false)
+    try
+        glfw.SetWindowAttrib(win, glfw.MAXIMIZED, false)
+    catch
+    end
+
+    ww, wh = glfw.GetWindowSize(win)
+    glfw.SetWindowSizeLimits(win, ww, wh, ww, wh)
+    return nothing
 end
 
 function csv_escape(s)
@@ -628,8 +657,13 @@ end
 function main()
     host = arg_host("127.0.0.1")
     port = arg_int("--port", 9999)
-    max_points = arg_int("--max-points", 400000000)
+    # Keep bounded history by default. Very large point clouds can stall GL on some Windows drivers.
+    max_points = arg_int("--max-points", 200000)
     refresh_every = arg_int("--refresh-every", 5)
+    packet_log_every = max(1, arg_int("--packet-log-every", 100))
+    observed_limits_save_interval_s = max(0.1, arg_float("--observed-limits-save-sec", 2.0))
+    idle_sleep_s = max(0.0, arg_float("--idle-sleep-ms", 2.0) / 1000.0)
+    lock_windowed = arg_bool("--lock-windowed", true)
     output_path = arg_value("--jld2-file", arg_value("--output", ""))
     if !isempty(output_path)
         println("Warning: --jld2-file/--output is deprecated and ignored. JLD2 name is derived from task name and saved in ./traces.")
@@ -675,11 +709,16 @@ function main()
         (-2pi, 2pi),
         (-2pi, 2pi),
     ]
-    joint_limits = load_joint_limits_from_python(joint_limits_fallback)
+    fast_start = arg_bool("--fast-start", false)
+    joint_limits = fast_start ? joint_limits_fallback : load_joint_limits_from_python(joint_limits_fallback)
+    if fast_start
+        println("Fast start enabled: skipping Python joint-limit bootstrap (using fallback/observed limits).")
+    end
     joint_names = ["q0_base", "q1_shldr", "q2_elbow", "q3_wrist1", "q4_wrist2", "q5_wrist3"]
     observed_limits_path = arg_value("--observed-joint-limits-file", joinpath("traces", "observed_joint_limits.json"))
     joint_limits, observed_joint_min, observed_joint_max = load_observed_joint_limits_from_disk(observed_limits_path, joint_limits)
     limits_dirty = false
+    last_limits_save_time = Ref(time())
     latest_left_q = fill(NaN, 6)
     latest_right_q = fill(NaN, 6)
 
@@ -714,8 +753,17 @@ function main()
 
     axislegend(ax, position = :lt)
 
-    screen = GLMakie.Screen(start_renderloop = true)
+    screen = GLMakie.Screen(
+        start_renderloop = true,
+        fullscreen = false,
+        resizable = !lock_windowed,
+        title = lock_windowed ? "Live Plot Runner (Windowed Lock)" : "Live Plot Runner",
+    )
     display(screen, fig)
+    if lock_windowed
+        enforce_window_lock!(screen)
+        println("Windowed lock enabled: fullscreen/maximize disabled to avoid GLFW window-state lockups on Windows.")
+    end
 
     # Single TCP listener receives all pose/vision/waypoint packets from Python.
     server = listen(host, port)
@@ -981,6 +1029,7 @@ function main()
                 break
             end
 
+            had_packets = !isempty(packet_lines)
             for raw_line in packet_lines
                 pkt = try JSON3.read(raw_line) catch; nothing end
 
@@ -1118,11 +1167,15 @@ function main()
                                         ]
                                         if update_limits_from_sample!(joint_limits, observed_joint_min, observed_joint_max, latest_left_q)
                                             limits_dirty = true
-                                            try
-                                                write_observed_joint_limits(observed_limits_path, joint_names, joint_limits, observed_joint_min, observed_joint_max)
-                                                limits_dirty = false
-                                            catch e
-                                                println("Warning: could not write observed joint limits: ", e)
+                                            now_s = time()
+                                            if now_s - last_limits_save_time[] >= observed_limits_save_interval_s
+                                                try
+                                                    write_observed_joint_limits(observed_limits_path, joint_names, joint_limits, observed_joint_min, observed_joint_max)
+                                                    limits_dirty = false
+                                                    last_limits_save_time[] = now_s
+                                                catch e
+                                                    println("Warning: could not write observed joint limits: ", e)
+                                                end
                                             end
                                         end
                                     else
@@ -1149,7 +1202,9 @@ function main()
                                     end
 
                                     left_tcp_packet_count += 1
-                                    println("[Left TCP #$left_tcp_packet_count] pos=($x, $y, $z) m  rot=($rx, $ry, $rz) rad")
+                                    if left_tcp_packet_count % packet_log_every == 0
+                                        println("[Left TCP #$left_tcp_packet_count] pos=($x, $y, $z) m  rot=($rx, $ry, $rz) rad")
+                                    end
 
                                     if !first_left_tcp_logged
                                         first_left_tcp_logged = true
@@ -1200,11 +1255,15 @@ function main()
                                         ]
                                         if update_limits_from_sample!(joint_limits, observed_joint_min, observed_joint_max, latest_right_q)
                                             limits_dirty = true
-                                            try
-                                                write_observed_joint_limits(observed_limits_path, joint_names, joint_limits, observed_joint_min, observed_joint_max)
-                                                limits_dirty = false
-                                            catch e
-                                                println("Warning: could not write observed joint limits: ", e)
+                                            now_s = time()
+                                            if now_s - last_limits_save_time[] >= observed_limits_save_interval_s
+                                                try
+                                                    write_observed_joint_limits(observed_limits_path, joint_names, joint_limits, observed_joint_min, observed_joint_max)
+                                                    limits_dirty = false
+                                                    last_limits_save_time[] = now_s
+                                                catch e
+                                                    println("Warning: could not write observed joint limits: ", e)
+                                                end
                                             end
                                         end
                                     else
@@ -1231,7 +1290,9 @@ function main()
                                     end
 
                                     right_tcp_packet_count += 1
-                                    println("[Right TCP #$right_tcp_packet_count] pos=($x, $y, $z) m  rot=($rx, $ry, $rz) rad")
+                                    if right_tcp_packet_count % packet_log_every == 0
+                                        println("[Right TCP #$right_tcp_packet_count] pos=($x, $y, $z) m  rot=($rx, $ry, $rz) rad")
+                                    end
 
                                     if !first_right_tcp_logged
                                         first_right_tcp_logged = true
@@ -1305,7 +1366,9 @@ function main()
                             refresh_vision_colors!()
 
                             vision_packet_count += 1
-                            println("[Vision #$vision_packet_count] pos=($x, $y, $z) m  label=$label_name color=$color_name spec_key=$spec_key_log")
+                            if vision_packet_count % packet_log_every == 0
+                                println("[Vision #$vision_packet_count] pos=($x, $y, $z) m  label=$label_name color=$color_name spec_key=$spec_key_log")
+                            end
                         end
 
                         if !first_vision_logged
@@ -1341,7 +1404,9 @@ function main()
                                 refresh_vision_colors!()
 
                                 vision_packet_count += 1
-                                println("[Vision #$vision_packet_count] pos=($x, $y, $z) m  color=$color_name")
+                                if vision_packet_count % packet_log_every == 0
+                                    println("[Vision #$vision_packet_count] pos=($x, $y, $z) m  color=$color_name")
+                                end
 
                                 if !first_vision_logged
                                     first_vision_logged = true
@@ -1359,6 +1424,9 @@ function main()
 
             # Yield to GLMakie's renderloop
             yield()
+            if !had_packets && idle_sleep_s > 0.0
+                sleep(idle_sleep_s)
+            end
         end
     catch err
         err isa InterruptException || rethrow()
