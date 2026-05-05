@@ -645,21 +645,22 @@ class MissionRuntime:
         intr = self.apriltag_camera.color_intrinsics()
         center_error_px = float(det.center_x_px - intr.cx)
         distance_error_m = float(det.tz_m - target.desired_distance_m)
+        heading_error_rad = float(np.arctan2(det.tx_m, max(det.tz_m, 1e-6)))
 
-        omega_cmd = -self.runtime_config.tag_center_kp * (center_error_px / max(intr.cx, 1.0))
+        vx_cmd = self.runtime_config.tag_distance_kp * distance_error_m
+        vx_cmd = float(np.clip(vx_cmd, -self.runtime_config.controller_v_max, self.runtime_config.controller_v_max))
+
+        omega_cmd = -self.runtime_config.tag_center_kp * heading_error_rad
         omega_cmd = float(np.clip(omega_cmd, -self.runtime_config.controller_omega_max, self.runtime_config.controller_omega_max))
 
         if abs(center_error_px) > self.runtime_config.align_only_center_error_px:
             vx_cmd = 0.0
-        else:
-            vx_cmd = self.runtime_config.tag_distance_kp * distance_error_m
-            vx_cmd = float(np.clip(vx_cmd, -self.runtime_config.controller_v_max, self.runtime_config.controller_v_max))
 
         distance_tol = float(target.distance_tolerance_m or self.runtime_config.default_distance_tolerance_m)
-        center_tol = float(target.center_tolerance_px or self.runtime_config.default_center_tolerance_px)
         settle_time = float(target.settle_time_s or self.runtime_config.default_settle_time_s)
+        tag_position_error_m = float(np.hypot(det.tx_m, distance_error_m))
 
-        reached = abs(distance_error_m) <= distance_tol and abs(center_error_px) <= center_tol
+        reached = tag_position_error_m <= distance_tol
         if reached:
             if self.target_reached_since is None:
                 self.target_reached_since = now
