@@ -4,15 +4,17 @@
 #include <math.h>
 #include <ESP32Servo.h>
 #include "PID.h"
-#include <esp_now.h>
 #include <WiFi.h>
+#include <esp_now.h>
+#include <string.h>
+
+#include "../../include/pinch_wireless.h"
 #include "robot_pinout.h"
 #include "MotorDriver.h"
 #include "PID.h"
 #include "util.h"
-#include "arm_control.h"
 #include "EncoderVelocity.h"
-
+#include "arm_control.h"
 
 #define TCAADDR 0x70
 
@@ -72,22 +74,63 @@ constexpr float ELEVATOR_ENCODER_SIGN = 1.0f;
 constexpr float ELEVATOR_METERS_PER_RAD = 0.018f;
 constexpr float ELEVATOR_METERS_BIAS = -0.02f;
 
-// Servo Arm setup and constants
 constexpr int ARM_SHOULDER_SERVO_PIN = 42;
 constexpr int ARM_ELBOW_SERVO_PIN = 39;
 constexpr int PINCH_LEFT_SERVO_PIN = 40;
 constexpr int PINCH_RIGHT_SERVO_PIN = 41;
 constexpr int SERVO_MIN_US = 544;
 constexpr int SERVO_MAX_US = 2400;
+
+// --- Left/right pinch servos (ARM_LEFT_SERVO_PIN / ARM_RIGHT_SERVO_PIN): same slew rate, mirrored US. ---
+// Calibrate so "close" moves jaws toward each other (shaft up). Swap OPEN/CLOSE pairs if reversed.
+constexpr int PINCH_LEFT_OPEN_US = 1250;
+constexpr int PINCH_LEFT_CLOSE_US = 1750;
+constexpr int PINCH_RIGHT_OPEN_US = 1750;
+constexpr int PINCH_RIGHT_CLOSE_US = 1250;
+constexpr int PINCH_STEP_US_PER_TICK = 12;
+constexpr unsigned long PINCH_UPDATE_PERIOD_MS = 20;
+
+// Serial ``PINCH_CMD,theta1,theta2``: theta1/theta2 are pinch articulation in **radians**
+// (same unit style as ``ARM_JOINT_ANGLES_CMD``). 0 rad -> open US; at/above *_MAX_RAD -> closed US.
+constexpr float PINCH_THETA1_MAX_RAD = 1.04719755f;  // ~60 deg left finger travel
+constexpr float PINCH_THETA2_MAX_RAD = 1.04719755f;  // ~60 deg right finger travel
+
+enum PinchCommand : int8_t { PINCH_CMD_CLOSE = -1, PINCH_CMD_HOLD = 0, PINCH_CMD_OPEN = 1 };
+
+static int pinch_left_target_us = PINCH_LEFT_OPEN_US;
+static int pinch_right_target_us = PINCH_RIGHT_OPEN_US;
+static int pinch_left_applied_us = PINCH_LEFT_OPEN_US;
+static int pinch_right_applied_us = PINCH_RIGHT_OPEN_US;
+static unsigned long last_pinch_motion_ms = 0;
+
+/** When true, pinch slew drives the two servos; when false, legacy arm motion uses them. */
+static bool pinch_slew_active = true;
+
+struct DesiredArmPosition {
+  float xE;
+  float yE;
+
+  DesiredArmPosition() : xE(0.0f), yE(0.0f) {}
+  DesiredArmPosition(float xE_, float yE_) : xE(xE_), yE(yE_) {}
+};
+
+struct DesiredArmJointAngles {
+  float theta1;
+  float theta2;
+
+  DesiredArmJointAngles() : theta1(0.0f), theta2(0.0f) {}
+  DesiredArmJointAngles(float theta1_, float theta2_) : theta1(theta1_), theta2(theta2_) {}
+};
+
 constexpr float RAD_TO_DEG_FACTOR = 180.0f / PI;
 constexpr float PINCH_OPEN_ANGLE_DEG = 0.0f;
 constexpr float PINCH_CLOSE_ANGLE_DEG = 90.0f;
 constexpr float ARM_BASE_X_M = 0.0f;
 constexpr float ARM_BASE_Y_M = 0.0f;
 constexpr float ARM_LINK_1_M = 0.26f;
-constexpr float ARM_LINK_2_M = 0.16f; // TODO: need to add length of end effector
+constexpr float ARM_LINK_2_M = 0.16f;
 
-constexpr float SHOULDER_MIN_DEG = -180.0f; //changed from 0-90 deg
+constexpr float SHOULDER_MIN_DEG = -180.0f;
 constexpr float SHOULDER_MAX_DEG = 180.0f;
 constexpr float ELBOW_MIN_DEG = -180.0f;
 constexpr float ELBOW_MAX_DEG = 180.0f;
@@ -96,10 +139,22 @@ constexpr float ARM_SHOULDER_RATE_RAD_S = 1.2f;
 constexpr float ARM_ELBOW_RATE_RAD_S = 1.2f;
 constexpr float ARM_JOINT_REACHED_EPS_RAD = 0.01f;
 
-DesiredElevatorState latest_rx_cmd;
-DesiredElevatorState latest_applied_cmd;
 DesiredArmPosition latest_arm_cmd;
 DesiredArmJointAngles latest_arm_joint_angles_cmd;
+bool has_valid_arm_target = false;
+float target_shoulder_rad = 0.0f;
+float target_elbow_rad = 0.0f;
+float applied_shoulder_rad = 0.0f;
+float applied_elbow_rad = 0.0f;
+unsigned long last_arm_update_ms = 0;
+
+Servo shoulder_servo;
+Servo elbow_servo;
+double shoulder_ms = 0.0;
+double elbow_ms = 0.0;
+
+DesiredElevatorState latest_rx_cmd;
+DesiredElevatorState latest_applied_cmd;
 bool has_valid_elevator_cmd = false;
 bool ack_dirty = false;
 unsigned long last_cmd_rx_ms = 0;
@@ -108,20 +163,13 @@ unsigned long last_meas_publish_ms = 0;
 unsigned long last_ack_publish_ms = 0;
 unsigned long last_ack_debug_ms = 0;
 unsigned long last_meas_debug_ms = 0;
-unsigned long last_arm_update_ms = 0;
 
-bool has_valid_arm_target = false;
-float target_shoulder_rad = 0.0f;
-float target_elbow_rad = 0.0f;
-float applied_shoulder_rad = 0.0f;
-float applied_elbow_rad = 0.0f;
-
-// TODO: need to update these pins
 MotorDriver elevator_driver {B_DIR1, B_PWM1, 0};
 EncoderVelocity elevator_encoder {ELEVATOR_ENCODER_A_PIN,
                                   ELEVATOR_ENCODER_B_PIN,
                                   ELEVATOR_ENCODER_CPR,
                                   ELEVATOR_ENCODER_TAU_S};
+
 Servo shoulder_servo;
 Servo elbow_servo;
 Servo pinch_left_servo;
@@ -228,34 +276,6 @@ static void printDebugTiming(const char* tag, unsigned long& last_ms) {
   last_ms = now;
 }
 
-static float clampFloat(float value, float min_value, float max_value) {
-  if (value < min_value) {
-    return min_value;
-  }
-  if (value > max_value) {
-    return max_value;
-  }
-  return value;
-}
-
-static float convertShoulderAngleToMicroseconds (const float shoulder_angle){
-  // 0 deg: 1360
-  // 90 deg: 1960
-
-  // shoulder angle should be between 0 and 90
-  return 1360 + shoulder_angle * (600.0/90.0);
-}
-
-static float convertElbowAngleToMicroseconds (const float elbow_angle){
-  // 0 deg: 1090
-  // 90 deg: 1691
-  // 180 deg: 2287
-
-  // elbow angle should be between 0 and 180
-  // have to negate desired elbow angle to actual command
-  return 1090 - elbow_angle * (599.0/90.0);
-}
-
 static bool handleElevatorCommand(const String& line, DesiredElevatorState& cmd) {
   if (!line.startsWith("ELV_CMD,")) {
     return false;
@@ -267,6 +287,26 @@ static bool handleElevatorCommand(const String& line, DesiredElevatorState& cmd)
   }
 
   return true;
+}
+
+// Legacy shoulder/elbow motion (same Servo instances / pins as pinch — see pinch_slew_active).
+
+static float clampFloat(float value, float min_value, float max_value) {
+  if (value < min_value) {
+    return min_value;
+  }
+  if (value > max_value) {
+    return max_value;
+  }
+  return value;
+}
+
+static float convertShoulderAngleToMicroseconds(const float shoulder_angle) {
+  return 1360 + shoulder_angle * (600.0 / 90.0);
+}
+
+static float convertElbowAngleToMicroseconds(const float elbow_angle) {
+  return 1090 - elbow_angle * (599.0 / 90.0);
 }
 
 static bool handleArmCommand(const String& line, DesiredArmPosition& cmd) {
@@ -308,6 +348,7 @@ static bool handleArmJointAnglesCommand(const String& line, DesiredArmJointAngle
   return true;
 }
 
+
 static bool handlePinchCommand(const String& line, PinchCommand& cmd) {
   if (!line.startsWith("PINCH_CMD,")) {
     return false;
@@ -324,6 +365,234 @@ static bool handlePinchCommand(const String& line, PinchCommand& cmd) {
 
   Serial.println("WRONG_NUM_VALUES");
   return false;
+
+static bool moveArmToJointAngles(float theta1_rad, float theta2_rad) {
+  float shoulder_deg = theta1_rad * RAD_TO_DEG_FACTOR;
+  float elbow_deg = theta2_rad * RAD_TO_DEG_FACTOR;
+
+  shoulder_deg = clampFloat(shoulder_deg, SHOULDER_MIN_DEG, SHOULDER_MAX_DEG);
+  elbow_deg = clampFloat(elbow_deg, ELBOW_MIN_DEG, ELBOW_MAX_DEG);
+
+  shoulder_ms = convertShoulderAngleToMicroseconds(shoulder_deg);
+  elbow_ms = convertElbowAngleToMicroseconds(elbow_deg);
+
+  shoulder_servo.writeMicroseconds(shoulder_ms);
+  elbow_servo.writeMicroseconds(elbow_ms);
+  return true;
+}
+
+static bool commandArmToJointAngles(const DesiredArmJointAngles& cmd) {
+  target_shoulder_rad = cmd.theta1;
+  target_elbow_rad = cmd.theta2;
+  has_valid_arm_target = true;
+
+  Serial.print("ARM_JOINT_ACK,");
+  Serial.print(cmd.theta1, 4);
+  Serial.print(",");
+  Serial.print(cmd.theta2, 4);
+  Serial.print(",");
+  Serial.print(target_shoulder_rad * RAD_TO_DEG_FACTOR, 2);
+  Serial.print(",");
+  Serial.print(target_elbow_rad * RAD_TO_DEG_FACTOR, 2);
+  Serial.print(",");
+  Serial.print(applied_shoulder_rad * RAD_TO_DEG_FACTOR, 2);
+  Serial.print(",");
+  Serial.println(applied_elbow_rad * RAD_TO_DEG_FACTOR, 2);
+  pinch_slew_active = false;
+  return true;
+}
+
+static float stepToward(float current_value, float target_value, float max_step) {
+  const float error = target_value - current_value;
+  if (fabsf(error) <= max_step) {
+    return target_value;
+  }
+  return current_value + copysignf(max_step, error);
+}
+
+static void updateArmMotion(unsigned long now_ms) {
+  if (!has_valid_arm_target) {
+    return;
+  }
+  if (last_arm_update_ms != 0 && now_ms - last_arm_update_ms < ARM_UPDATE_PERIOD_MS) {
+    return;
+  }
+
+  const float dt_s = (last_arm_update_ms == 0)
+                         ? (ARM_UPDATE_PERIOD_MS * 0.001f)
+                         : ((now_ms - last_arm_update_ms) * 0.001f);
+  last_arm_update_ms = now_ms;
+
+  applied_shoulder_rad = stepToward(
+      applied_shoulder_rad,
+      target_shoulder_rad,
+      ARM_SHOULDER_RATE_RAD_S * dt_s);
+  applied_elbow_rad = stepToward(
+      applied_elbow_rad,
+      target_elbow_rad,
+      ARM_ELBOW_RATE_RAD_S * dt_s);
+
+  moveArmToJointAngles(applied_shoulder_rad, applied_elbow_rad);
+
+  if (fabsf(target_shoulder_rad - applied_shoulder_rad) <= ARM_JOINT_REACHED_EPS_RAD &&
+      fabsf(target_elbow_rad - applied_elbow_rad) <= ARM_JOINT_REACHED_EPS_RAD) {
+    applied_shoulder_rad = target_shoulder_rad;
+    applied_elbow_rad = target_elbow_rad;
+    moveArmToJointAngles(applied_shoulder_rad, applied_elbow_rad);
+  }
+}
+
+static bool moveArmToXY(const DesiredArmPosition& cmd) {
+  const auto joint_angles = inverseKinematics(
+      cmd.xE,
+      cmd.yE,
+      ARM_BASE_X_M,
+      ARM_BASE_Y_M,
+      ARM_LINK_1_M,
+      ARM_LINK_2_M);
+
+  if (isnan(joint_angles.first) || isnan(joint_angles.second)) {
+    Serial.println("ARM_UNREACHABLE");
+    return false;
+  }
+
+  target_shoulder_rad = joint_angles.first;
+  target_elbow_rad = joint_angles.second;
+  has_valid_arm_target = true;
+  pinch_slew_active = false;
+
+  Serial.print("ARM_ACK,");
+  Serial.print(cmd.xE, 4);
+  Serial.print(",");
+  Serial.print(cmd.yE, 4);
+  Serial.print(",");
+  Serial.print(target_shoulder_rad * RAD_TO_DEG_FACTOR, 2);
+  Serial.print(",");
+  Serial.print(target_elbow_rad * RAD_TO_DEG_FACTOR, 2);
+  Serial.print(",");
+  Serial.print(applied_shoulder_rad * RAD_TO_DEG_FACTOR, 2);
+  Serial.print(",");
+  Serial.println(applied_elbow_rad * RAD_TO_DEG_FACTOR, 2);
+  return true;
+}
+
+static void applyPinchTargets(int8_t mode) {
+  if (mode == PINCH_CMD_CLOSE) {
+    pinch_left_target_us = PINCH_LEFT_CLOSE_US;
+    pinch_right_target_us = PINCH_RIGHT_CLOSE_US;
+  } else if (mode == PINCH_CMD_OPEN) {
+    pinch_left_target_us = PINCH_LEFT_OPEN_US;
+    pinch_right_target_us = PINCH_RIGHT_OPEN_US;
+  }
+  pinch_slew_active = true;
+}
+
+static int pinchThetaRadToUs(float theta_rad, float theta_max_rad, int open_us, int close_us) {
+  if (theta_max_rad <= 1e-6f) {
+    return open_us;
+  }
+  const float u = clampFloat(theta_rad / theta_max_rad, 0.0f, 1.0f);
+  return static_cast<int>(
+      static_cast<float>(open_us) + u * static_cast<float>(close_us - open_us) + 0.5f);
+}
+
+static void applyPinchTargetsFromThetas(float theta1_rad, float theta2_rad) {
+  pinch_left_target_us =
+      pinchThetaRadToUs(theta1_rad, PINCH_THETA1_MAX_RAD, PINCH_LEFT_OPEN_US, PINCH_LEFT_CLOSE_US);
+  pinch_right_target_us =
+      pinchThetaRadToUs(theta2_rad, PINCH_THETA2_MAX_RAD, PINCH_RIGHT_OPEN_US, PINCH_RIGHT_CLOSE_US);
+  has_valid_arm_target = false;
+  pinch_slew_active = true;
+}
+
+static bool handlePinchCommand(const String& line) {
+  if (!line.startsWith("PINCH_CMD,")) {
+    return false;
+  }
+  float theta1 = 0.0f;
+  float theta2 = 0.0f;
+  if (sscanf(line.c_str(), "PINCH_CMD,%f,%f", &theta1, &theta2) != 2) {
+    Serial.println("WRONG_NUM_VALUES");
+    return false;
+  }
+  applyPinchTargetsFromThetas(theta1, theta2);
+  Serial.print("PINCH_ACK,");
+  Serial.print(theta1, 4);
+  Serial.print(",");
+  Serial.print(theta2, 4);
+  Serial.print(",");
+  Serial.print(pinch_left_target_us);
+  Serial.print(",");
+  Serial.println(pinch_right_target_us);
+  return true;
+}
+
+static int stepIntToward(int current, int target, int max_step) {
+  if (current < target) {
+    const int n = current + max_step;
+    return (n > target) ? target : n;
+  }
+  if (current > target) {
+    const int n = current - max_step;
+    return (n < target) ? target : n;
+  }
+  return target;
+}
+
+static void updatePinchServoMotion(unsigned long now_ms) {
+  if (!pinch_slew_active) {
+    return;
+  }
+  if (last_pinch_motion_ms != 0 &&
+      now_ms - last_pinch_motion_ms < PINCH_UPDATE_PERIOD_MS) {
+    return;
+  }
+  last_pinch_motion_ms = now_ms;
+
+  pinch_left_applied_us =
+      stepIntToward(pinch_left_applied_us, pinch_left_target_us, PINCH_STEP_US_PER_TICK);
+  pinch_right_applied_us =
+      stepIntToward(pinch_right_applied_us, pinch_right_target_us, PINCH_STEP_US_PER_TICK);
+
+  shoulder_servo.writeMicroseconds(pinch_left_applied_us);
+  elbow_servo.writeMicroseconds(pinch_right_applied_us);
+}
+
+// Arduino-ESP32 3.x uses a different recv signature; update here if you migrate.
+static void onPinchEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
+  (void)mac;
+  if (len != static_cast<int>(sizeof(PinchEspNowPacket))) {
+    return;
+  }
+  PinchEspNowPacket pkt;
+  memcpy(&pkt, data, sizeof(pkt));
+  if (pkt.version != PINCH_ESPNOW_VERSION) {
+    return;
+  }
+  if (pkt.mode == PINCH_CMD_HOLD) {
+    return;
+  }
+  if (pkt.mode == PINCH_CMD_CLOSE || pkt.mode == PINCH_CMD_OPEN) {
+    applyPinchTargets(pkt.mode);
+  }
+}
+
+static void setupPinchEspNowReceiver() {
+  WiFi.mode(WIFI_STA);
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("ERR,ESPNOW_PINCH_INIT");
+    return;
+  }
+  esp_now_register_recv_cb(onPinchEspNowRecv);
+  esp_now_peer_info_t peer{};
+  memcpy(peer.peer_addr, pinch_controller_addr, 6);
+  peer.channel = 0;
+  peer.encrypt = false;
+  if (esp_now_add_peer(&peer) != ESP_OK) {
+    Serial.println("ERR,ESPNOW_PINCH_PEER");
+  }
+  Serial.print("PINCH_ESPNOW_STA_MAC,");
+  Serial.println(WiFi.macAddress());
 }
 
 static float readTofElevatorHeightMeters() {
@@ -591,6 +860,8 @@ static bool moveArmToXY(const DesiredArmPosition& cmd) {
   return true;
 }
 
+=======
+>>>>>>> 7d44ee2 (added joystick pinch and serial pinch commands)
 static void publishElevatorMeasurement(float height_m) {
   printDebugTiming("ELV_MEAS", last_meas_debug_ms);
   Serial.print("ELV_MEAS,");
@@ -647,7 +918,6 @@ void setup() {
   Serial.println("SETUP_PID");
 
   shoulder_servo.setPeriodHertz(50);
-  Serial.println("SETUP_SHLDR");
   elbow_servo.setPeriodHertz(50);
   Serial.println("SETUP_ELBOW");
   pinch_left_servo.setPeriodHertz(50);
@@ -664,13 +934,26 @@ void setup() {
   applied_elbow_rad = 0.0f;
   target_shoulder_rad = 0.0f;
   target_elbow_rad = 0.0f;
+  shoulder_servo.attach(ARM_SHOULDER_SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
+  elbow_servo.attach(ARM_ELBOW_SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
+
+  pinch_left_applied_us = pinch_left_target_us = PINCH_LEFT_OPEN_US;
+  pinch_right_applied_us = pinch_right_target_us = PINCH_RIGHT_OPEN_US;
+  shoulder_servo.writeMicroseconds(pinch_left_applied_us);
+  elbow_servo.writeMicroseconds(pinch_right_applied_us);
+  pinch_slew_active = true;
+  has_valid_arm_target = false;
+  applied_shoulder_rad = applied_elbow_rad = target_shoulder_rad = target_elbow_rad = 0.0f;
+  last_arm_update_ms = millis();
+
+  setupPinchEspNowReceiver();
+>>>>>>> 7d44ee2 (added joystick pinch and serial pinch commands)
 
   const unsigned long now = millis();
   last_cmd_rx_ms = now;
   last_cmd_apply_ms = now;
   last_meas_publish_ms = now;
   last_ack_publish_ms = now;
-  last_arm_update_ms = now;
 
   Serial.println("ELV_READY");
 }
@@ -698,12 +981,21 @@ void loop() {
           moveArmToXY(latest_arm_cmd);
         } else if (handlePinchCommand(rx_line, pinch_cmd)) {
           commandPinch(pinch_cmd);
+        } else if (handlePinchCommand(rx_line)) {
+          last_cmd_rx_ms = millis();
+        } else if (handleArmCommand(rx_line, arm_cmd)) {
+          latest_arm_cmd = arm_cmd;
+          moveArmToXY(latest_arm_cmd);
+          last_cmd_rx_ms = millis();
         } else {
           DesiredArmJointAngles arm_joint_angles_cmd;
           if (handleArmJointAnglesCommand(rx_line, arm_joint_angles_cmd)) {
             latest_arm_joint_angles_cmd = arm_joint_angles_cmd;
             commandArmToJointAngles(latest_arm_joint_angles_cmd);
-          } else {
+            last_cmd_rx_ms = millis();
+          } else if (!rx_line.startsWith("ARM_JOINT_ANGLES_CMD,") &&
+                     !rx_line.startsWith("ARM_CMD,") && !rx_line.startsWith("PINCH_CMD,") &&
+                     !rx_line.startsWith("ELV_CMD,")) {
             Serial.println("WRONG_START");
           }
         }
@@ -715,6 +1007,7 @@ void loop() {
   }
 
   const unsigned long now = millis();
+<<<<<<< HEAD
   if (has_pending_wireless_pinch_cmd) {
     noInterrupts();
     const PinchCommand pinch_cmd = pending_wireless_pinch_cmd;
@@ -723,6 +1016,13 @@ void loop() {
     commandPinch(pinch_cmd);
   }
   updateArmMotion(now);
+=======
+  if (pinch_slew_active) {
+    updatePinchServoMotion(now);
+  } else {
+    updateArmMotion(now);
+  }
+>>>>>>> 7d44ee2 (added joystick pinch and serial pinch commands)
   const float measured_height_m = readElevatorHeightMeters();
 
   if (now - last_cmd_rx_ms > CMD_TIMEOUT_MS) {
