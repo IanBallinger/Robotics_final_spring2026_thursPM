@@ -424,6 +424,15 @@ class MissionRuntime:
                 ty_m=float(t[1]),
                 tz_m=float(t[2]),
             )
+
+        if detections:
+            debug_tags = ", ".join(
+                f"id={tag_id} z={det.tz_m:.3f}m cx={det.center_x_px:.1f}px"
+                for tag_id, det in sorted(detections.items())
+            )
+            print(f"[AprilTag] detected: {debug_tags}")
+        else:
+            print("[AprilTag] detected: none")
         return detections
 
     def _person_blocking(self, now: float) -> bool:
