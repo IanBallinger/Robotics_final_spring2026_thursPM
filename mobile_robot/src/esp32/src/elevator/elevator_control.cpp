@@ -488,8 +488,6 @@ static bool commandPinch(PinchCommand cmd) {
 
   Serial.print("PINCH_DBG,cmd,");
   Serial.print((cmd == PinchCommand::CLOSE) ? "CLOSE" : "OPEN");
-  Serial.print(",pinch_angle_deg,");
-  Serial.print(pinch_angle_deg, 2);
   Serial.print(",left_angle_deg,");
   Serial.print(left_angle_deg, 2);
   Serial.print(",right_angle_deg,");
