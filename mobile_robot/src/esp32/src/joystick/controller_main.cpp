@@ -171,13 +171,10 @@ void setup() {
     Serial.begin(115200);
 
     setupWireless();
-    setupRotaryEncoderReadout();
 
     joystick1.setup();
     joystick2.setup();
 
-    pinMode(BUTTON_L_PIN, INPUT_PULLUP);
-    pinMode(BUTTON_R_PIN, INPUT_PULLUP);
 
     memset(&controllerMessage, 0, sizeof(controllerMessage));
     memset(&prevControllerMessage, 0, sizeof(prevControllerMessage));
@@ -232,7 +229,4 @@ void loop() {
         printDebug(filteredLeftCommand, filteredRightCommand);
     }
 
-    EVERY_N_MILLIS(ROTARY_PRINT_PERIOD_MS) {
-        printRotaryEncoderReadout();
-    }
 }
