@@ -42,10 +42,21 @@ from autonomy.mission_runner import (  # noqa: E402
     default_localization_path,
     default_tasks_path,
     evaluate_condition,
+    load_map,
     load_tasks,
 )
-from camera import RealSenseCamera, StreamConfig, bgr_to_gray  # noqa: E402
-from localization import ExtendedKalmanFilter2D, IMUMeasurement, WheelTwistMeasurement  # noqa: E402
+from camera import (  # noqa: E402
+    RealSenseCamera,
+    StreamConfig,
+    bgr_to_gray,
+    load_camera_to_robot_extrinsics,
+)
+from localization import (  # noqa: E402
+    AprilTagMeasurement,
+    ExtendedKalmanFilter2D,
+    IMUMeasurement,
+    WheelTwistMeasurement,
+)
 from localization.person_detection import PersonDetector  # noqa: E402
 from serial_connection.elevator_serial_con import ElevatorSerialConnect  # noqa: E402
 from serial_connection.serial_con import SerialConnect  # noqa: E402
@@ -70,9 +81,11 @@ class LocalizationConfig:
     initial_state: np.ndarray
     initial_covariance: np.ndarray
     process_noise: np.ndarray
+    apriltag_measurement_noise: np.ndarray
     gyro_measurement_noise: np.ndarray
     wheel_twist_measurement_noise: np.ndarray
     use_imu_accel_in_prediction: bool
+    apriltag_reinitialize_distance_m: float
 
 
 @dataclass
@@ -108,6 +121,7 @@ class TagDetection:
     tx_m: float
     ty_m: float
     tz_m: float
+    pose_R: np.ndarray
 
 
 @dataclass
@@ -151,6 +165,9 @@ class MissionRuntime:
         self.localization_cfg_path = Path(localization_cfg_path)
         self.camera_cfg_path = Path(camera_cfg_path)
         self.tasks = load_tasks(self.tasks_path)
+        self.map = load_map(self.tasks_path)
+        self.landmarks_by_id = {str(landmark.id): landmark for landmark in self.map.landmarks}
+        self.camera_to_robot_extrinsics = load_camera_to_robot_extrinsics(self.camera_cfg_path)
         if not self.tasks:
             raise ValueError("mission config must define at least one task")
 
@@ -188,6 +205,7 @@ class MissionRuntime:
             initial_state=self.localization_config.initial_state,
             initial_covariance=self.localization_config.initial_covariance,
             process_noise=self.localization_config.process_noise,
+            apriltag_measurement_noise=self.localization_config.apriltag_measurement_noise,
             gyro_measurement_noise=self.localization_config.gyro_measurement_noise,
             wheel_twist_measurement_noise=self.localization_config.wheel_twist_measurement_noise,
         )
@@ -316,12 +334,14 @@ class MissionRuntime:
             ),
             initial_covariance=np.asarray(loc.get("initial_covariance"), dtype=float),
             process_noise=np.asarray(loc.get("process_noise"), dtype=float),
+            apriltag_measurement_noise=np.asarray(loc.get("apriltag_measurement_noise", [[0.025, 0.0, 0.0], [0.0, 0.025, 0.0], [0.0, 0.0, 0.04]]), dtype=float),
             gyro_measurement_noise=np.asarray(loc.get("gyro_measurement_noise", [[0.15]]), dtype=float),
             wheel_twist_measurement_noise=np.asarray(
                 loc.get("wheel_twist_measurement_noise", [[0.02, 0.0, 0.0], [0.0, 0.02, 0.0], [0.0, 0.0, 0.08]]),
                 dtype=float,
             ),
             use_imu_accel_in_prediction=bool(loc.get("use_imu_accel_in_prediction", False)),
+            apriltag_reinitialize_distance_m=float(loc.get("apriltag_reinitialize_distance_m", 0.0)),
         )
         runtime_cfg = RuntimeConfig(
             control_rate_hz=float(runtime.get("control_rate_hz", 15.0)),
@@ -423,6 +443,7 @@ class MissionRuntime:
                 tx_m=float(t[0]),
                 ty_m=float(t[1]),
                 tz_m=float(t[2]),
+                pose_R=np.asarray(r.pose_R, dtype=float).reshape(3, 3),
             )
 
         if detections:
@@ -434,6 +455,92 @@ class MissionRuntime:
         else:
             print("[AprilTag] detected: none")
         return detections
+
+    @staticmethod
+    def _optical_to_nominal_rotation() -> np.ndarray:
+        return np.array(
+            [
+                [0.0, 0.0, 1.0],
+                [-1.0, 0.0, 0.0],
+                [0.0, -1.0, 0.0],
+            ],
+            dtype=float,
+        )
+
+    @staticmethod
+    def _tag_world_rotation(heading: float) -> np.ndarray:
+        outward = np.array([np.cos(heading), np.sin(heading), 0.0], dtype=float)
+        y_world = np.array([0.0, 0.0, -1.0], dtype=float)
+        z_world = -outward
+        x_world = np.cross(y_world, z_world)
+        x_world /= max(np.linalg.norm(x_world), 1e-9)
+        return np.column_stack((x_world, y_world, z_world))
+
+    @staticmethod
+    def _invert_transform(rotation: np.ndarray, translation: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        r_inv = rotation.T
+        t_inv = -r_inv @ translation.reshape(3)
+        return r_inv, t_inv
+
+    def _apriltag_measurement_from_detection(self, det: TagDetection) -> Optional[AprilTagMeasurement]:
+        landmark = self.landmarks_by_id.get(det.tag_id)
+        if landmark is None:
+            return None
+
+        r_robot_camera = (
+            np.asarray(self.camera_to_robot_extrinsics.rotation_camera_to_world, dtype=float).reshape(3, 3)
+            @ self._optical_to_nominal_rotation()
+        )
+        t_robot_camera = np.asarray(self.camera_to_robot_extrinsics.translation_camera_to_world, dtype=float).reshape(3)
+
+        r_camera_tag = np.asarray(det.pose_R, dtype=float).reshape(3, 3)
+        t_camera_tag = np.array([det.tx_m, det.ty_m, det.tz_m], dtype=float)
+
+        r_robot_tag = r_robot_camera @ r_camera_tag
+        t_robot_tag = r_robot_camera @ t_camera_tag + t_robot_camera
+        r_tag_robot, t_tag_robot = self._invert_transform(r_robot_tag, t_robot_tag)
+
+        r_world_tag = self._tag_world_rotation(float(landmark.heading))
+        t_world_tag = np.array([float(landmark.point[0]), float(landmark.point[1]), 0.0], dtype=float)
+
+        r_world_robot = r_world_tag @ r_tag_robot
+        t_world_robot = r_world_tag @ t_tag_robot + t_world_tag
+        yaw_world_robot = float(np.arctan2(r_world_robot[1, 0], r_world_robot[0, 0]))
+
+        return AprilTagMeasurement(
+            x=float(t_world_robot[0]),
+            y=float(t_world_robot[1]),
+            yaw=yaw_world_robot,
+            covariance=self.localization_config.apriltag_measurement_noise,
+        )
+
+    def _update_localization_from_apriltags(self, detections: dict[str, TagDetection]) -> None:
+        if not detections:
+            return
+
+        measurements: list[AprilTagMeasurement] = []
+        for tag_id in sorted(detections.keys()):
+            measurement = self._apriltag_measurement_from_detection(detections[tag_id])
+            if measurement is not None:
+                measurements.append(measurement)
+
+        if not measurements:
+            return
+
+        mean_x = float(np.mean([m.x for m in measurements]))
+        mean_y = float(np.mean([m.y for m in measurements]))
+        mean_yaw = float(
+            np.arctan2(
+                np.mean([np.sin(m.yaw) for m in measurements]),
+                np.mean([np.cos(m.yaw) for m in measurements]),
+            )
+        )
+
+        state = self.localization_filter.get_state()
+        state[0] = mean_x
+        state[1] = mean_y
+        state[2] = mean_yaw
+        self.localization_filter.state = state
 
     def _person_blocking(self, now: float) -> bool:
         if self.person_detector is None:
@@ -664,6 +771,7 @@ class MissionRuntime:
 
                 if self.apriltag_camera is not None:
                     detections = self._detect_tags()
+                    self._update_localization_from_apriltags(detections)
 
                 if task is None:
                     self._set_phase(MissionPhase.DONE)
