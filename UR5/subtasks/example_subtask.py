@@ -1445,6 +1445,7 @@ def register_subtasks(registry):
         ("pour_drink_into_cup", "right", "UR5/waypoints_pour_drink_into_cup.csv"),
         ("return_bottle", "left", "UR5/waypoints_return_bottle.csv"),
         ("place_cup_on_tray", "right", "UR5/waypoints_place_cup_on_tray.csv"),
+        ("stir_cup", "right", "UR5/waypoints_stir_cup.csv"),
     ]:
         if _task_name not in registry:
             _register_stub_task(_task_name, arm_side=_arm_side, default_csv=_default_csv)
