@@ -2,6 +2,14 @@
 
 Note: ur_rtde only works with python 3.12 on windows. 
 
+## Demo Video
+
+<video controls src="./scheduler_demo.mp4" width="960">
+	Your browser does not support embedded videos.
+</video>
+
+If the embedded player does not render on your platform, use this direct link: [scheduler_demo.mp4](./scheduler_demo.mp4)
+
 ## Getting Started:
 from your terminal:
 
