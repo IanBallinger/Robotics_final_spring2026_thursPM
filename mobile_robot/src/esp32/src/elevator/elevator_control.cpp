@@ -41,6 +41,14 @@ struct DesiredArmJointAngles {
   DesiredArmJointAngles(float theta1_, float theta2_) : theta1(theta1_), theta2(theta2_) {}
 };
 
+enum class PinchCommand {
+  OPEN,
+  CLOSE,
+};
+
+volatile bool has_pending_wireless_pinch_cmd = false;
+volatile PinchCommand pending_wireless_pinch_cmd = PinchCommand::OPEN;
+
 Adafruit_VL53L0X lox = Adafruit_VL53L0X();
 String rx_line = "";
 
@@ -67,9 +75,13 @@ constexpr float ELEVATOR_METERS_BIAS = -0.02f;
 // Servo Arm setup and constants
 constexpr int ARM_SHOULDER_SERVO_PIN = 40;
 constexpr int ARM_ELBOW_SERVO_PIN = 41;
+constexpr int PINCH_LEFT_SERVO_PIN = 42;
+constexpr int PINCH_RIGHT_SERVO_PIN = 39;
 constexpr int SERVO_MIN_US = 544;
 constexpr int SERVO_MAX_US = 2400;
 constexpr float RAD_TO_DEG_FACTOR = 180.0f / PI;
+constexpr float PINCH_OPEN_ANGLE_DEG = 0.0f;
+constexpr float PINCH_CLOSE_ANGLE_DEG = 90.0f;
 constexpr float ARM_BASE_X_M = 0.0f;
 constexpr float ARM_BASE_Y_M = 0.0f;
 constexpr float ARM_LINK_1_M = 0.26f;
@@ -112,7 +124,12 @@ EncoderVelocity elevator_encoder {ELEVATOR_ENCODER_A_PIN,
                                   ELEVATOR_ENCODER_TAU_S};
 Servo shoulder_servo;
 Servo elbow_servo;
+Servo pinch_left_servo;
+Servo pinch_right_servo;
 
+constexpr bool ELEVATOR_USE_TOF_SENSOR = true;
+
+bool tof_sensor_available = false;
 bool encoder_height_initialized = false;
 float encoder_zero_height_m = 0.0f;
 float encoder_zero_position_rad = 0.0f;
@@ -142,6 +159,47 @@ PID pid = {Kp, Ki, Kd, 0.0, 0.1f, false};
 // For debugging
 double shoulder_ms = 0.0;
 double elbow_ms = 0.0;
+double pinch_left_ms = 0.0;
+double pinch_right_ms = 0.0;
+
+static bool handlePinchCommand(const String& line, PinchCommand& cmd);
+
+static void onElevatorWirelessSend(const uint8_t* mac_addr, esp_now_send_status_t status) {
+  (void)mac_addr;
+  (void)status;
+}
+
+static void onElevatorWirelessRecv(const uint8_t* mac, const uint8_t* incomingData, int len) {
+  (void)mac;
+  if (incomingData == nullptr || len <= 0) {
+    return;
+  }
+
+  String line;
+  line.reserve(len);
+  for (int i = 0; i < len && incomingData[i] != '\0'; ++i) {
+    line += static_cast<char>(incomingData[i]);
+  }
+  line.trim();
+
+  PinchCommand pinch_cmd = PinchCommand::OPEN;
+  if (handlePinchCommand(line, pinch_cmd)) {
+    pending_wireless_pinch_cmd = pinch_cmd;
+    has_pending_wireless_pinch_cmd = true;
+  }
+}
+
+static void setupElevatorWireless() {
+  WiFi.mode(WIFI_STA);
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("ERR,ESP_NOW_INIT_FAILED");
+    return;
+  }
+
+  esp_now_register_send_cb(onElevatorWirelessSend);
+  esp_now_register_recv_cb(onElevatorWirelessRecv);
+  Serial.println("ESP_NOW_READY");
+}
 
 void tcaSelect(uint8_t channel) {
   if (channel > 7) {
@@ -223,6 +281,19 @@ static bool handleArmCommand(const String& line, DesiredArmPosition& cmd) {
   return true;
 }
 
+static bool handleEncoderHeightInitCommand(const String& line, float& measured_height_m) {
+  if (!line.startsWith("ELV_ENC_INIT,")) {
+    return false;
+  }
+
+  if (sscanf(line.c_str(), "ELV_ENC_INIT,%f", &measured_height_m) != 1) {
+    Serial.println("WRONG_NUM_VALUES");
+    return false;
+  }
+
+  return true;
+}
+
 static bool handleArmJointAnglesCommand(const String& line, DesiredArmJointAngles& cmd) {
   if (!line.startsWith("ARM_JOINT_ANGLES_CMD,")) {
     return false;
@@ -236,7 +307,29 @@ static bool handleArmJointAnglesCommand(const String& line, DesiredArmJointAngle
   return true;
 }
 
+static bool handlePinchCommand(const String& line, PinchCommand& cmd) {
+  if (!line.startsWith("PINCH_CMD,")) {
+    return false;
+  }
+
+  if (line == "PINCH_CMD,OPEN") {
+    cmd = PinchCommand::OPEN;
+    return true;
+  }
+  if (line == "PINCH_CMD,CLOSE") {
+    cmd = PinchCommand::CLOSE;
+    return true;
+  }
+
+  Serial.println("WRONG_NUM_VALUES");
+  return false;
+}
+
 static float readTofElevatorHeightMeters() {
+  if (!ELEVATOR_USE_TOF_SENSOR || !tof_sensor_available) {
+    return NAN;
+  }
+
   tcaSelect(TOF_MUX_CHANNEL);
   VL53L0X_RangingMeasurementData_t measure;
   lox.rangingTest(&measure, false);
@@ -248,13 +341,24 @@ static float readTofElevatorHeightMeters() {
   return static_cast<float>(measure.RangeMilliMeter) * MM_TO_M;
 }
 
+static void initializeEncoderHeightReference(float measured_height_m) {
+  encoder_zero_height_m = measured_height_m;
+  encoder_zero_position_rad = ELEVATOR_ENCODER_SIGN * elevator_encoder.getPosition();
+  encoder_height_initialized = true;
+
+  const float encoder_height_m = readEncoderHeightMeters();
+  fused_elevator_height_m = encoder_height_m;
+  last_encoder_height_m = encoder_height_m;
+  last_encoder_height_valid = !isnan(encoder_height_m);
+  elevator_height_filter_initialized = !isnan(encoder_height_m);
+  last_height_update_ms = millis();
+}
+
 static void maybeInitializeEncoderHeight(float tof_height_m) {
   if (encoder_height_initialized || isnan(tof_height_m)) {
     return;
   }
-  encoder_zero_height_m = tof_height_m;
-  encoder_zero_position_rad = ELEVATOR_ENCODER_SIGN * elevator_encoder.getPosition();
-  encoder_height_initialized = true;
+  initializeEncoderHeightReference(tof_height_m + ELEVATOR_METERS_BIAS);
 }
 
 static float readEncoderHeightMeters() {
@@ -262,7 +366,7 @@ static float readEncoderHeightMeters() {
     return NAN;
   }
   const float position_rad = ELEVATOR_ENCODER_SIGN * elevator_encoder.getPosition();
-  return encoder_zero_height_m + ELEVATOR_METERS_BIAS +
+  return encoder_zero_height_m +
          (position_rad - encoder_zero_position_rad) * ELEVATOR_METERS_PER_RAD;
 }
 
@@ -388,6 +492,31 @@ static bool commandArmToJointAngles(const DesiredArmJointAngles& cmd) {
   return true;
 }
 
+static bool commandPinch(PinchCommand cmd) {
+  const float pinch_angle_deg =
+      (cmd == PinchCommand::CLOSE) ? PINCH_CLOSE_ANGLE_DEG : PINCH_OPEN_ANGLE_DEG;
+  const float left_angle_deg = clampFloat(-pinch_angle_deg, ELBOW_MIN_DEG, ELBOW_MAX_DEG);
+  const float right_angle_deg = clampFloat(pinch_angle_deg, ELBOW_MIN_DEG, ELBOW_MAX_DEG);
+
+  pinch_left_ms = convertElbowAngleToMicroseconds(left_angle_deg);
+  pinch_right_ms = convertElbowAngleToMicroseconds(right_angle_deg);
+
+  pinch_left_servo.writeMicroseconds(pinch_left_ms);
+  pinch_right_servo.writeMicroseconds(pinch_right_ms);
+
+  Serial.print("PINCH_ACK,");
+  Serial.print((cmd == PinchCommand::CLOSE) ? "CLOSE" : "OPEN");
+  Serial.print(",");
+  Serial.print(left_angle_deg, 2);
+  Serial.print(",");
+  Serial.print(right_angle_deg, 2);
+  Serial.print(",");
+  Serial.print(pinch_left_ms, 1);
+  Serial.print(",");
+  Serial.println(pinch_right_ms, 1);
+  return true;
+}
+
 static float stepToward(float current_value, float target_value, float max_step) {
   const float error = target_value - current_value;
   if (fabsf(error) <= max_step) {
@@ -498,14 +627,18 @@ static void stopElevator() {
 void setup() {
   Serial.begin(115200);
   Wire.begin();
+  setupElevatorWireless();
 
-  tcaSelect(TOF_MUX_CHANNEL);
-  if (!lox.begin()) {
-    Serial.println("ERR,VL53L0X_INIT_FAILED");
-    // TODO: fix I2C connection, this is just for debugging
-    // while (1) {
-    //   delay(100);
-    // }
+  if (ELEVATOR_USE_TOF_SENSOR) {
+    tcaSelect(TOF_MUX_CHANNEL);
+    tof_sensor_available = lox.begin();
+    if (!tof_sensor_available) {
+      Serial.println("ERR,VL53L0X_INIT_FAILED");
+      // TODO: fix I2C connection, this is just for debugging
+      // while (1) {
+      //   delay(100);
+      // }
+    }
   }
 
   elevator_driver.setup();
@@ -516,9 +649,16 @@ void setup() {
   Serial.println("SETUP_SHLDR");
   elbow_servo.setPeriodHertz(50);
   Serial.println("SETUP_ELBOW");
+  pinch_left_servo.setPeriodHertz(50);
+  Serial.println("SETUP_PINCH_L");
+  pinch_right_servo.setPeriodHertz(50);
+  Serial.println("SETUP_PINCH_R");
   shoulder_servo.attach(ARM_SHOULDER_SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
   elbow_servo.attach(ARM_ELBOW_SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
+  pinch_left_servo.attach(PINCH_LEFT_SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
+  pinch_right_servo.attach(PINCH_RIGHT_SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
   moveArmToJointAngles(0.0f, 0.0f);
+  commandPinch(PinchCommand::OPEN);
   applied_shoulder_rad = 0.0f;
   applied_elbow_rad = 0.0f;
   target_shoulder_rad = 0.0f;
@@ -541,14 +681,22 @@ void loop() {
       rx_line.trim();
       DesiredElevatorState cmd;
       DesiredArmPosition arm_cmd;
+      PinchCommand pinch_cmd = PinchCommand::OPEN;
+      float measured_initial_height_m = NAN;
       if (rx_line.length() > 0) {
         if (handleElevatorCommand(rx_line, cmd)) {
           latest_rx_cmd = cmd;
           has_valid_elevator_cmd = true;
           last_cmd_rx_ms = millis();
+        } else if (handleEncoderHeightInitCommand(rx_line, measured_initial_height_m)) {
+          initializeEncoderHeightReference(measured_initial_height_m);
+          Serial.print("ELV_ENC_INIT_ACK,");
+          Serial.println(readEncoderHeightMeters(), 4);
         } else if (handleArmCommand(rx_line, arm_cmd)) {
           latest_arm_cmd = arm_cmd;
           moveArmToXY(latest_arm_cmd);
+        } else if (handlePinchCommand(rx_line, pinch_cmd)) {
+          commandPinch(pinch_cmd);
         } else {
           DesiredArmJointAngles arm_joint_angles_cmd;
           if (handleArmJointAnglesCommand(rx_line, arm_joint_angles_cmd)) {
@@ -566,6 +714,13 @@ void loop() {
   }
 
   const unsigned long now = millis();
+  if (has_pending_wireless_pinch_cmd) {
+    noInterrupts();
+    const PinchCommand pinch_cmd = pending_wireless_pinch_cmd;
+    has_pending_wireless_pinch_cmd = false;
+    interrupts();
+    commandPinch(pinch_cmd);
+  }
   updateArmMotion(now);
   const float measured_height_m = readElevatorHeightMeters();
 

@@ -1,6 +1,4 @@
 #include <Bounce2.h>
-#include <Wire.h>
-#include "Adafruit_seesaw.h"
 #include "wireless.h"
 #include "util.h"
 #include "joystick.h"
@@ -10,21 +8,29 @@
 
 #define CONTROLLER_READ_PERIOD_MS 50
 #define DEBUG_PRINT_PERIOD_MS 100
-#define ROTARY_PRINT_PERIOD_MS 200
+#define ROTARY_PRINT_PERIOD_MS 50
 #define POT_DEADBAND 0.08f
 #define COMMAND_FILTER_TAU_S 0.1f
 #define ROTARY_SEESAW_ADDR 0x49
 
+constexpr float PINCH_COMMAND_THRESHOLD = 0.5f;
+
+enum class PinchState {
+    NONE,
+    OPEN,
+    CLOSE,
+};
+
 static unsigned long last_command_filter_ms = 0;
 
-static Adafruit_seesaw rotarySeesaw;
-static bool rotaryAvailable = false;
+static DPad rotaryDPad(ROTARY_SEESAW_ADDR);
 static int32_t lastRotaryPosition = 0;
 
 ControllerMessage prevControllerMessage;
 
 static JoystickReading filteredLeftCommand = {0.0f, 0.0f};
 static JoystickReading filteredRightCommand = {0.0f, 0.0f};
+static PinchState lastPinchState = PinchState::NONE;
 
 // Use the original joystick abstraction/setup.
 Joystick joystick1(9, 6);
@@ -62,9 +68,48 @@ static JoystickReading lowPassReading(JoystickReading current,
     return current;
 }
 
+static const char* pinchStateToString(PinchState state) {
+    switch (state) {
+        case PinchState::OPEN:
+            return "OPEN";
+        case PinchState::CLOSE:
+            return "CLOSE";
+        default:
+            return "NONE";
+    }
+}
+
+static PinchState pinchStateFromJoystick(const JoystickReading& rightStick) {
+    if (rightStick.y >= PINCH_COMMAND_THRESHOLD) {
+        return PinchState::OPEN;
+    }
+    if (rightStick.y <= -PINCH_COMMAND_THRESHOLD) {
+        return PinchState::CLOSE;
+    }
+    return PinchState::NONE;
+}
+
+static bool sendPinchCommand(PinchState state) {
+    if (state == PinchState::NONE) {
+        return false;
+    }
+
+    const char* pinch_cmd = (state == PinchState::OPEN) ? "PINCH_CMD,OPEN" : "PINCH_CMD,CLOSE";
+    const esp_err_t result = esp_now_send(elevatorAddr,
+                                          reinterpret_cast<const uint8_t*>(pinch_cmd),
+                                          strlen(pinch_cmd) + 1);
+    if (Serial) {
+        Serial.print("PINCH_TX,");
+        Serial.print(pinchStateToString(state));
+        Serial.print(",");
+        Serial.println(result == ESP_OK ? "OK" : "FAIL");
+    }
+    return result == ESP_OK;
+}
+
 static void printDebug(const JoystickReading& leftStick, const JoystickReading& rightStick) {
     Serial.printf(
-        "POTS raw_fb=%d raw_turn=%d mapped_fb=%.3f mapped_turn=%.3f joy1(x,y)=(%.3f, %.3f) joy2(x,y)=(%.3f, %.3f) buttons(L,R)=(%d,%d)\n",
+        "POTS raw_fb=%d raw_turn=%d mapped_fb=%.3f mapped_turn=%.3f joy1(x,y)=(%.3f, %.3f) joy2(x,y)=(%.3f, %.3f) buttons(L,R)=(%d,%d) pinch=%s\n",
         joystickRangeToAnalog(leftStick.y),
         joystickRangeToAnalog(rightStick.y),
         leftStick.y,
@@ -74,41 +119,30 @@ static void printDebug(const JoystickReading& leftStick, const JoystickReading& 
         controllerMessage.joystick2.x,
         controllerMessage.joystick2.y,
         controllerMessage.buttonL ? 1 : 0,
-        controllerMessage.buttonR ? 1 : 0);
+        controllerMessage.buttonR ? 1 : 0,
+        pinchStateToString(lastPinchState));
 }
 
 static void setupRotaryEncoderReadout() {
-    Wire.begin();
-    if (!rotarySeesaw.begin(ROTARY_SEESAW_ADDR)) {
-        Serial.printf(
-            "Rotary encoder not found on I2C at 0x%02X; skipping readout.\n",
-            ROTARY_SEESAW_ADDR);
-        rotaryAvailable = false;
-        return;
-    }
-
-    const uint32_t version = ((rotarySeesaw.getVersion() >> 16) & 0xFFFF);
-    Serial.printf(
-        "Rotary encoder connected on I2C addr 0x%02X, product=%lu\n",
-        ROTARY_SEESAW_ADDR,
-        static_cast<unsigned long>(version));
-    rotarySeesaw.setEncoderPosition(0);
-    rotaryAvailable = true;
+    rotaryDPad.setup();
     lastRotaryPosition = 0;
+    Serial.printf("Rotary encoder ready on I2C addr 0x%02X\n", ROTARY_SEESAW_ADDR);
 }
 
 static void printRotaryEncoderReadout() {
-    if (!rotaryAvailable) {
-        return;
-    }
-
-    const int32_t position = rotarySeesaw.getEncoderPosition();
-    if (position != lastRotaryPosition) {
-        Serial.printf("ROTARY pos=%ld delta=%ld\n",
-                      static_cast<long>(position),
-                      static_cast<long>(position - lastRotaryPosition));
-        lastRotaryPosition = position;
-    }
+    rotaryDPad.update();
+    const DPadReading reading = rotaryDPad.read();
+    const int32_t position = reading.encoderPosition;
+    const int32_t delta = position - lastRotaryPosition;
+    Serial.printf("ROTARY pos=%ld delta=%ld buttons(U,D,L,R,S)=(%d,%d,%d,%d,%d)\n",
+                  static_cast<long>(position),
+                  static_cast<long>(delta),
+                  reading.up ? 1 : 0,
+                  reading.down ? 1 : 0,
+                  reading.left ? 1 : 0,
+                  reading.right ? 1 : 0,
+                  reading.select ? 1 : 0);
+    lastRotaryPosition = position;
 }
 
 void setup() {
@@ -155,6 +189,12 @@ void loop() {
         // serial_to_from_jet.cpp). Left button is available for future use.
         controllerMessage.buttonL = (digitalRead(BUTTON_L_PIN) == LOW);
         controllerMessage.buttonR = (digitalRead(BUTTON_R_PIN) == LOW);
+
+        const PinchState pinchState = pinchStateFromJoystick(filteredRightCommand);
+        if (pinchState != lastPinchState) {
+            sendPinchCommand(pinchState);
+            lastPinchState = pinchState;
+        }
 
         if (!(prevControllerMessage == controllerMessage)) {
             sendControllerData();
