@@ -156,8 +156,8 @@
     },
     "yellow cup": {
       "close_iter": 6,
-      "h_hi": 6,
-      "h_lo": 0,
+      "h_hi": 34,
+      "h_lo": 18,
       "kernel": 7,
       "min_area": 340,
       "open_iter": 0,

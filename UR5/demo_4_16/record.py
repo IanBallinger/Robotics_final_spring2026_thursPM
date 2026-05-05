@@ -740,6 +740,8 @@ def main(args):
             with gripper_state_lock:
                 curr_gripper_state_L = bool(gripper_state_L)
                 curr_gripper_state_R = bool(gripper_state_R)
+            curr_gripper_open_pct_L = 100.0 if curr_gripper_state_L else 0.0
+            curr_gripper_open_pct_R = 100.0 if curr_gripper_state_R else 0.0
 
             if stream_socket and stream_target:
                 packet = {
@@ -763,6 +765,8 @@ def main(args):
                     "right_global_xyz": [float(right_task_xyz[0]), float(right_task_xyz[1]), float(right_task_xyz[2])],
                     "left_gripper_open": curr_gripper_state_L,
                     "right_gripper_open": curr_gripper_state_R,
+                    "left_gripper_open_pct": curr_gripper_open_pct_L,
+                    "right_gripper_open_pct": curr_gripper_open_pct_R,
                 }
                 _send_stream_packet(stream_socket, stream_send_lock, packet)
 
@@ -817,6 +821,8 @@ def main(args):
                     "right_global_xyz": [float(right_task_xyz[0]), float(right_task_xyz[1]), float(right_task_xyz[2])],
                     "left_gripper_open": curr_gripper_state_L,
                     "right_gripper_open": curr_gripper_state_R,
+                    "left_gripper_open_pct": curr_gripper_open_pct_L,
+                    "right_gripper_open_pct": curr_gripper_open_pct_R,
                     "left_distance_to_dependent_m": left_distance,
                     "right_distance_to_dependent_m": right_distance,
                     "left_offset_to_dependent_xyz": left_offset,
@@ -834,17 +840,13 @@ def main(args):
 
             # Update gripper states if they changed
             if gripper_L is not None and curr_gripper_state_L != prev_gripper_state_L:
-                if curr_gripper_state_L:
-                    gripper_L.open()
-                else:
-                    gripper_L.close()
+                pos_mm_l = curr_gripper_open_pct_L * 85.0 / 100.0
+                gripper_L.move(int(round(pos_mm_l)))
                 prev_gripper_state_L = curr_gripper_state_L
             
             if gripper_R is not None and curr_gripper_state_R != prev_gripper_state_R:
-                if curr_gripper_state_R:
-                    gripper_R.open()
-                else:
-                    gripper_R.close()
+                pos_mm_r = curr_gripper_open_pct_R * 85.0 / 100.0
+                gripper_R.move(int(round(pos_mm_r)))
                 prev_gripper_state_R = curr_gripper_state_R
 
             if i % 10 == 0:

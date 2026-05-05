@@ -200,9 +200,48 @@ class Supervisor:
         self._visual_step_counter: int = 0
         self._autonomy_pause_event = threading.Event()
         self._active_visualizer_mode: str = ""
+        self._active_visualizer = None
+        self._manual_control_thread: Optional[threading.Thread] = None
+        self._manual_control_lock = threading.Lock()
+        self._manual_arm_busy: Dict[str, bool] = {"left": False, "right": False}
+        self._manual_running_by_arm: Dict[str, Optional[str]] = {"left": None, "right": None}
+        self._gripper_activation_lock = threading.Lock()
+        self._gripper_activation_attempted: Dict[str, bool] = {"left": False, "right": False}
         self.subtasks_dir = subtasks_dir or (_THIS_DIR / "subtasks")
         self._ensure_subtasks_dir()
         self.reload_subtasks()
+
+    def _activate_scheduler_grippers_once(self):
+        """Activate each arm gripper once at scheduler startup.
+
+        This keeps activation out of per-task execution paths.
+        """
+        with self._gripper_activation_lock:
+            for arm_name, arm_ip in (("left", self.left_ip), ("right", self.right_ip)):
+                if self._gripper_activation_attempted.get(arm_name, False):
+                    continue
+
+                arm = None
+                try:
+                    arm = UR5Arm(arm_ip, verbose=False)
+                    gripper = RobotiqGripper(arm.rtde_control)
+                    ok_activate = gripper.activate()
+                    ok_force = gripper.set_force(100)
+                    ok_speed = gripper.set_speed(100)
+                    pos_mm = gripper.current_pos_mm()
+                    print(
+                        f"[Supervisor] Gripper startup {arm_name}: "
+                        f"activate={ok_activate} set_force={ok_force} set_speed={ok_speed} pos_mm={pos_mm}"
+                    )
+                except Exception as exc:
+                    print(f"[Supervisor] Gripper activation warning on {arm_name} arm: {exc}")
+                finally:
+                    self._gripper_activation_attempted[arm_name] = True
+                    try:
+                        if arm is not None:
+                            arm.disconnect()
+                    except Exception:
+                        pass
 
     # ===== Coordination API-like methods =====
     def mark_returning(self, message: str = "on our way back now, get ready for handoff"):
@@ -1519,6 +1558,14 @@ class Supervisor:
         self._completed_task_ids = set()
         self._visual_step_counter = 0
 
+    def bind_active_visualizer(self, visualizer, mode: str):
+        self._active_visualizer = visualizer
+        self._active_visualizer_mode = str(mode or "").strip().lower()
+
+    def clear_active_visualizer(self):
+        self._active_visualizer = None
+        self._active_visualizer_mode = ""
+
     def _catalog_task(self, queued: QueuedTask):
         self._task_catalog[queued.task_id] = {
             "task_id": queued.task_id,
@@ -1805,6 +1852,8 @@ class Supervisor:
             arm_side = str(task.get("arm", params.get("arm", "right"))).strip().lower()
             if arm_side not in {"left", "right"}:
                 arm_side = "right"
+            default_robot_ip = self.left_ip if arm_side == "left" else self.right_ip
+            robot_ip = str(params.get("robot_ip", default_robot_ip)).strip()
             preferred_csv = str(params.get("named_waypoints_csv") or (_THIS_DIR / f"waypoints_{task_slug}.csv"))
             named_csv = self._resolve_waypoint_csv(preferred_csv, task_slug, task_cli_id)
             args = [
@@ -1817,6 +1866,8 @@ class Supervisor:
                 "--arm-side",
                 arm_side,
             ]
+            if robot_ip and not offline_mode:
+                args.extend(["--robot-ip", robot_ip])
             if offline_mode:
                 args.extend([
                     "--mock-robot",
@@ -1825,10 +1876,144 @@ class Supervisor:
                 ])
             return self._spawn_tool_process(args)
 
+        if action_name == "run_selected_task":
+            task_id = str(task.get("task_id", "")).strip()
+            if not task_id:
+                return "select a task id first"
+
+            with self._manual_control_lock:
+                if self._manual_control_thread is not None and self._manual_control_thread.is_alive():
+                    return "a manual task is already running"
+
+                queued = self._pop_queued_task_by_id(task_id)
+                if queued is None:
+                    return f"task '{task_id}' is not pending in the autonomy queue"
+
+                if not self._is_task_runnable(queued):
+                    self.queue_task(
+                        queued.name,
+                        points=float(queued.base_points),
+                        params=dict(queued.params or {}),
+                        task_id=queued.task_id,
+                        prerequisites=list(queued.prerequisites),
+                        points_if_completed=dict(queued.points_if_completed or {}),
+                        arm=queued.arm,
+                        blocks_arms=list(queued.blocks_arms),
+                        unblocks_arms=list(queued.unblocks_arms),
+                        score_token=queued.score_token,
+                        max_score_count=int(queued.max_score_count),
+                    )
+                    missing = self._missing_prerequisites(queued)
+                    return (
+                        f"task '{task_id}' is blocked; missing_prerequisites={missing} "
+                        f"blocked_arms={self._blocked_arms}"
+                    )
+
+                self._manual_control_thread = threading.Thread(
+                    target=self._run_manual_control_task,
+                    args=(queued,),
+                    daemon=True,
+                )
+                self._manual_control_thread.start()
+
+            return f"manual task started: {queued.task_id} ({queued.name})"
+
         step = ""
         if isinstance(snapshot, dict):
             step = str(snapshot.get("step", ""))
         return f"unknown action '{action_name}' at step={step}"
+
+    def _pop_queued_task_by_id(self, task_id: str) -> Optional[QueuedTask]:
+        removed: Optional[QueuedTask] = None
+        kept: List[QueuedTask] = []
+        while self._task_heap:
+            candidate = heapq.heappop(self._task_heap)
+            if removed is None and candidate.task_id == task_id:
+                removed = candidate
+                continue
+            kept.append(candidate)
+        for item in kept:
+            heapq.heappush(self._task_heap, item)
+        return removed
+
+    def _run_manual_control_task(self, task: QueuedTask):
+        target_arms = self._task_target_arms(task)
+        if len(target_arms) != 1:
+            target_arms = ["left"]
+        arm_name = target_arms[0]
+
+        self._manual_arm_busy[arm_name] = True
+        self._manual_running_by_arm[arm_name] = task.task_id
+        self._apply_resource_action_on_start(task)
+        points = self._effective_points(task)
+
+        self._push_visual_snapshot(
+            self._active_visualizer,
+            event="dispatch",
+            arm_busy=self._manual_arm_busy,
+            running_by_arm=self._manual_running_by_arm,
+            message=f"manual dispatch {task.task_id}",
+        )
+
+        ok = False
+        err = ""
+        try:
+            ok = self.run_subtask(task.name, params=task.params)
+        except Exception as exc:
+            err = str(exc)
+
+        if ok:
+            self._record_score_if_applicable(task, points)
+            self._apply_resource_action_on_end(task)
+            self._apply_gripper_state(task)
+            if task.name != "_idle_wait":
+                self._completed_tokens.add(task.task_id)
+                self._completed_tokens.add(task.name)
+                self._completed_task_ids.add(task.task_id)
+                for arm in task.unblocks_arms:
+                    self._blocked_arms.pop(arm, None)
+                for arm in task.blocks_arms:
+                    self._blocked_arms[arm] = task.task_id
+                self._enqueue_dynamic_followups(task)
+            message = f"manual complete {task.task_id} ok=True"
+        else:
+            self._rollback_resource_start_if_needed(task)
+            if err:
+                message = f"manual complete {task.task_id} ok=False err={err}"
+            else:
+                message = f"manual complete {task.task_id} ok=False"
+
+        self._manual_arm_busy[arm_name] = False
+        self._manual_running_by_arm[arm_name] = None
+        self._push_visual_snapshot(
+            self._active_visualizer,
+            event="complete",
+            arm_busy=self._manual_arm_busy,
+            running_by_arm=self._manual_running_by_arm,
+            message=message,
+        )
+
+    def run_manual_control_ui(self, visualizer=None):
+        """Expose autonomy graph + controls without running autonomous scheduler."""
+        self._activate_scheduler_grippers_once()
+
+        self._reset_visual_tracking()
+        self._completed_tokens = set()
+        self._blocked_arms = {}
+        self._resource_state = {resource: {} for resource in self._resource_constraints}
+        self._grasped_object_by_arm = {"left": None, "right": None}
+        self._score_counts = {}
+        self._earned_points_total = 0.0
+        self._manual_arm_busy = {"left": False, "right": False}
+        self._manual_running_by_arm = {"left": None, "right": None}
+
+        self._push_visual_snapshot(
+            visualizer,
+            event="start",
+            arm_busy=self._manual_arm_busy,
+            running_by_arm=self._manual_running_by_arm,
+            message="manual control mode ready: scheduler execution is disabled",
+        )
 
     def _wait_if_paused(self, visualizer=None, arm_busy=None, running_by_arm=None):
         while self._autonomy_pause_event.is_set():
@@ -2110,6 +2295,8 @@ class Supervisor:
         When parallel_arms=True, a coordinator dispatches tasks to one worker thread
         per arm. The same prerequisite/resource/blocking rules are respected.
         """
+        self._activate_scheduler_grippers_once()
+
         if not parallel_arms:
             return self._run_autonomy_sequential(max_tasks=max_tasks, visualizer=visualizer)
 
@@ -2366,6 +2553,8 @@ class Supervisor:
 
     def _run_autonomy_sequential(self, max_tasks: Optional[int] = None, visualizer=None) -> List[Tuple[str, bool, float, str]]:
         """Original sequential autonomy loop."""
+        self._activate_scheduler_grippers_once()
+
         self._completed_tokens = set()
         self._autonomy_pause_event.clear()
         self._reset_visual_tracking()
@@ -2871,6 +3060,14 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     run_task.add_argument(
+        "--autonomy-manual-ui",
+        action="store_true",
+        help=(
+            "Open live scheduler UI controls without running scheduler progression. "
+            "Use this to manually run selected queued tasks from the graph."
+        ),
+    )
+    run_task.add_argument(
         "--autonomy-visualizer",
         type=str,
         default="off",
@@ -2908,6 +3105,7 @@ def main(argv: Optional[List[str]] = None):
 
     if args.command == "run-subtask":
         params = json.loads(args.params_json)
+        ran_manual_ui_mode = False
         if args.autonomy_mode:
             visualizer = None
             visualizer_mode = "off"
@@ -2930,13 +3128,13 @@ def main(argv: Optional[List[str]] = None):
                             ),
                             control_callback=supervisor.handle_visualizer_control,
                         )
-                        supervisor._active_visualizer_mode = visualizer_mode
+                        supervisor.bind_active_visualizer(visualizer, visualizer_mode)
                         visualizer.start()
                     except Exception as exc:
                         print(f"warning: failed to start task visualizer: {exc}")
                         visualizer = None
                         visualizer_mode = "off"
-                        supervisor._active_visualizer_mode = ""
+                        supervisor.clear_active_visualizer()
 
             def _queue_item(item: dict, default_task_id: str):
                 if not isinstance(item, dict) or "name" not in item:
@@ -2998,8 +3196,13 @@ def main(argv: Optional[List[str]] = None):
                 if args.autonomy_max_tasks > 0:
                     max_tasks = args.autonomy_max_tasks
                 else:
-                    cfg_max = int(runtime_cfg.get("autonomy_max_tasks", 0))
-                    max_tasks = cfg_max if cfg_max > 0 else None
+                    if args.autonomy_simulate:
+                        # Full simulation should run through dynamic runtime-generated tasks
+                        # unless the user explicitly requests a cap.
+                        max_tasks = None
+                    else:
+                        cfg_max = int(runtime_cfg.get("autonomy_max_tasks", 0))
+                        max_tasks = cfg_max if cfg_max > 0 else None
             else:
                 if args.name == "total_replay":
                     raise ValueError("--autonomy-mode cannot be used with 'total_replay'")
@@ -3037,7 +3240,13 @@ def main(argv: Optional[List[str]] = None):
 
                 max_tasks = args.autonomy_max_tasks if args.autonomy_max_tasks > 0 else None
 
-            if args.autonomy_simulate:
+            if args.autonomy_manual_ui:
+                if visualizer_mode != "live":
+                    raise ValueError("--autonomy-manual-ui requires --autonomy-visualizer live")
+                supervisor.run_manual_control_ui(visualizer=visualizer)
+                ran_manual_ui_mode = True
+                print("manual control mode: scheduler is idle; use visualizer controls to run selected tasks")
+            elif args.autonomy_simulate:
                 report = supervisor.simulate_autonomy(max_tasks=max_tasks, visualizer=visualizer)
                 print("autonomy simulation mode: no subtasks were executed")
                 for step_idx, step in enumerate(report["executed"], start=1):
@@ -3102,12 +3311,14 @@ def main(argv: Optional[List[str]] = None):
                 )
 
             if visualizer is not None:
-                if visualizer_mode == "live":
+                if ran_manual_ui_mode:
+                    print("manual control visualizer is running; close it when finished")
+                elif visualizer_mode == "live":
                     print("live scheduler visualizer remains open for playback; close it when finished")
                 else:
                     print("simulation visualizer ready; close the window when finished reviewing playback")
                 visualizer.wait_until_closed()
-                supervisor._active_visualizer_mode = ""
+                supervisor.clear_active_visualizer()
         else:
             ok = supervisor.run_subtask(args.name, params=params)
             print(f"subtask '{args.name}' -> {ok}")

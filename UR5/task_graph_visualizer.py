@@ -126,6 +126,11 @@ class TaskGraphStateVisualizer:
         ).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(
             controls_frame,
+            text="Run Selected Task",
+            command=lambda: _run_control_action("run_selected_task"),
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            controls_frame,
             text="Start Waypoint Tuning",
             command=lambda: _run_control_action("start_tuning"),
         ).pack(side=tk.LEFT, padx=(0, 6))

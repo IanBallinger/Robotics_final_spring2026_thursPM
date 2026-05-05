@@ -72,7 +72,7 @@ def _run_replay_task(task: JuliaReplayTask):
     err = ""
     try:
         ok = task.execute()
-    except RuntimeError as exc:
+    except Exception as exc:
         err = str(exc)
 
     with STATE.lock:
@@ -173,6 +173,7 @@ class FrontendHandler(BaseHTTPRequestHandler):
         julia_api_base = str(body.get("julia_api_base", "http://127.0.0.1:8081")).strip()
         trace_side = str(body.get("trace_side", "left")).strip().lower()
         downsample = int(body.get("downsample", 4))
+        enable_gripper = bool(body.get("enable_gripper", True))
         gripper_state_column = str(body.get("gripper_state_column", "actual_digital_output_bits")).strip()
         gripper_bit_index = int(body.get("gripper_bit_index", 0))
         gripper_closed_when_bit_set = bool(body.get("gripper_closed_when_bit_set", True))
@@ -195,6 +196,7 @@ class FrontendHandler(BaseHTTPRequestHandler):
                 julia_api_base=julia_api_base,
                 trace_side=trace_side,
                 downsample=downsample,
+                enable_gripper=enable_gripper,
                 gripper_state_column=gripper_state_column,
                 gripper_bit_index=gripper_bit_index,
                 gripper_closed_when_bit_set=gripper_closed_when_bit_set,
@@ -216,6 +218,7 @@ class FrontendHandler(BaseHTTPRequestHandler):
                 "ok": True,
                 "status": "running",
                 "trace_csv_path": trace_csv_path,
+                "enable_gripper": enable_gripper,
                 "gripper_state_column": gripper_state_column,
                 "gripper_bit_index": gripper_bit_index,
                 "gripper_closed_when_bit_set": gripper_closed_when_bit_set,

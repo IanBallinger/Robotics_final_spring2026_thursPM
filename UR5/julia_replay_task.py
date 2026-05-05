@@ -33,7 +33,7 @@ from robotiq_gripper_control import RobotiqGripper  # noqa: E402
 @dataclass
 class GripperEvent:
     timestamp: float
-    open_state: bool
+    open_pct: float
 
 
 class JuliaReplayTask(UR5TaskInterface):
@@ -46,6 +46,7 @@ class JuliaReplayTask(UR5TaskInterface):
         julia_api_base: str = "http://127.0.0.1:8081",
         trace_side: str = "left",
         downsample: int = 4,
+        enable_gripper: bool = True,
         gripper_state_column: str = "actual_digital_output_bits",
         gripper_bit_index: int = 0,
         gripper_closed_when_bit_set: bool = True,
@@ -57,6 +58,7 @@ class JuliaReplayTask(UR5TaskInterface):
         self.julia_api_base = julia_api_base.rstrip("/")
         self.trace_side = trace_side.lower()
         self.downsample = max(1, int(downsample))
+        self.enable_gripper = bool(enable_gripper)
         self.gripper_state_column = gripper_state_column
         self.gripper_bit_index = max(0, int(gripper_bit_index))
         self.gripper_closed_when_bit_set = bool(gripper_closed_when_bit_set)
@@ -188,18 +190,18 @@ class JuliaReplayTask(UR5TaskInterface):
                 )
                 return events
 
-            last_open_state: Optional[bool] = None
+            last_open_pct: Optional[float] = None
             for row in reader:
                 try:
                     timestamp = float(row["timestamp"])
                     bitfield = int(float(row[self.gripper_state_column]))
                     bit_is_set = bool((bitfield >> self.gripper_bit_index) & 0x1)
                     is_closed = bit_is_set if self.gripper_closed_when_bit_set else (not bit_is_set)
-                    is_open = not is_closed
+                    open_pct = 0.0 if is_closed else 100.0
 
-                    if last_open_state is None or is_open != last_open_state:
-                        events.append(GripperEvent(timestamp=timestamp, open_state=is_open))
-                        last_open_state = is_open
+                    if last_open_pct is None or open_pct != last_open_pct:
+                        events.append(GripperEvent(timestamp=timestamp, open_pct=open_pct))
+                        last_open_pct = open_pct
                 except (json.JSONDecodeError, KeyError, TypeError, ValueError):
                     continue
 
@@ -253,6 +255,10 @@ class JuliaReplayTask(UR5TaskInterface):
             return None
 
     def _init_gripper(self):
+        if not self.enable_gripper:
+            self.gripper = None
+            print("[INFO] Gripper replay disabled by configuration")
+            return
         try:
             self.gripper_control = RTDEControlInterface(self.robot_ip)
             self.gripper = RobotiqGripper(self.gripper_control)
@@ -272,12 +278,10 @@ class JuliaReplayTask(UR5TaskInterface):
             if event.timestamp > current_event_time:
                 break
 
-            desired_open = event.open_state
+            desired_open_pct = max(0.0, min(100.0, float(event.open_pct)))
+            pos_mm = desired_open_pct * 85.0 / 100.0
             try:
-                if desired_open:
-                    self.gripper.open()
-                else:
-                    self.gripper.close()
+                self.gripper.move(int(round(pos_mm)))
             except (RuntimeError, OSError) as exc:
                 print(f"[WARN] Gripper command failed: {exc}")
             event_idx += 1

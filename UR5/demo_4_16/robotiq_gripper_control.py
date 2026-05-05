@@ -92,3 +92,15 @@ class RobotiqGripper(object):
             True if the command succeeded, otherwise it returns False
         """
         return self.call("CLOSE", "rq_close_and_wait()")
+
+    def current_pos_mm(self):
+        """Best-effort readback of current gripper opening in mm."""
+        return self.call("GET_POS_MM", "rq_current_pos_mm()")
+
+    def is_activated(self):
+        """Best-effort readback of activation state."""
+        return self.call("IS_ACTIVATED", "rq_is_gripper_activated()")
+
+    def fault_code(self):
+        """Best-effort readback of fault code bytes."""
+        return self.call("GET_FLT", "rq_get_var(FLT, 2)")

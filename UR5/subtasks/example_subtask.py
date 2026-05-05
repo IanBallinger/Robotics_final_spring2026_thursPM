@@ -8,6 +8,8 @@ from pathlib import Path #filesystem, not robot point paths
 
 from arm import UR5Arm
 
+GRIPPER_OPEN_MM_MAX = 85.0
+
 try:
     import cv2
     import numpy as np
@@ -1116,6 +1118,12 @@ def _load_named_waypoints(csv_path: Path, task_id: str = "", arm_prefix: str = "
             return False
         return None
 
+    def _try_pct(row, key):
+        val = _try_float(row, key)
+        if val is None:
+            return None
+        return max(0.0, min(100.0, float(val)))
+
     waypoints = []
     with csv_path.open("r", encoding="utf-8", newline="") as fh:
         reader = csv.DictReader(fh)
@@ -1166,13 +1174,22 @@ def _load_named_waypoints(csv_path: Path, task_id: str = "", arm_prefix: str = "
                 except Exception:
                     pass
 
+            gripper_open_bool = _try_bool(row, f"{arm_prefix}_gripper_open")
+            gripper_open_pct = _try_pct(row, f"{arm_prefix}_gripper_open_pct")
+            if gripper_open_pct is None:
+                if gripper_open_bool is True:
+                    gripper_open_pct = 100.0
+                elif gripper_open_bool is False:
+                    gripper_open_pct = 0.0
+
             waypoints.append(
                 {
                     "index": idx,
                     "name": str(row.get("waypoint_name", "")).strip(),
                     "tcp_position": tcp_position,
                     "q_position": q_position,
-                    "gripper_open": _try_bool(row, f"{arm_prefix}_gripper_open"),
+                    "gripper_open": gripper_open_bool,
+                    "gripper_open_pct": gripper_open_pct,
                     "tracked_items": tracked_items,
                 }
             )
@@ -1240,25 +1257,38 @@ def register_subtasks(registry):
         try:
             print(f"[{task_name}] Replaying {len(waypoints)} waypoints from {waypoints_csv}")
             for wp in waypoints:
-                target_gripper_open = wp.get("gripper_open", None)
+                target_gripper_open_pct = wp.get("gripper_open_pct", None)
+                tcp_position = wp.get("tcp_position")
+                q_position = wp.get("q_position")
 
-                ok = arm.move_to_joint_position(
-                    wp,
-                    speed=speed,
-                    acceleration=acceleration,
-                    asynchronous=False,
-                )
+                if tcp_position is not None:
+                    ok = arm.move_to_pose(
+                        tcp_position,
+                        speed=speed,
+                        acceleration=acceleration,
+                        asynchronous=False,
+                    )
+                elif q_position is not None:
+                    ok = arm.move_to_joint_position(
+                        q_position,
+                        speed=speed,
+                        acceleration=acceleration,
+                        asynchronous=False,
+                    )
+                else:
+                    raise RuntimeError(
+                        f"Waypoint missing both tcp_position and q_position at index={wp['index']}"
+                    )
                 if not ok:
                     raise RuntimeError(
                         f"Failed at waypoint index={wp['index']} name={wp['name'] or '<unnamed>'}"
                     )
 
                 # Team policy: assert desired gripper state after each motion step.
-                if gripper is not None and target_gripper_open is not None:
-                    if target_gripper_open:
-                        gripper.open()
-                    else:
-                        gripper.close()
+                if gripper is not None and target_gripper_open_pct is not None:
+                    # Gripper open percentage maps to 0..85mm.
+                    pos_mm = float(target_gripper_open_pct) * GRIPPER_OPEN_MM_MAX / 100.0
+                    gripper.move(int(round(pos_mm)))
                     if gripper_settle_s > 0:
                         time.sleep(gripper_settle_s)
 
@@ -1332,7 +1362,7 @@ def register_subtasks(registry):
                 print(f"[{task_name}] Camera offset target: {target_label}")
 
             for wp in waypoints:
-                target_gripper_open = wp.get("gripper_open", None)
+                target_gripper_open_pct = wp.get("gripper_open_pct", None)
                 move_wp = dict(wp)
                 move_wp["tcp_position"] = list(wp["tcp_position"]) if wp.get("tcp_position") else None
 
@@ -1356,14 +1386,14 @@ def register_subtasks(registry):
 
                 if move_wp.get("tcp_position") is not None:
                     ok = arm.move_to_pose(
-                        move_wp,
+                        move_wp["tcp_position"],
                         speed=speed,
                         acceleration=acceleration,
                         asynchronous=False,
                     )
                 else:
                     ok = arm.move_to_joint_position(
-                        move_wp,
+                        move_wp.get("q_position"),
                         speed=speed,
                         acceleration=acceleration,
                         asynchronous=False,
@@ -1375,11 +1405,10 @@ def register_subtasks(registry):
                     )
 
                 # Team policy: assert desired gripper state after each motion step.
-                if gripper is not None and target_gripper_open is not None:
-                    if target_gripper_open:
-                        gripper.open()
-                    else:
-                        gripper.close()
+                if gripper is not None and target_gripper_open_pct is not None:
+                    # Gripper open percentage maps to 0..85mm.
+                    pos_mm = float(target_gripper_open_pct) * GRIPPER_OPEN_MM_MAX / 100.0
+                    gripper.move(int(round(pos_mm)))
                     if gripper_settle_s > 0:
                         time.sleep(gripper_settle_s)
 

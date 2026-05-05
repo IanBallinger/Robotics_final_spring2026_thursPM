@@ -110,6 +110,8 @@ function append_named_waypoint_row(path::String, row::Dict{String, Any})
         get(row, "dependent_item_label", ""),
         get(row, "left_gripper_open", ""),
         get(row, "right_gripper_open", ""),
+        get(row, "left_gripper_open_pct", ""),
+        get(row, "right_gripper_open_pct", ""),
         get(row, "left_x", ""), get(row, "left_y", ""), get(row, "left_z", ""),
         get(row, "left_rx", ""), get(row, "left_ry", ""), get(row, "left_rz", ""),
         get(row, "left_q_0", ""), get(row, "left_q_1", ""), get(row, "left_q_2", ""),
@@ -141,7 +143,7 @@ function ensure_named_waypoints_header(path::String)
     open(path, "w") do io
         println(io,
             "waypoint_index,waypoint_name,task_id,task_name,dependent_item_label," *
-            "left_gripper_open,right_gripper_open," *
+            "left_gripper_open,right_gripper_open,left_gripper_open_pct,right_gripper_open_pct," *
             "left_x,left_y,left_z,left_rx,left_ry,left_rz," *
             "left_q_0,left_q_1,left_q_2,left_q_3,left_q_4,left_q_5," *
             "right_x,right_y,right_z,right_rx,right_ry,right_rz," *
@@ -1076,6 +1078,8 @@ function main()
                             "dependent_item_label" => (!isempty(packet_dependent_item_label) ? packet_dependent_item_label : active_dependent_item_label),
                             "left_gripper_open" => get(pkt, :left_gripper_open, ""),
                             "right_gripper_open" => get(pkt, :right_gripper_open, ""),
+                            "left_gripper_open_pct" => get(pkt, :left_gripper_open_pct, ""),
+                            "right_gripper_open_pct" => get(pkt, :right_gripper_open_pct, ""),
                             "left_x" => length(left_pose) >= 1 ? left_pose[1] : "",
                             "left_y" => length(left_pose) >= 2 ? left_pose[2] : "",
                             "left_z" => length(left_pose) >= 3 ? left_pose[3] : "",

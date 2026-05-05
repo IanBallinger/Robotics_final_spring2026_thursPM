@@ -77,6 +77,10 @@ FIELD_RESOLUTION = {
     "rz": 0.001,
 }
 
+POSITION_SLIDER_HALF_RANGE_M = 0.05
+ROTATION_SLIDER_HALF_RANGE_RAD = 0.1
+GRIPPER_OPEN_MM_MAX = 85.0
+
 
 def _mat_vec_mul_row(v, m):
     # Row-vector multiply: [x y z] * M
@@ -424,10 +428,24 @@ class WaypointTuningRunnerUI:
             self.robot = UR5Arm(args.robot_ip, verbose=False)
 
         self.gripper = None
+        self._gripper_activated = False
         gripper_class = _load_robotiq_gripper_class()
         if self.robot is not None and gripper_class is not None:
             try:
                 self.gripper = gripper_class(self.robot.rtde_control)
+                if not args.mock_robot:
+                    try:
+                        ok_activate = self.gripper.activate()
+                        self._gripper_activated = True
+                        ok_force = self.gripper.set_force(100)
+                        ok_speed = self.gripper.set_speed(100)
+                        pos_mm = self.gripper.current_pos_mm()
+                        print(
+                            "[tuner][gripper] init "
+                            f"activate={ok_activate} set_force={ok_force} set_speed={ok_speed} pos_mm={pos_mm}"
+                        )
+                    except Exception as exc:
+                        print(f"[tuner] Gripper init warning: {exc}")
             except Exception:
                 self.gripper = None
 
@@ -442,10 +460,10 @@ class WaypointTuningRunnerUI:
         self.step_sleep_var = tk.DoubleVar(value=float(args.play_step_sleep_s))
         self.file_label_var = tk.StringVar(value=str(self.current_file.name))
         self.gripper_open_pct_var = tk.DoubleVar(value=100.0)
-        self.gripper_force_pct_var = tk.DoubleVar(value=100.0)
 
         self.waypoint_slider = None
         self.value_vars = {}
+        self.field_scales = {}
         self.entry_vars = {}
         self.delta_vars = {}
         self.nominal_vars = {}
@@ -459,6 +477,10 @@ class WaypointTuningRunnerUI:
         self._play_thread = None
         self._stop_play = threading.Event()
         self._realtime_job = None
+        self._gripper_job = None
+        self._gripper_cmd_lock = threading.Lock()
+        self._gripper_cmd_busy = False
+        self._gripper_cmd_pending_pct = None
 
         self._build_ui()
         self._set_waypoint(0)
@@ -548,7 +570,10 @@ class WaypointTuningRunnerUI:
 
         for i, field in enumerate(EDIT_FIELDS):
             rr = row0 + 1 + i
-            low, high = FIELD_LIMITS[field]
+            if field in ("x", "y", "z"):
+                low, high = (-POSITION_SLIDER_HALF_RANGE_M, POSITION_SLIDER_HALF_RANGE_M)
+            else:
+                low, high = (-ROTATION_SLIDER_HALF_RANGE_RAD, ROTATION_SLIDER_HALF_RANGE_RAD)
             res = FIELD_RESOLUTION[field]
 
             ttk.Label(controls, text=field).grid(row=rr, column=0, sticky="w")
@@ -574,6 +599,7 @@ class WaypointTuningRunnerUI:
                 command=lambda _vv, f=field: self._on_scale_change(f),
             )
             scale.grid(row=rr, column=1, sticky="ew")
+            self.field_scales[field] = scale
 
             entry = ttk.Entry(controls, textvariable=e, width=10)
             entry.grid(row=rr, column=2, sticky="w")
@@ -634,19 +660,8 @@ class WaypointTuningRunnerUI:
             variable=self.gripper_open_pct_var,
             command=lambda _v: self._on_gripper_open_change(),
         ).grid(row=gr_row + 1, column=1, sticky="ew")
-        ttk.Label(controls, text="Force %").grid(row=gr_row + 2, column=0, sticky="w")
-        tk.Scale(
-            controls,
-            from_=0,
-            to=100,
-            orient=tk.HORIZONTAL,
-            resolution=1,
-            length=220,
-            variable=self.gripper_force_pct_var,
-            command=lambda _v: self._on_gripper_force_change(),
-        ).grid(row=gr_row + 2, column=1, sticky="ew")
 
-        ttk.Label(controls, textvariable=self.info_var, wraplength=420, foreground="#003f5c").grid(row=gr_row + 3, column=0, columnspan=5, sticky="w", pady=(8, 2))
+        ttk.Label(controls, textvariable=self.info_var, wraplength=420, foreground="#003f5c").grid(row=gr_row + 2, column=0, columnspan=5, sticky="w", pady=(8, 2))
 
         fig = Figure(figsize=(11, 8), dpi=100)
         self.ax_trace = fig.add_subplot(211, projection="3d")
@@ -689,34 +704,78 @@ class WaypointTuningRunnerUI:
         self._schedule_realtime_update()
 
     def _on_gripper_open_change(self):
-        if not self.realtime_mode_var.get():
+        if self._building:
             return
         open_pct = max(0, min(100, int(round(float(self.gripper_open_pct_var.get())))))
+        row = self.edited_rows[self.current_idx]
+        pct_col = f"{self.arm_prefix}_gripper_open_pct"
+        legacy_col = f"{self.arm_prefix}_gripper_open"
+        row[pct_col] = f"{float(open_pct):.1f}"
+        row[legacy_col] = "1" if open_pct >= 50 else "0"
+
         if self.args.mock_robot and self.robot is not None:
             self.robot.set_gripper_open_pct(open_pct)
+            self.info_var.set(f"Gripper open set to {open_pct}% (mock)")
             return
         if self.gripper is None:
+            self.info_var.set("Gripper unavailable: connect robot in remote mode and ensure gripper driver is loaded")
             return
-        # Robotiq command uses millimeters; map percentage to approx 0-85mm stroke.
-        pos_mm = (100 - open_pct) * 85 / 100
-        try:
-            self.gripper.move(int(round(pos_mm)))
-        except Exception:
-            pass
 
-    def _on_gripper_force_change(self):
-        if not self.realtime_mode_var.get():
-            return
-        force_pct = max(0, min(100, int(round(float(self.gripper_force_pct_var.get())))))
-        if self.args.mock_robot and self.robot is not None:
-            self.robot.set_gripper_force_pct(force_pct)
-            return
-        if self.gripper is None:
-            return
+        # Coalesce rapid slider motion into one hardware command and avoid
+        # blocking the Tk thread with move_and_wait calls.
+        if self._gripper_job is not None:
+            self.root.after_cancel(self._gripper_job)
+        self._gripper_job = self.root.after(120, lambda pct=open_pct: self._dispatch_gripper_open_pct(pct))
+
+    def _dispatch_gripper_open_pct(self, open_pct):
+        self._gripper_job = None
+        with self._gripper_cmd_lock:
+            if self._gripper_cmd_busy:
+                self._gripper_cmd_pending_pct = int(open_pct)
+                return
+            self._gripper_cmd_busy = True
+            self._gripper_cmd_pending_pct = None
+
+        def _worker(target_pct):
+            try:
+                self._send_gripper_open_pct(target_pct)
+            finally:
+                next_pct = None
+                with self._gripper_cmd_lock:
+                    next_pct = self._gripper_cmd_pending_pct
+                    self._gripper_cmd_pending_pct = None
+                    if next_pct is None:
+                        self._gripper_cmd_busy = False
+                if next_pct is not None:
+                    self.root.after(0, lambda p=next_pct: self._dispatch_gripper_open_pct(p))
+
+        threading.Thread(target=_worker, args=(int(open_pct),), daemon=True).start()
+
+    def _send_gripper_open_pct(self, open_pct):
+        # Gripper open percentage maps to 0..85mm.
+        pos_mm = open_pct * GRIPPER_OPEN_MM_MAX / 100.0
         try:
-            self.gripper.set_force(force_pct)
-        except Exception:
-            pass
+            if not self._gripper_activated:
+                ok_activate = self.gripper.activate()
+                self._gripper_activated = True
+                ok_force = self.gripper.set_force(100)
+                ok_speed = self.gripper.set_speed(100)
+                print(
+                    "[tuner][gripper] lazy_init "
+                    f"activate={ok_activate} set_force={ok_force} set_speed={ok_speed}"
+                )
+            ok = self.gripper.move(int(round(pos_mm)))
+            pos_readback = self.gripper.current_pos_mm()
+            print(
+                "[tuner][gripper] move "
+                f"target_pct={open_pct} target_mm={int(round(pos_mm))} ok={ok} readback_mm={pos_readback}"
+            )
+            if ok is False:
+                self.root.after(0, lambda: self.info_var.set(f"Gripper open command rejected at {open_pct}%"))
+            else:
+                self.root.after(0, lambda: self.info_var.set(f"Gripper open set to {open_pct}%"))
+        except Exception as exc:
+            self.root.after(0, lambda: self.info_var.set(f"Gripper open command failed: {exc}"))
 
     def _schedule_realtime_update(self):
         if not self.realtime_mode_var.get() or self.robot is None:
@@ -763,6 +822,10 @@ class WaypointTuningRunnerUI:
                 col = f"{self.arm_prefix}_{f}"
                 nominal = _try_float(src.get(col), 0.0)
                 cur = _try_float(row.get(col), nominal)
+                half_range = POSITION_SLIDER_HALF_RANGE_M if f in ("x", "y", "z") else ROTATION_SLIDER_HALF_RANGE_RAD
+                scale = self.field_scales.get(f)
+                if scale is not None:
+                    scale.configure(from_=(nominal - half_range), to=(nominal + half_range))
                 self.value_vars[f].set(cur)
                 self.entry_vars[f].set(f"{cur:.4f}")
                 self.nominal_vars[f].set(f"nom={nominal:.4f}")
@@ -777,6 +840,15 @@ class WaypointTuningRunnerUI:
                 self.joint_entry_vars[field].set(f"{cur_qi:.4f}")
                 self.joint_nominal_vars[field].set(f"nom={nominal_q:.4f}")
                 self.joint_delta_vars[field].set(f"Δ={cur_qi - nominal_q:+.4f}")
+
+            gripper_pct_col = f"{self.arm_prefix}_gripper_open_pct"
+            gripper_legacy_col = f"{self.arm_prefix}_gripper_open"
+            gripper_pct = _try_float(row.get(gripper_pct_col), float("nan"))
+            if not math.isfinite(gripper_pct):
+                legacy_open = _try_float(row.get(gripper_legacy_col), 1.0)
+                gripper_pct = 100.0 if legacy_open >= 0.5 else 0.0
+            gripper_pct = max(0.0, min(100.0, float(gripper_pct)))
+            self.gripper_open_pct_var.set(gripper_pct)
 
             wp_idx = int(_try_float(row.get("waypoint_index", idx + 1), idx + 1))
             wp_name = str(row.get("waypoint_name", "")).strip() or f"wp_{wp_idx}"
@@ -1063,6 +1135,11 @@ class WaypointTuningRunnerUI:
 
         header = list(self.csv_header)
         for extra in ["tune_source_csv", "tune_saved_at_iso"]:
+            if extra not in header:
+                header.append(extra)
+        gripper_pct_col = f"{self.arm_prefix}_gripper_open_pct"
+        gripper_legacy_col = f"{self.arm_prefix}_gripper_open"
+        for extra in [gripper_pct_col, gripper_legacy_col]:
             if extra not in header:
                 header.append(extra)
 
