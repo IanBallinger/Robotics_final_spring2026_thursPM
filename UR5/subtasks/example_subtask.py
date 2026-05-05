@@ -1460,7 +1460,7 @@ def register_subtasks(registry):
     # Includes existing acquire/open/close flows so all task runners are list-registered.
     for _task_name, _arm_side, _default_csv in [
         ("acquire_bowl", "right", "UR5/waypoints_acquire_bowl.csv"),
-        ("open_microwave_door", "left", "UR5/waypoints_open_microwave_door.csv"),
+        ("open_microwave_door", "left", "UR5/waypoints_door_open_for_unload.csv"),
         ("close_microwave_door", "left", "UR5/waypoints_close_microwave_door.csv"),
         ("place_bowl_in_microwave", "right", "UR5/waypoints_place_bowl_in_microwave.csv"),
         ("right_arm_safe_retract", "right", "UR5/waypoints_right_arm_safe_retract.csv"),

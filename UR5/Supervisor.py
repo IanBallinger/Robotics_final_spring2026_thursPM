@@ -161,6 +161,7 @@ OPEN_MICROWAVE_TASK_TEMPLATE = {
         "resource_action": "acquire",
         "resource": "table_area",
         "resource_item": "microwave_open",
+        "named_waypoints_csv": "UR5/waypoints_door_open_for_unload.csv",
     },
 }
 

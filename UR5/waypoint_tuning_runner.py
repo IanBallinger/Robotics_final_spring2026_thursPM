@@ -34,13 +34,18 @@ def _load_robotiq_gripper_class():
     gripper_file = _DEMO_DIR / "robotiq_gripper_control.py"
     if not gripper_file.exists():
         return None
+    # Ensure sibling imports like `robotiq_preamble` resolve when this file
+    # is loaded via importlib from a different working directory.
+    if str(_DEMO_DIR) not in sys.path:
+        sys.path.insert(0, str(_DEMO_DIR))
     spec = importlib.util.spec_from_file_location("robotiq_gripper_control_local", gripper_file)
     if spec is None or spec.loader is None:
         return None
     module = importlib.util.module_from_spec(spec)
     try:
         spec.loader.exec_module(module)
-    except Exception:
+    except Exception as exc:
+        print(f"[tuner] Warning: failed to load gripper control module: {exc}")
         return None
     return getattr(module, "RobotiqGripper", None)
 
@@ -429,10 +434,12 @@ class WaypointTuningRunnerUI:
 
         self.gripper = None
         self._gripper_activated = False
-        gripper_class = _load_robotiq_gripper_class()
-        if self.robot is not None and gripper_class is not None:
+        self._gripper_status_reason = ""
+        self._gripper_class = _load_robotiq_gripper_class()
+        self._gripper_failures = 0
+        if self.robot is not None and self._gripper_class is not None:
             try:
-                self.gripper = gripper_class(self.robot.rtde_control)
+                self.gripper = self._gripper_class(self.robot.rtde_control)
                 if not args.mock_robot:
                     try:
                         ok_activate = self.gripper.activate()
@@ -445,9 +452,13 @@ class WaypointTuningRunnerUI:
                             f"activate={ok_activate} set_force={ok_force} set_speed={ok_speed} pos_mm={pos_mm}"
                         )
                     except Exception as exc:
+                        self._gripper_status_reason = f"initialization failed: {exc}"
                         print(f"[tuner] Gripper init warning: {exc}")
-            except Exception:
+            except Exception as exc:
+                self._gripper_status_reason = f"driver construction failed: {exc}"
                 self.gripper = None
+        elif self.robot is not None and self._gripper_class is None:
+            self._gripper_status_reason = "gripper control module failed to load"
 
         self.root = tk.Tk()
         self.root.title("UR5 Waypoint Tuning Runner")
@@ -477,14 +488,20 @@ class WaypointTuningRunnerUI:
         self._play_thread = None
         self._stop_play = threading.Event()
         self._realtime_job = None
-        self._gripper_job = None
-        self._gripper_cmd_lock = threading.Lock()
-        self._gripper_cmd_busy = False
-        self._gripper_cmd_pending_pct = None
+        self._gripper_state_lock = threading.Lock()
+        self._gripper_worker_stop = threading.Event()
+        self._gripper_worker_wakeup = threading.Event()
+        self._gripper_next_pct = None
+        self._gripper_last_forwarded_pct = None
+        self._gripper_last_forward_ts = 0.0
+        self._gripper_forward_period_s = 2.0
 
         self._build_ui()
         self._set_waypoint(0)
 
+        self._gripper_io_lock = threading.Lock()
+        self._gripper_worker_thread = threading.Thread(target=self._gripper_worker_loop, daemon=True)
+        self._gripper_worker_thread.start()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _load_waypoint_file(self, csv_path, task_id=""):
@@ -669,6 +686,78 @@ class WaypointTuningRunnerUI:
         self.canvas = FigureCanvasTkAgg(fig, master=viz)
         self.canvas.get_tk_widget().grid(row=0, column=0, rowspan=2, sticky="nsew")
 
+    def _queue_gripper_open_pct(self, open_pct):
+        with self._gripper_state_lock:
+            self._gripper_next_pct = int(max(0, min(100, int(open_pct))))
+        self._gripper_worker_wakeup.set()
+
+    def _wait_for_gripper_forward(self, target_pct, timeout_s=3.0):
+        t0 = time.time()
+        while (time.time() - t0) < float(timeout_s):
+            with self._gripper_state_lock:
+                last = self._gripper_last_forwarded_pct
+                pending = self._gripper_next_pct
+            if int(last) == int(target_pct) and pending is None:
+                return True
+            time.sleep(0.01)
+        return False
+
+    def _gripper_worker_loop(self):
+        while not self._gripper_worker_stop.is_set():
+            self._gripper_worker_wakeup.wait(timeout=0.1)
+            self._gripper_worker_wakeup.clear()
+            if self._gripper_worker_stop.is_set():
+                break
+
+            while not self._gripper_worker_stop.is_set():
+                with self._gripper_state_lock:
+                    target_pct = self._gripper_next_pct
+                if target_pct is None:
+                    break
+
+                elapsed = time.time() - float(self._gripper_last_forward_ts)
+                wait_s = float(self._gripper_forward_period_s) - elapsed
+                if wait_s > 0:
+                    if self._gripper_worker_stop.wait(timeout=wait_s):
+                        break
+
+                with self._gripper_state_lock:
+                    target_pct = self._gripper_next_pct
+                    self._gripper_next_pct = None
+
+                if target_pct is None:
+                    continue
+
+                self._send_gripper_open_pct(int(target_pct))
+                with self._gripper_state_lock:
+                    self._gripper_last_forwarded_pct = int(target_pct)
+                    self._gripper_last_forward_ts = time.time()
+
+    def _recover_gripper_session(self, reason):
+        if self.robot is None or self.args.mock_robot:
+            return False
+        if self._gripper_class is None:
+            self._gripper_status_reason = "gripper control module failed to load"
+            return False
+        try:
+            self.gripper = self._gripper_class(self.robot.rtde_control)
+            ok_activate = self.gripper.activate()
+            self._gripper_activated = True
+            ok_force = self.gripper.set_force(100)
+            ok_speed = self.gripper.set_speed(100)
+            pos_mm = self.gripper.current_pos_mm()
+            print(
+                "[tuner][gripper] recover "
+                f"reason={reason} activate={ok_activate} set_force={ok_force} set_speed={ok_speed} pos_mm={pos_mm}"
+            )
+            self._gripper_status_reason = ""
+            return True
+        except Exception as exc:
+            self._gripper_activated = False
+            self._gripper_status_reason = f"recovery failed: {exc}"
+            print(f"[tuner][gripper] recover_failed reason={reason} err={exc}")
+            return False
+
     def _on_scale_change(self, field):
         if self._building:
             return
@@ -718,64 +807,67 @@ class WaypointTuningRunnerUI:
             self.info_var.set(f"Gripper open set to {open_pct}% (mock)")
             return
         if self.gripper is None:
-            self.info_var.set("Gripper unavailable: connect robot in remote mode and ensure gripper driver is loaded")
+            reason = self._gripper_status_reason or "connect robot in remote mode and ensure gripper driver is loaded"
+            self.info_var.set(f"Gripper unavailable: {reason}")
             return
 
-        # Coalesce rapid slider motion into one hardware command and avoid
-        # blocking the Tk thread with move_and_wait calls.
-        if self._gripper_job is not None:
-            self.root.after_cancel(self._gripper_job)
-        self._gripper_job = self.root.after(120, lambda pct=open_pct: self._dispatch_gripper_open_pct(pct))
-
-    def _dispatch_gripper_open_pct(self, open_pct):
-        self._gripper_job = None
-        with self._gripper_cmd_lock:
-            if self._gripper_cmd_busy:
-                self._gripper_cmd_pending_pct = int(open_pct)
-                return
-            self._gripper_cmd_busy = True
-            self._gripper_cmd_pending_pct = None
-
-        def _worker(target_pct):
-            try:
-                self._send_gripper_open_pct(target_pct)
-            finally:
-                next_pct = None
-                with self._gripper_cmd_lock:
-                    next_pct = self._gripper_cmd_pending_pct
-                    self._gripper_cmd_pending_pct = None
-                    if next_pct is None:
-                        self._gripper_cmd_busy = False
-                if next_pct is not None:
-                    self.root.after(0, lambda p=next_pct: self._dispatch_gripper_open_pct(p))
-
-        threading.Thread(target=_worker, args=(int(open_pct),), daemon=True).start()
+        self._queue_gripper_open_pct(open_pct)
 
     def _send_gripper_open_pct(self, open_pct):
         # Gripper open percentage maps to 0..85mm.
         pos_mm = open_pct * GRIPPER_OPEN_MM_MAX / 100.0
-        try:
-            if not self._gripper_activated:
-                ok_activate = self.gripper.activate()
-                self._gripper_activated = True
-                ok_force = self.gripper.set_force(100)
-                ok_speed = self.gripper.set_speed(100)
-                print(
-                    "[tuner][gripper] lazy_init "
-                    f"activate={ok_activate} set_force={ok_force} set_speed={ok_speed}"
-                )
-            ok = self.gripper.move(int(round(pos_mm)))
-            pos_readback = self.gripper.current_pos_mm()
-            print(
-                "[tuner][gripper] move "
-                f"target_pct={open_pct} target_mm={int(round(pos_mm))} ok={ok} readback_mm={pos_readback}"
-            )
-            if ok is False:
-                self.root.after(0, lambda: self.info_var.set(f"Gripper open command rejected at {open_pct}%"))
-            else:
-                self.root.after(0, lambda: self.info_var.set(f"Gripper open set to {open_pct}%"))
-        except Exception as exc:
-            self.root.after(0, lambda: self.info_var.set(f"Gripper open command failed: {exc}"))
+        last_error = ""
+        with self._gripper_io_lock:
+            for attempt in (1, 2):
+                try:
+                    if self.gripper is None:
+                        if not self._recover_gripper_session(reason="gripper_none"):
+                            raise RuntimeError(self._gripper_status_reason or "gripper unavailable")
+
+                    if not self._gripper_activated:
+                        ok_activate = self.gripper.activate()
+                        self._gripper_activated = True
+                        ok_force = self.gripper.set_force(100)
+                        ok_speed = self.gripper.set_speed(100)
+                        print(
+                            "[tuner][gripper] lazy_init "
+                            f"activate={ok_activate} set_force={ok_force} set_speed={ok_speed}"
+                        )
+
+                    ok = self.gripper.move(int(round(pos_mm)))
+                    if ok is False and open_pct >= 98:
+                        ok = self.gripper.open()
+                    elif ok is False and open_pct <= 2:
+                        ok = self.gripper.close()
+
+                    if ok is False:
+                        raise RuntimeError("move command rejected")
+
+                    pos_readback = self.gripper.current_pos_mm()
+                    self._gripper_failures = 0
+                    print(
+                        "[tuner][gripper] move "
+                        f"attempt={attempt} target_pct={open_pct} target_mm={int(round(pos_mm))} ok={ok} readback_mm={pos_readback}"
+                    )
+                    self.root.after(0, lambda: self.info_var.set(f"Gripper open set to {open_pct}%"))
+                    return
+                except Exception as exc:
+                    last_error = str(exc)
+                    self._gripper_failures += 1
+                    print(
+                        "[tuner][gripper] move_failed "
+                        f"attempt={attempt} target_pct={open_pct} target_mm={int(round(pos_mm))} err={exc}"
+                    )
+                    self._gripper_activated = False
+                    if attempt == 1:
+                        self._recover_gripper_session(reason=f"move_failed:{exc}")
+
+        self.root.after(
+            0,
+            lambda: self.info_var.set(
+                f"Gripper command failed after retry ({self._gripper_failures} failures): {last_error}"
+            ),
+        )
 
     def _schedule_realtime_update(self):
         if not self.realtime_mode_var.get() or self.robot is None:
@@ -841,14 +933,7 @@ class WaypointTuningRunnerUI:
                 self.joint_nominal_vars[field].set(f"nom={nominal_q:.4f}")
                 self.joint_delta_vars[field].set(f"Δ={cur_qi - nominal_q:+.4f}")
 
-            gripper_pct_col = f"{self.arm_prefix}_gripper_open_pct"
-            gripper_legacy_col = f"{self.arm_prefix}_gripper_open"
-            gripper_pct = _try_float(row.get(gripper_pct_col), float("nan"))
-            if not math.isfinite(gripper_pct):
-                legacy_open = _try_float(row.get(gripper_legacy_col), 1.0)
-                gripper_pct = 100.0 if legacy_open >= 0.5 else 0.0
-            gripper_pct = max(0.0, min(100.0, float(gripper_pct)))
-            self.gripper_open_pct_var.set(gripper_pct)
+            self.gripper_open_pct_var.set(float(self._row_gripper_open_pct(row)))
 
             wp_idx = int(_try_float(row.get("waypoint_index", idx + 1), idx + 1))
             wp_name = str(row.get("waypoint_name", "")).strip() or f"wp_{wp_idx}"
@@ -858,6 +943,8 @@ class WaypointTuningRunnerUI:
             self._building = False
 
         self._refresh_plots()
+        if self.realtime_mode_var.get():
+            self._apply_gripper_for_waypoint(self.current_idx, blocking=False)
 
     def _prev_waypoint(self):
         self._set_waypoint(self.current_idx - 1)
@@ -891,6 +978,28 @@ class WaypointTuningRunnerUI:
         if label:
             return label
         return str(row.get("dependent_item_label", "")).strip()
+
+    def _row_gripper_open_pct(self, row):
+        gripper_pct_col = f"{self.arm_prefix}_gripper_open_pct"
+        gripper_legacy_col = f"{self.arm_prefix}_gripper_open"
+        gripper_pct = _try_float(row.get(gripper_pct_col), float("nan"))
+        if not math.isfinite(gripper_pct):
+            legacy_open = _try_float(row.get(gripper_legacy_col), 1.0)
+            gripper_pct = 100.0 if legacy_open >= 0.5 else 0.0
+        return max(0, min(100, int(round(float(gripper_pct)))))
+
+    def _apply_gripper_for_waypoint(self, idx, blocking=False):
+        if idx < 0 or idx >= len(self.edited_rows):
+            return
+        open_pct = self._row_gripper_open_pct(self.edited_rows[idx])
+        if self.args.mock_robot and self.robot is not None:
+            self.robot.set_gripper_open_pct(open_pct)
+            return
+        if self.gripper is None:
+            return
+        self._queue_gripper_open_pct(open_pct)
+        if blocking:
+            self._wait_for_gripper_forward(open_pct, timeout_s=4.5)
 
     def _add_waypoint_from_trace(self):
         if not self.edited_rows:
@@ -992,6 +1101,7 @@ class WaypointTuningRunnerUI:
             pose = self._build_execution_pose(self.current_idx, closed_loop=self.closed_loop_var.get())
             q = _q_from_row(self.edited_rows[self.current_idx], self.arm_side)
             self._execute_primitive(pose, q)
+            self._apply_gripper_for_waypoint(self.current_idx, blocking=False)
         except Exception as exc:
             messagebox.showerror("Execution Error", str(exc))
 
@@ -1039,6 +1149,7 @@ class WaypointTuningRunnerUI:
                     pose = self._build_execution_pose(idx, closed_loop=closed_loop)
                     q = _q_from_row(self.edited_rows[idx], self.arm_side)
                     self._execute_primitive(pose, q)
+                    self._apply_gripper_for_waypoint(idx, blocking=True)
                     time.sleep(max(0.0, float(self.step_sleep_var.get())))
             except Exception as exc:
                 self.root.after(0, lambda: messagebox.showerror("Playback Error", str(exc)))
@@ -1156,6 +1267,8 @@ class WaypointTuningRunnerUI:
 
     def _on_close(self):
         self._stop_play.set()
+        self._gripper_worker_stop.set()
+        self._gripper_worker_wakeup.set()
         try:
             if self.robot is not None:
                 self.robot.disconnect()
