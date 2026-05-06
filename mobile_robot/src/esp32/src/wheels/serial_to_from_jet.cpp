@@ -1,27 +1,18 @@
 #include <Arduino.h>
 #include <esp_now.h>
 #include <WiFi.h>
-#include <math.h>
+#include "imu.h"
 #include "robot_pinout.h"
 #include "MotorDriver.h"
 #include "EncoderVelocity.h"
 #include "PID.h"
+#include "joystick.h"
 #include "util.h"
 #include "wireless.h"
-#include "imu.h"
 
-// Host serial protocol handled here:
-//   MODE,AUTONOMY
-//   MODE,JOYSTICK
-//   WHL_CMD,w1,w2,w3,w4
-//
-// Canonical wheel command order:
-//   w1 = left_front, w2 = right_front, w3 = left_rear, w4 = right_rear
-//
-// This firmware is intentionally simplified for wheel-only autonomy bring-up:
-// - robust serial line handling with overflow protection
-// - explicit command timeout in autonomy mode
-// - conservative command clamping / validation
+
+// Legend:
+// w1 = left_front (MOTOR 2), w2 = right_front (MOTOR 3), w3 = left_rear (MOTOR 1), w4 = right_rear (MOTOR 4).
 
 struct DesiredWheelVel {
   float w1;
@@ -34,32 +25,43 @@ struct DesiredWheelVel {
       : w1(w1_), w2(w2_), w3(w3_), w4(w4_) {}
 };
 
+#define BNO08X_RESET 14
+#define BNO08X_CS 12
+#define BNO08X_INT 13
+IMU imu(BNO08X_RESET, BNO08X_CS, BNO08X_INT);
 String rx_line = "";
 
 constexpr uint8_t num_wheels = 4;
 constexpr float PID_TAU = 0.1f;
 constexpr float ENCODER_SIGN[num_wheels] = {1.0f, -1.0f, 1.0f, -1.0f};
-constexpr size_t MAX_RX_LINE_LEN = 96;
-constexpr float MAX_WHEEL_CMD_RAD_S = 3.0f;
+
+#ifndef MANUAL_JOYSTICK_X_PIN
+#define MANUAL_JOYSTICK_X_PIN A0
+#endif
+
+#ifndef MANUAL_JOYSTICK_Y_PIN
+#define MANUAL_JOYSTICK_Y_PIN A1
+#endif
 
 #ifndef AUTONOMY_TOGGLE_BUTTON_PIN
 #define AUTONOMY_TOGGLE_BUTTON_PIN 14
 #endif
 
 constexpr float JOYSTICK_DEADBAND = 0.1f;
-constexpr float JOYSTICK_MAX_FORWARD = MAX_WHEEL_CMD_RAD_S;
-constexpr float JOYSTICK_MAX_TURN = MAX_WHEEL_CMD_RAD_S;
+constexpr float JOYSTICK_MAX_FORWARD = 3.0f;
+constexpr float JOYSTICK_MAX_TURN = 3.0f;
 
 // User-defined serial/control rates.
 constexpr unsigned long CMD_APPLY_PERIOD_MS = 10;   // latest buffered wheel cmd -> motors
-constexpr unsigned long ACK_PUBLISH_PERIOD_MS = 20; // latest applied wheel cmd -> host
+constexpr unsigned long ACK_PUBLISH_PERIOD_MS = 10; // latest applied wheel cmd -> host
+constexpr unsigned long IMU_PUBLISH_PERIOD_MS = 50; // latest IMU sample -> host
 constexpr unsigned long CMD_TIMEOUT_MS = 250;       // stop motors if host goes silent
 constexpr unsigned long JOYSTICK_APPLY_PERIOD_MS = 50;
 constexpr unsigned long BUTTON_DEBOUNCE_MS = 50;
 constexpr unsigned long CONTROLLER_TIMEOUT_MS = 250;
-constexpr unsigned long IMU_PUBLISH_PERIOD_MS = 50;
 constexpr float WHEEL_CMD_FILTER_TAU_S = 0.1f;
-constexpr bool SERIAL_DEBUG_TIMING = false;
+constexpr float IMU_ACCEL_FILTER_TAU_S = 0.5f;
+constexpr bool SERIAL_DEBUG_TIMING = true;
 
 MotorDriver wheels[num_wheels] = {
     {A_DIR1, A_PWM1, 0},
@@ -102,6 +104,7 @@ unsigned long last_wheel_cmd_filter_ms = 0;
 bool has_pending_cmd = false;
 bool ack_dirty = false;
 
+Joystick manual_joystick(MANUAL_JOYSTICK_X_PIN, MANUAL_JOYSTICK_Y_PIN);
 bool autonomy_enabled = false;
 bool last_button_level = HIGH;
 unsigned long last_button_change_ms = 0;
@@ -115,16 +118,22 @@ static unsigned long last_remote_toggle_ms = 0;
 unsigned long last_cmd_rx_ms = 0;
 unsigned long last_cmd_apply_ms = 0;
 unsigned long last_ack_publish_ms = 0;
+unsigned long last_imu_publish_ms = 0;
 
 unsigned long last_ack_debug_ms = 0;
+unsigned long last_imu_debug_ms = 0;
+unsigned long last_accel_filter_ms = 0;
+
+float filtered_ax = 0.0f;
+float filtered_ay = 0.0f;
+float filtered_az = 0.0f;
 
 const uint8_t* peerAddr = controllerAddr;
-esp_now_peer_info_t peerInfo = {};
-bool freshWirelessData = false;
-ControllerMessage controllerMessage = {};
-RobotMessage robotMessage = {};
+esp_now_peer_info_t peerInfo;
 
-IMU imu(BNO08X_RESET, BNO08X_CS, BNO08X_INT);
+bool freshWirelessData = false;
+ControllerMessage controllerMessage;
+RobotMessage robotMessage;
 
 static void stopMotors();
 
@@ -149,15 +158,10 @@ void onRecvData(const uint8_t* mac, const uint8_t* incomingData, int len) {
   last_controller_rx_ms = millis();
 }
 
-static bool isFiniteWheelCommand(const DesiredWheelVel& cmd) {
-  return isfinite(cmd.w1) && isfinite(cmd.w2) && isfinite(cmd.w3) && isfinite(cmd.w4);
-}
-
-static void clampWheelCommand(DesiredWheelVel& cmd) {
-  cmd.w1 = constrain(cmd.w1, -MAX_WHEEL_CMD_RAD_S, MAX_WHEEL_CMD_RAD_S);
-  cmd.w2 = constrain(cmd.w2, -MAX_WHEEL_CMD_RAD_S, MAX_WHEEL_CMD_RAD_S);
-  cmd.w3 = constrain(cmd.w3, -MAX_WHEEL_CMD_RAD_S, MAX_WHEEL_CMD_RAD_S);
-  cmd.w4 = constrain(cmd.w4, -MAX_WHEEL_CMD_RAD_S, MAX_WHEEL_CMD_RAD_S);
+bool sendRobotData() {
+  esp_err_t result = esp_now_send(controllerAddr, (uint8_t*)&robotMessage,
+                                  sizeof(robotMessage));
+  return result == ESP_OK;
 }
 
 bool handleWheelCommand(const String& line, DesiredWheelVel& des_wheel_spd) {
@@ -173,17 +177,11 @@ bool handleWheelCommand(const String& line, DesiredWheelVel& des_wheel_spd) {
     return false;
   }
 
-  if (!isFiniteWheelCommand(des_wheel_spd)) {
-    Serial.println("ERR,NAN_CMD");
-    return false;
-  }
-
-  clampWheelCommand(des_wheel_spd);
-
   // Match physical wheel polarity:
   // w1 = left_front, w2 = right_front, w3 = left_rear, w4 = right_rear.
-  des_wheel_spd.w2 *= -1.0f;
   des_wheel_spd.w3 *= -1.0f;
+  des_wheel_spd.w2 *= -1.0f;
+
   return true;
 }
 
@@ -308,9 +306,19 @@ static bool joystickToWheelCommand(const ControllerMessage& controller_msg,
                                                         -JOYSTICK_MAX_TURN,
                                                         JOYSTICK_MAX_TURN));
 
+  Serial.print("JOY_CMD,forward,");
+  Serial.print(forward);
+  Serial.print(",turn,");
+  Serial.println(turn);
+
+  // Legend:
+// w1 = left_front (MOTOR 2), w2 = right_front (MOTOR 3), w3 = left_rear (MOTOR 1), w4 = right_rear (MOTOR 4).
+
   // Differential/skid-steer mixing:
   //   joystick1.y -> forward/back
-  //   joystick2.x -> turn in place
+  //   joystick2.y -> turn in place
+  // Legend:
+  // w1 = left_front (MOTOR 2), w2 = right_front (MOTOR 3), w3 = left_rear (MOTOR 1), w4 = right_rear (MOTOR 4).
   const float left = forward + turn;
   const float right = forward - turn;
 
@@ -366,7 +374,8 @@ static void updateRemoteAutonomyToggle() {
 static void printWheelAck(const DesiredWheelVel& cmd) {
   printDebugTiming("ACK", last_ack_debug_ms);
 
-  Serial.println("DBG,WHEEL_ORDER,w1_left_front,w2_right_front,w3_left_rear,w4_right_rear");
+  Serial.println("DBG,CMD_IS_APPLIED_ACK");
+  Serial.println("DBG,WHEEL_ORDER,w1_left_rear,w2_left_front,w3_right_front,w4_right_rear");
   Serial.print("CMD,");
   Serial.print(cmd.w1);
   Serial.print(",");
@@ -395,53 +404,45 @@ static void printWheelAck(const DesiredWheelVel& cmd) {
   Serial.println(control_effort[3]);
 }
 
-static void printIMU() {
-  const AccelReadings accel = imu.getAccelReadings();
-  const GyroReadings gyro = imu.getGyroReadings();
+void sendIMU() {
+  // Latest fused samples from BNO08x (imu.update() is called each loop).
+  AccelReadings a = imu.getAccelReadings();
+  GyroReadings g = imu.getGyroReadings();
 
+
+  const unsigned long now = millis();
+  float dt = 0.0f;
+  if (last_accel_filter_ms == 0) {
+    filtered_ax = static_cast<float>(a.ax);
+    filtered_ay = static_cast<float>(a.ay);
+    filtered_az = static_cast<float>(a.az);
+  } else {
+    dt = (now - last_accel_filter_ms) / 1000.0f;
+    const float alpha = dt / (IMU_ACCEL_FILTER_TAU_S + dt);
+    filtered_ax += alpha * (static_cast<float>(a.ax) - filtered_ax);
+    filtered_ay += alpha * (static_cast<float>(a.ay) - filtered_ay);
+    filtered_az += alpha * (static_cast<float>(a.az) - filtered_az);
+  }
+  last_accel_filter_ms = now;
+
+  printDebugTiming("IMU", last_imu_debug_ms);
   Serial.print("IMU,");
-  Serial.print(accel.ax, 6);
+  Serial.print(filtered_ax);
   Serial.print(",");
-  Serial.print(accel.ay, 6);
+  Serial.print(filtered_ay);
   Serial.print(",");
-  Serial.print(accel.az, 6);
+  Serial.print(filtered_az);
   Serial.print(",");
-  Serial.print(gyro.rollRate, 6);
+  Serial.print(static_cast<float>(g.rollRate));
   Serial.print(",");
-  Serial.print(gyro.pitchRate, 6);
+  Serial.print(static_cast<float>(g.pitchRate));
   Serial.print(",");
-  Serial.println(gyro.yawRate, 6);
-}
-
-static void processSerialLine(const String& line) {
-  DesiredWheelVel cmd;
-  if (line.length() == 0) {
-    return;
-  }
-  if (handleModeCommand(line)) {
-    return;
-  }
-  if (!handleWheelCommand(line, cmd)) {
-    return;
-  }
-
-  latest_rx_cmd = cmd;
-  has_pending_cmd = true;
-  last_cmd_rx_ms = millis();
-
-  if (!autonomy_enabled) {
-    autonomy_enabled = true;
-    stopMotors();
-    latest_rx_cmd = cmd;
-    has_pending_cmd = true;
-    last_cmd_rx_ms = millis();
-    Serial.println("MODE,AUTONOMY_SERIAL");
-  }
+  Serial.println(static_cast<float>(g.yawRate));
 }
 
 void setup() {
   Serial.begin(115200);
-  rx_line.reserve(MAX_RX_LINE_LEN);
+  imu.setup();
 
   for (uint8_t i = 0; i < num_wheels; i++) {
     wheels[i].setup();
@@ -449,14 +450,15 @@ void setup() {
                                integral_max);
   }
 
+  manual_joystick.setup();
   pinMode(AUTONOMY_TOGGLE_BUTTON_PIN, INPUT_PULLUP);
   setupWireless();
-  imu.setup();
 
   const unsigned long now = millis();
   last_cmd_rx_ms = now;
   last_cmd_apply_ms = now;
   last_ack_publish_ms = now;
+  last_imu_publish_ms = now;
   last_button_change_ms = now;
   last_joystick_apply_ms = now;
   last_controller_rx_ms = now;
@@ -464,42 +466,48 @@ void setup() {
 }
 
 void loop() {
+  imu.update();
+
   updateAutonomyToggle();
   updateRemoteAutonomyToggle();
-  imu.update();
 
   while (Serial.available()) {
     char c = static_cast<char>(Serial.read());
 
-    if (c == '\r') {
-      continue;
-    }
     if (c == '\n') {
       rx_line.trim();
-      processSerialLine(rx_line);
-      rx_line = "";
-      continue;
-    }
 
-    if (rx_line.length() >= MAX_RX_LINE_LEN) {
+      DesiredWheelVel cmd;
+      if (rx_line.length() > 0) {
+        if (handleModeCommand(rx_line)) {
+          // Mode-only command handled above.
+        } else if (handleWheelCommand(rx_line, cmd)) {
+          latest_rx_cmd = cmd;
+          has_pending_cmd = true;
+          last_cmd_rx_ms = millis();
+          if (!autonomy_enabled) {
+            autonomy_enabled = true;
+            stopMotors();
+            latest_rx_cmd = cmd;
+            has_pending_cmd = true;
+            last_cmd_rx_ms = millis();
+            Serial.println("MODE,AUTONOMY_SERIAL");
+          }
+        }
+      }
+
       rx_line = "";
-      Serial.println("ERR,RX_OVERFLOW");
-      continue;
+    } else {
+      rx_line += c;
     }
-    rx_line += c;
   }
 
   const unsigned long now = millis();
 
   if (autonomy_enabled) {
-    if (now - last_cmd_rx_ms > CMD_TIMEOUT_MS) {
-      if (latest_rx_cmd.w1 != 0.0f || latest_rx_cmd.w2 != 0.0f ||
-          latest_rx_cmd.w3 != 0.0f || latest_rx_cmd.w4 != 0.0f) {
-        Serial.println("ERR,CMD_TIMEOUT");
-      }
-      latest_rx_cmd = DesiredWheelVel();
-      has_pending_cmd = false;
-    }
+    // if (now - last_cmd_rx_ms > CMD_TIMEOUT_MS) {
+    //   stopMotors();
+    // }
 
     if (now - last_cmd_apply_ms >= CMD_APPLY_PERIOD_MS) {
       applyWheelCommand(lowPassWheelCommand(latest_rx_cmd, now));
@@ -530,10 +538,8 @@ void loop() {
     last_ack_publish_ms = now;
   }
 
-  static unsigned long last_imu_publish_ms = 0;
   if (now - last_imu_publish_ms >= IMU_PUBLISH_PERIOD_MS) {
-    printIMU();
+    sendIMU();
     last_imu_publish_ms = now;
   }
-
 }
