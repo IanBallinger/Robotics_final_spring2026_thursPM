@@ -81,7 +81,7 @@ tasks:
   - name: pickup_tray
     desired_elevator_height_m: 0.0
     goal:
-      position: {x: 0.315, y: 0.59}
+      position: {x: 0.5, y: 0.59}
       heading: 0.0
     completion_conditions:
       - task_elapsed_s >= 2.0
