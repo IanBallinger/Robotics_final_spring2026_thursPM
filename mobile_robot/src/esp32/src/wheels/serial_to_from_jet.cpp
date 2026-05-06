@@ -34,7 +34,7 @@ String rx_line = "";
 constexpr uint8_t num_wheels = 4;
 constexpr float PID_TAU = 0.1f;
 constexpr float ENCODER_SIGN[num_wheels] = {1.0f, -1.0f, 1.0f, -1.0f};
-constexpr float MAX_WHEEL_SPEED_RAD_S[num_wheels] = {0.5f, 0.5f, 0.5f, 0.5f};
+constexpr float MAX_WHEEL_SPEED_RAD_S[num_wheels] = {1.0f, 1.0f, 1.0f, 1.0f};
 
 #ifndef MANUAL_JOYSTICK_X_PIN
 #define MANUAL_JOYSTICK_X_PIN A0

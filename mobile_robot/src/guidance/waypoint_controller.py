@@ -75,7 +75,7 @@ class CascadedWaypointController:
         komega_inner: float = 0.9,
         wheel_radius: float = 0.06,
         track_width: float = 0.4,
-        max_wheel_rate_rad_s: float = 0.5,
+        max_wheel_rate_rad_s: float = 1.0,
     ):
         self.k_rho = k_rho
         self.k_alpha = k_alpha
