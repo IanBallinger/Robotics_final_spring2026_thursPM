@@ -38,6 +38,13 @@ struct DesiredArmJointAngles {
   DesiredArmJointAngles(float theta1_, float theta2_) : theta1(theta1_), theta2(theta2_) {}
 };
 
+struct DesiredElevatorJogCommand {
+  float drive;
+
+  DesiredElevatorJogCommand() : drive(0.0f) {}
+  explicit DesiredElevatorJogCommand(float drive_) : drive(drive_) {}
+};
+
 enum class PinchCommand {
   OPEN,
   CLOSE,
@@ -53,6 +60,7 @@ constexpr unsigned long ACK_PUBLISH_PERIOD_MS = 50;
 constexpr unsigned long CMD_TIMEOUT_MS = 250;
 constexpr bool SERIAL_DEBUG_TIMING = true;
 constexpr float MM_TO_M = 1.0f / 1000.0f;
+constexpr float ELEVATOR_JOG_RATE_MPS = 0.08f;
 
 constexpr int ELEVATOR_ENCODER_A_PIN = 4;
 constexpr int ELEVATOR_ENCODER_B_PIN = 5;
@@ -136,6 +144,12 @@ unsigned long last_height_update_ms = 0;
 
 volatile bool has_pending_wireless_pinch_cmd = false;
 volatile PinchCommand pending_wireless_pinch_cmd = PinchCommand::OPEN;
+volatile bool has_pending_wireless_elevator_jog_cmd = false;
+volatile float pending_wireless_elevator_jog_drive = 0.0f;
+
+float wireless_elevator_jog_drive = 0.0f;
+unsigned long last_wireless_elevator_jog_ms = 0;
+unsigned long last_wireless_elevator_jog_update_ms = 0;
 
 #define Kp 3.5f
 #define Ki 0.1f
@@ -152,6 +166,7 @@ double pinch_left_ms = 0.0;
 double pinch_right_ms = 0.0;
 
 static bool handlePinchCommand(const String& line, PinchCommand& cmd);
+static bool handleElevatorJogCommand(const String& line, DesiredElevatorJogCommand& cmd);
 static float readEncoderHeightMeters();
 
 static void onElevatorWirelessSend(const uint8_t* mac_addr, esp_now_send_status_t status) {
@@ -176,6 +191,13 @@ static void onElevatorWirelessRecv(const uint8_t* mac, const uint8_t* incomingDa
   if (handlePinchCommand(line, pinch_cmd)) {
     pending_wireless_pinch_cmd = pinch_cmd;
     has_pending_wireless_pinch_cmd = true;
+    return;
+  }
+
+  DesiredElevatorJogCommand elevator_jog_cmd;
+  if (handleElevatorJogCommand(line, elevator_jog_cmd)) {
+    pending_wireless_elevator_jog_drive = elevator_jog_cmd.drive;
+    has_pending_wireless_elevator_jog_cmd = true;
   }
 }
 
@@ -284,6 +306,20 @@ static bool handleArmJointAnglesCommand(const String& line, DesiredArmJointAngle
     return false;
   }
 
+  return true;
+}
+
+static bool handleElevatorJogCommand(const String& line, DesiredElevatorJogCommand& cmd) {
+  if (!line.startsWith("ELV_JOG_CMD,")) {
+    return false;
+  }
+
+  if (sscanf(line.c_str(), "ELV_JOG_CMD,%f", &cmd.drive) != 1) {
+    Serial.println("WRONG_NUM_VALUES");
+    return false;
+  }
+
+  cmd.drive = clampFloat(cmd.drive, -1.0f, 1.0f);
   return true;
 }
 
@@ -612,6 +648,7 @@ static void stopElevator() {
   latest_rx_cmd = DesiredElevatorState();
   latest_applied_cmd = DesiredElevatorState();
   has_valid_elevator_cmd = false;
+  wireless_elevator_jog_drive = 0.0f;
   ack_dirty = false;
 
   elevator_driver.drive(0.0);
@@ -710,11 +747,48 @@ void loop() {
     interrupts();
     commandPinch(pinch_cmd);
   }
+  if (has_pending_wireless_elevator_jog_cmd) {
+    noInterrupts();
+    const float jog_drive = pending_wireless_elevator_jog_drive;
+    has_pending_wireless_elevator_jog_cmd = false;
+    interrupts();
+    wireless_elevator_jog_drive = jog_drive;
+    last_wireless_elevator_jog_ms = now;
+    if (last_wireless_elevator_jog_update_ms == 0) {
+      last_wireless_elevator_jog_update_ms = now;
+    }
+    Serial.print("ELV_JOG_ACK,");
+    Serial.println(wireless_elevator_jog_drive, 3);
+  }
   updateArmMotion(now);
   const float measured_height_m = readElevatorHeightMeters();
 
-  if (now - last_cmd_rx_ms > CMD_TIMEOUT_MS) {
-    stopElevator();
+  if (now - last_wireless_elevator_jog_ms > CMD_TIMEOUT_MS) {
+    wireless_elevator_jog_drive = 0.0f;
+  }
+
+  if (now - last_cmd_rx_ms > CMD_TIMEOUT_MS && !has_valid_elevator_cmd && !isnan(measured_height_m)) {
+    latest_rx_cmd = DesiredElevatorState(measured_height_m);
+    has_valid_elevator_cmd = true;
+  }
+
+  if (!isnan(measured_height_m)) {
+    if (!has_valid_elevator_cmd) {
+      latest_rx_cmd = DesiredElevatorState(measured_height_m);
+      has_valid_elevator_cmd = true;
+    }
+
+    if (last_wireless_elevator_jog_update_ms == 0) {
+      last_wireless_elevator_jog_update_ms = now;
+    }
+    const float dt_jog_s = (now > last_wireless_elevator_jog_update_ms)
+                               ? ((now - last_wireless_elevator_jog_update_ms) * 0.001f)
+                               : 0.0f;
+    last_wireless_elevator_jog_update_ms = now;
+
+    if (fabsf(wireless_elevator_jog_drive) > 1e-4f) {
+      latest_rx_cmd.height_m += wireless_elevator_jog_drive * ELEVATOR_JOG_RATE_MPS * dt_jog_s;
+    }
   }
 
   if (has_valid_elevator_cmd && now - last_cmd_apply_ms >= CMD_APPLY_PERIOD_MS) {

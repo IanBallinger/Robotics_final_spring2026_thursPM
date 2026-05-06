@@ -18,6 +18,7 @@
 #define ROTARY_SEESAW_ADDR 0x49
 
 constexpr float PINCH_COMMAND_THRESHOLD = 0.5f;
+constexpr float ELEVATOR_JOG_COMMAND_THRESHOLD = 0.35f;
 
 enum class PinchState {
     NONE,
@@ -99,6 +100,30 @@ static bool isZeroMac(const uint8_t* mac) {
         }
     }
     return true;
+}
+
+static bool sendElevatorJogCommand(float jog_command) {
+    if (isZeroMac(elevatorAddr)) {
+        if (Serial) {
+            Serial.println("ELV_JOG_TX,SKIP,UNCONFIGURED_MAC");
+        }
+        return false;
+    }
+
+    char msg[32];
+    snprintf(msg, sizeof(msg), "ELV_JOG_CMD,%.3f", jog_command);
+    const esp_err_t result = esp_now_send(
+        elevatorAddr,
+        reinterpret_cast<const uint8_t*>(msg),
+        strlen(msg) + 1);
+
+    if (Serial) {
+        Serial.print("ELV_JOG_TX,");
+        Serial.print(jog_command, 3);
+        Serial.print(",");
+        Serial.println(result == ESP_OK ? "OK" : "FAIL");
+    }
+    return result == ESP_OK;
 }
 
 static bool sendPinchCommand(PinchState state) {
@@ -210,6 +235,14 @@ void loop() {
 
         controllerMessage.buttonL = (digitalRead(BUTTON_L_PIN) == LOW);
         controllerMessage.buttonR = (digitalRead(BUTTON_R_PIN) == LOW);
+
+        float elevatorJog = 0.0f;
+        if (filteredRightCommand.x >= ELEVATOR_JOG_COMMAND_THRESHOLD) {
+            elevatorJog = 1.0f;
+        } else if (filteredRightCommand.x <= -ELEVATOR_JOG_COMMAND_THRESHOLD) {
+            elevatorJog = -1.0f;
+        }
+        sendElevatorJogCommand(elevatorJog);
 
         const PinchState pinchState = pinchStateFromJoystick(filteredRightCommand);
         if (pinchState != lastPinchState) {
