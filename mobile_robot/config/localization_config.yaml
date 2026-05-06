@@ -1,4 +1,6 @@
 localization:
+  # Set to "ekf" to fuse IMU/encoders/AprilTags, or "none" to use direct
+  # AprilTag pose assignment without EKF prediction/update.
   filter: ekf
   initial_state:
     x: 2.15

@@ -78,6 +78,8 @@ class MissionPhase(Enum):
 
 @dataclass
 class LocalizationConfig:
+    filter_type: str
+    use_ekf: bool
     initial_state: np.ndarray
     initial_covariance: np.ndarray
     process_noise: np.ndarray
@@ -209,6 +211,7 @@ class MissionRuntime:
             gyro_measurement_noise=self.localization_config.gyro_measurement_noise,
             wheel_twist_measurement_noise=self.localization_config.wheel_twist_measurement_noise,
         )
+        print(f"Localization mode: {self.localization_config.filter_type}")
 
         self.apriltag_camera: Optional[RealSenseCamera] = None
         self.person_camera: Optional[RealSenseCamera] = None
@@ -316,8 +319,11 @@ class MissionRuntime:
         loc = localization_raw.get("localization", {})
         runtime = mission_raw.get("mission_runtime", {})
         init = loc.get("initial_state", {})
+        filter_type = str(loc.get("filter", "ekf")).strip().lower()
 
         localization = LocalizationConfig(
+            filter_type=filter_type,
+            use_ekf=(filter_type == "ekf"),
             initial_state=np.array(
                 [
                     float(init.get("x", 0.0)),
@@ -404,6 +410,9 @@ class MissionRuntime:
         packets = self.serial.read_packets(max_lines=128)
         imu_packets = [msg for msg in packets if isinstance(msg, IMUReading)]
         encoder_packets = [msg for msg in packets if isinstance(msg, EncoderReading)]
+
+        if not self.localization_config.use_ekf:
+            return
 
         if not imu_packets:
             self.localization_filter.predict(IMUMeasurement(ax=0.0, ay=0.0, wz=0.0), dt)
@@ -536,11 +545,21 @@ class MissionRuntime:
             )
         )
 
-        state = self.localization_filter.get_state()
-        state[0] = mean_x
-        state[1] = mean_y
-        state[2] = mean_yaw
-        self.localization_filter.state = state
+        if self.localization_config.use_ekf:
+            self.localization_filter.update_apriltag(
+                AprilTagMeasurement(
+                    x=mean_x,
+                    y=mean_y,
+                    yaw=mean_yaw,
+                    covariance=self.localization_config.apriltag_measurement_noise,
+                )
+            )
+        else:
+            state = self.localization_filter.get_state()
+            state[0] = mean_x
+            state[1] = mean_y
+            state[2] = mean_yaw
+            self.localization_filter.state = state
 
     def _person_blocking(self, now: float) -> bool:
         if self.person_detector is None:

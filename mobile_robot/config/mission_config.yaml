@@ -84,8 +84,8 @@ tasks:
     tag_targets:
       - tag_id: 5
         desired_distance_m: 0.70
-      - tag_id: 6
-        desired_distance_m: 0.60
+      # - tag_id: 6
+      #   desired_distance_m: 0.60
     completion_conditions:
       - task_elapsed_s >= 2.0
 
