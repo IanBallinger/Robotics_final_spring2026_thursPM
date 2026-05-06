@@ -34,6 +34,7 @@ String rx_line = "";
 constexpr uint8_t num_wheels = 4;
 constexpr float PID_TAU = 0.1f;
 constexpr float ENCODER_SIGN[num_wheels] = {1.0f, -1.0f, 1.0f, -1.0f};
+constexpr float MAX_WHEEL_SPEED_RAD_S[num_wheels] = {0.5f, 0.5f, 0.5f, 0.5f};
 
 #ifndef MANUAL_JOYSTICK_X_PIN
 #define MANUAL_JOYSTICK_X_PIN A0
@@ -164,6 +165,13 @@ bool sendRobotData() {
   return result == ESP_OK;
 }
 
+static void clampWheelCommand(DesiredWheelVel& cmd) {
+  cmd.w1 = constrain(cmd.w1, -MAX_WHEEL_SPEED_RAD_S[0], MAX_WHEEL_SPEED_RAD_S[0]);
+  cmd.w2 = constrain(cmd.w2, -MAX_WHEEL_SPEED_RAD_S[1], MAX_WHEEL_SPEED_RAD_S[1]);
+  cmd.w3 = constrain(cmd.w3, -MAX_WHEEL_SPEED_RAD_S[2], MAX_WHEEL_SPEED_RAD_S[2]);
+  cmd.w4 = constrain(cmd.w4, -MAX_WHEEL_SPEED_RAD_S[3], MAX_WHEEL_SPEED_RAD_S[3]);
+}
+
 bool handleWheelCommand(const String& line, DesiredWheelVel& des_wheel_spd) {
   if (!line.startsWith("WHL_CMD,")) {
     Serial.println("WRONG_START");
@@ -176,6 +184,8 @@ bool handleWheelCommand(const String& line, DesiredWheelVel& des_wheel_spd) {
     Serial.println("WRONG_NUM_VALUES");
     return false;
   }
+
+  clampWheelCommand(des_wheel_spd);
 
   // Match physical wheel polarity:
   // w1 = left_front, w2 = right_front, w3 = left_rear, w4 = right_rear.
