@@ -508,6 +508,10 @@ void setup() {
   last_joystick_apply_ms = now;
   last_controller_rx_ms = now;
   last_wheel_cmd_filter_ms = now;
+
+  autonomy_enabled = false;
+  stopMotors();
+  Serial.println("MODE,JOYSTICK");
 }
 
 void loop() {
