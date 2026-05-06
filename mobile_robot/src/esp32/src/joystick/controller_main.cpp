@@ -37,8 +37,8 @@ static JoystickReading filteredLeftCommand = {0.0f, 0.0f};
 static JoystickReading filteredRightCommand = {0.0f, 0.0f};
 static PinchState lastPinchState = PinchState::NONE;
 
-Joystick joystick1(JOYSTICK1_X_PIN, JOYSTICK1_Y_PIN);
-Joystick joystick2(JOYSTICK2_X_PIN, JOYSTICK2_Y_PIN);
+Joystick joystick1(9, 6);
+Joystick joystick2(1, 5);
 
 static float applyDeadband(float value, float deadband) {
     return (abs(value) < deadband) ? 0.0f : value;

@@ -495,8 +495,8 @@ void setup() {
                                integral_max);
   }
 
-  manual_joystick.setup();
-  pinMode(AUTONOMY_TOGGLE_BUTTON_PIN, INPUT_PULLUP);
+  // manual_joystick.setup();
+  // pinMode(AUTONOMY_TOGGLE_BUTTON_PIN, INPUT_PULLUP);
   setupWireless();
 
   const unsigned long now = millis();
@@ -518,7 +518,7 @@ void loop() {
   imu.update();
 
   updateAutonomyToggle();
-  updateRemoteAutonomyToggle();
+  // updateRemoteAutonomyToggle();
 
   while (Serial.available()) {
     char c = static_cast<char>(Serial.read());
