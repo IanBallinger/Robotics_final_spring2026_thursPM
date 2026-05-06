@@ -224,34 +224,20 @@ void loop() {
 
         controllerMessage.millis = now;
 
-        // Drive mapping:
-        // - joystick1.y -> forward/back
-        // - joystick2.x -> turn
-        // Publish turn on joystick2.x for drive MCU compatibility.
-        // joystick2.y is reserved for local pinch open/close thresholding.
+        // Shared controller packet mapping:
+        // - joystick1.y -> forward/back for drive MCU
+        // - joystick2.x -> turn for drive MCU and elevator jog source for elevator MCU
+        // - joystick2.y -> pinch open/close source for elevator MCU
         controllerMessage.joystick1.x = filteredLeftCommand.x;
         controllerMessage.joystick1.y = filteredLeftCommand.y;
         controllerMessage.joystick2.x = filteredRightCommand.x;
-        controllerMessage.joystick2.y = 0.0f;
+        controllerMessage.joystick2.y = filteredRightCommand.y;
 
         controllerMessage.buttonL = (digitalRead(BUTTON_L_PIN) == LOW);
         controllerMessage.buttonR = (digitalRead(BUTTON_R_PIN) == LOW);
 
-        float elevatorJog = 0.0f;
-        if (filteredRightCommand.x >= ELEVATOR_JOG_COMMAND_THRESHOLD) {
-            elevatorJog = 1.0f;
-        } else if (filteredRightCommand.x <= -ELEVATOR_JOG_COMMAND_THRESHOLD) {
-            elevatorJog = -1.0f;
-        }
-        sendElevatorJogCommand(elevatorJog);
-
         const PinchState pinchState = pinchStateFromJoystick(filteredRightCommand);
-        if (pinchState != lastPinchState) {
-            const bool pinch_sent = sendPinchCommand(pinchState);
-            if (pinchState == PinchState::NONE || pinch_sent) {
-                lastPinchState = pinchState;
-            }
-        }
+        lastPinchState = pinchState;
 
         sendControllerData();
         prevControllerMessage = controllerMessage;

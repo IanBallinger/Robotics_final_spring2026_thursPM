@@ -12,6 +12,7 @@
 #include "util.h"
 #include "arm_control.h"
 #include "EncoderVelocity.h"
+#include "wireless.h"
 
 #define TCAADDR 0x70
 
@@ -93,6 +94,8 @@ constexpr float ARM_SHOULDER_RATE_RAD_S = 1.2f;
 constexpr float ARM_ELBOW_RATE_RAD_S = 1.2f;
 constexpr float ARM_JOINT_REACHED_EPS_RAD = 0.01f;
 constexpr bool ELEVATOR_USE_TOF_SENSOR = false;
+constexpr float PINCH_COMMAND_THRESHOLD = 0.5f;
+constexpr float ELEVATOR_JOG_COMMAND_THRESHOLD = 0.35f;
 
 DesiredElevatorState latest_rx_cmd;
 DesiredElevatorState latest_applied_cmd;
@@ -198,6 +201,7 @@ static void printElevatorControlDebug(const char* tag,
 static bool handlePinchCommand(const String& line, PinchCommand& cmd);
 static bool handleElevatorJogCommand(const String& line, DesiredElevatorJogCommand& cmd);
 static float readEncoderHeightMeters();
+static bool decodeWirelessControllerMessage(const uint8_t* incomingData, int len);
 
 static void onElevatorWirelessSend(const uint8_t* mac_addr, esp_now_send_status_t status) {
   (void)mac_addr;
@@ -207,6 +211,10 @@ static void onElevatorWirelessSend(const uint8_t* mac_addr, esp_now_send_status_
 static void onElevatorWirelessRecv(const uint8_t* mac, const uint8_t* incomingData, int len) {
   (void)mac;
   if (incomingData == nullptr || len <= 0) {
+    return;
+  }
+
+  if (decodeWirelessControllerMessage(incomingData, len)) {
     return;
   }
 
@@ -369,6 +377,40 @@ static bool handlePinchCommand(const String& line, PinchCommand& cmd) {
 
   Serial.println("WRONG_NUM_VALUES");
   return false;
+}
+
+static bool decodeWirelessControllerMessage(const uint8_t* incomingData, int len) {
+  if (len != sizeof(ControllerMessage)) {
+    return false;
+  }
+
+  ControllerMessage msg;
+  memcpy(&msg, incomingData, sizeof(msg));
+
+  float jog_drive = 0.0f;
+  if (msg.joystick2.x >= ELEVATOR_JOG_COMMAND_THRESHOLD) {
+    jog_drive = 1.0f;
+  } else if (msg.joystick2.x <= -ELEVATOR_JOG_COMMAND_THRESHOLD) {
+    jog_drive = -1.0f;
+  }
+  pending_wireless_elevator_jog_drive = clampFloat(jog_drive, -1.0f, 1.0f);
+  has_pending_wireless_elevator_jog_cmd = true;
+
+  if (msg.joystick2.y >= PINCH_COMMAND_THRESHOLD) {
+    pending_wireless_pinch_cmd = PinchCommand::OPEN;
+    has_pending_wireless_pinch_cmd = true;
+  } else if (msg.joystick2.y <= -PINCH_COMMAND_THRESHOLD) {
+    pending_wireless_pinch_cmd = PinchCommand::CLOSE;
+    has_pending_wireless_pinch_cmd = true;
+  }
+
+  Serial.print("CTRL_RX,joy2x,");
+  Serial.print(msg.joystick2.x, 3);
+  Serial.print(",joy2y,");
+  Serial.print(msg.joystick2.y, 3);
+  Serial.print(",jog,");
+  Serial.println(pending_wireless_elevator_jog_drive, 3);
+  return true;
 }
 
 static float readTofElevatorHeightMeters() {
