@@ -60,7 +60,7 @@ constexpr unsigned long CMD_TIMEOUT_MS = 250;       // stop motors if host goes 
 constexpr unsigned long JOYSTICK_APPLY_PERIOD_MS = 50;
 constexpr unsigned long BUTTON_DEBOUNCE_MS = 50;
 constexpr unsigned long CONTROLLER_TIMEOUT_MS = 250;
-constexpr float WHEEL_CMD_FILTER_TAU_S = 0.02f;
+constexpr float WHEEL_CMD_FILTER_TAU_S = 0.1f;
 constexpr float IMU_ACCEL_FILTER_TAU_S = 0.5f;
 constexpr bool SERIAL_DEBUG_TIMING = true;
 
