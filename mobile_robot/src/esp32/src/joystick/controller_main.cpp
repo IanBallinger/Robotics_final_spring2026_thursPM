@@ -37,8 +37,8 @@ static JoystickReading filteredLeftCommand = {0.0f, 0.0f};
 static JoystickReading filteredRightCommand = {0.0f, 0.0f};
 static PinchState lastPinchState = PinchState::NONE;
 
-Joystick joystick1(9, 6);
-Joystick joystick2(1, 5);
+Joystick joystick1(JOYSTICK1_X_PIN, JOYSTICK1_Y_PIN);
+Joystick joystick2(JOYSTICK2_X_PIN, JOYSTICK2_Y_PIN);
 
 static float applyDeadband(float value, float deadband) {
     return (abs(value) < deadband) ? 0.0f : value;
@@ -158,9 +158,9 @@ static void printDebug(const JoystickReading& leftStick,
     Serial.printf(
         "POTS raw_fb=%d raw_turn=%d mapped_fb=%.3f mapped_turn=%.3f joy1(x,y)=(%.3f, %.3f) joy2(x,y)=(%.3f, %.3f) buttons(L,R)=(%d,%d) pinch=%s\n",
         joystickRangeToAnalog(leftStick.y),
-        joystickRangeToAnalog(leftStick.x),
+        joystickRangeToAnalog(rightStick.x),
         leftStick.y,
-        leftStick.x,
+        rightStick.x,
         controllerMessage.joystick1.x,
         controllerMessage.joystick1.y,
         controllerMessage.joystick2.x,
@@ -199,7 +199,8 @@ void setup() {
 
     joystick1.setup();
     joystick2.setup();
-
+    pinMode(BUTTON_L_PIN, INPUT_PULLUP);
+    pinMode(BUTTON_R_PIN, INPUT_PULLUP);
 
     memset(&controllerMessage, 0, sizeof(controllerMessage));
     memset(&prevControllerMessage, 0, sizeof(prevControllerMessage));
@@ -225,12 +226,12 @@ void loop() {
 
         // Drive mapping:
         // - joystick1.y -> forward/back
-        // - joystick1.x -> turn
+        // - joystick2.x -> turn
         // Publish turn on joystick2.x for drive MCU compatibility.
         // joystick2.y is reserved for local pinch open/close thresholding.
         controllerMessage.joystick1.x = filteredLeftCommand.x;
         controllerMessage.joystick1.y = filteredLeftCommand.y;
-        controllerMessage.joystick2.x = filteredLeftCommand.x;
+        controllerMessage.joystick2.x = filteredRightCommand.x;
         controllerMessage.joystick2.y = 0.0f;
 
         controllerMessage.buttonL = (digitalRead(BUTTON_L_PIN) == LOW);
