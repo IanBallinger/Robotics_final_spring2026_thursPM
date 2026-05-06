@@ -2,4 +2,4 @@ venv
 .pio
 .pyc
 *.pyc
-**/__pycache__
+**/__pycache__UR5/examples/ur_2026/
