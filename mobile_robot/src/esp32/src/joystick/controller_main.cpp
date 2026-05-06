@@ -252,10 +252,8 @@ void loop() {
             }
         }
 
-        if (!(prevControllerMessage == controllerMessage)) {
-            sendControllerData();
-            prevControllerMessage = controllerMessage;
-        }
+        sendControllerData();
+        prevControllerMessage = controllerMessage;
     }
 
     EVERY_N_MILLIS(DEBUG_PRINT_PERIOD_MS) {

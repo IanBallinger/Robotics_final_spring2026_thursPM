@@ -49,8 +49,8 @@ constexpr float MAX_WHEEL_SPEED_RAD_S[num_wheels] = {1.0f, 1.0f, 1.0f, 1.0f};
 #endif
 
 constexpr float JOYSTICK_DEADBAND = 0.1f;
-constexpr float JOYSTICK_MAX_FORWARD = 3.0f;
-constexpr float JOYSTICK_MAX_TURN = 3.0f;
+constexpr float JOYSTICK_MAX_FORWARD = MAX_WHEEL_SPEED_RAD_S[0];
+constexpr float JOYSTICK_MAX_TURN = MAX_WHEEL_SPEED_RAD_S[0];
 
 // User-defined serial/control rates.
 constexpr unsigned long CMD_APPLY_PERIOD_MS = 10;   // latest buffered wheel cmd -> motors
