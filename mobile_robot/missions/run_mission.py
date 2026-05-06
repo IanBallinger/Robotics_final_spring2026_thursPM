@@ -667,7 +667,7 @@ class MissionRuntime:
         vx_cmd = self.runtime_config.tag_distance_kp * distance_error_m
         vx_cmd = float(np.clip(vx_cmd, -self.runtime_config.controller_v_max, self.runtime_config.controller_v_max))
 
-        omega_cmd = self.runtime_config.tag_center_kp * heading_error_rad
+        omega_cmd = -self.runtime_config.tag_center_kp * heading_error_rad
         omega_cmd = float(np.clip(omega_cmd, -self.runtime_config.controller_omega_max, self.runtime_config.controller_omega_max))
 
         if abs(center_error_px) > self.runtime_config.align_only_center_error_px:
