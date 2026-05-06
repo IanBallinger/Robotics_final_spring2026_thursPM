@@ -21,6 +21,7 @@ import subprocess
 import sys
 import threading
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -140,6 +141,7 @@ class QueuedTask:
     unblocks_arms: List[str] = field(compare=False, default_factory=list)
     score_token: str = field(compare=False, default="")
     max_score_count: int = field(compare=False, default=0)
+    enqueue_after_task_id: str = field(compare=False, default="")
     resource_action: str = field(compare=False, default="")
     resource: str = field(compare=False, default="")
     resource_item: str = field(compare=False, default="")
@@ -210,9 +212,13 @@ class Supervisor:
         self._manual_running_by_arm: Dict[str, Optional[str]] = {"left": None, "right": None}
         self._gripper_activation_lock = threading.Lock()
         self._gripper_activation_attempted: Dict[str, bool] = {"left": False, "right": False}
+        self._default_open_loop_mode: bool = False
         self.subtasks_dir = subtasks_dir or (_THIS_DIR / "subtasks")
         self._ensure_subtasks_dir()
         self.reload_subtasks()
+
+    def set_default_open_loop_mode(self, enabled: bool):
+        self._default_open_loop_mode = bool(enabled)
 
     def _activate_scheduler_grippers_once(self):
         """Activate each arm gripper once at scheduler startup.
@@ -469,7 +475,7 @@ class Supervisor:
         camera_thread = None
         if camera_enabled and udp_socket is not None and udp_target is not None:
             vision_params = {
-                "vision_camera_scan_max_index": max(int(camera_index), 6),
+                "vision_camera_scan_max_index": max(int(camera_index), 12),
             }
             camera_thread = self._start_camera_thread(
                 udp_socket, udp_target, camera_stop, send_lock, camera_index, vision_params
@@ -503,7 +509,7 @@ class Supervisor:
             gripper_left = RobotiqGripper(rtde_c_left)
             gripper_right = RobotiqGripper(rtde_c_right)
             for g in (gripper_left, gripper_right):
-                g.set_force(50)
+                g.set_force(100)
                 g.set_speed(100)
                 g.open()
         except Exception as exc:
@@ -521,6 +527,7 @@ class Supervisor:
         print(f"[Supervisor] Recording RIGHT -> {right_output}")
 
         gripper_state = {"left": True, "right": True}
+        gripper_last_applied = {"left": True, "right": True}
         gripper_lock = threading.Lock()
         recording_active = True
 
@@ -566,9 +573,19 @@ class Supervisor:
                     l_open = gripper_state["left"]
                     r_open = gripper_state["right"]
                 if gripper_left is not None:
-                    gripper_left.open() if l_open else gripper_left.close()
+                    if gripper_last_applied["left"] != l_open:
+                        if l_open:
+                            gripper_left.open()
+                        else:
+                            gripper_left.close()
+                        gripper_last_applied["left"] = l_open
                 if gripper_right is not None:
-                    gripper_right.open() if r_open else gripper_right.close()
+                    if gripper_last_applied["right"] != r_open:
+                        if r_open:
+                            gripper_right.open()
+                        else:
+                            gripper_right.close()
+                        gripper_last_applied["right"] = r_open
 
                 if i % 10 == 0:
                     sys.stdout.write("\r")
@@ -739,7 +756,11 @@ class Supervisor:
         if name == "acquire_cup":
             return {"requires_empty": True, "set_object": "cup"}
         if name == "acquire_bottle":
-            return {"requires_empty": True, "set_object": "bottle"}
+            return {
+                "requires_empty": True,
+                "set_object": "bottle",
+                "clear_object": bool(params.get("clear_grasped_object", False)),
+            }
         if name == "place_bowl_in_microwave":
             return {"requires_object": "bowl", "clear_object": True}
         if name == "place_plate_in_microwave":
@@ -795,10 +816,10 @@ class Supervisor:
         set_object = self._normalize_grasp_label(rules.get("set_object"))
         clear_object = bool(rules.get("clear_object", False))
 
-        if clear_object:
-            self._grasped_object_by_arm[arm] = None
         if set_object:
             self._grasped_object_by_arm[arm] = set_object
+        if clear_object:
+            self._grasped_object_by_arm[arm] = None
 
     def _prerequisites_met(self, task: QueuedTask) -> bool:
         return all(token in self._completed_tokens for token in task.prerequisites)
@@ -1284,6 +1305,9 @@ class Supervisor:
         return occupied == "table_area" and item == "microwave_open"
 
     def _is_task_runnable_core(self, task: QueuedTask) -> bool:
+        required_completion = str(task.enqueue_after_task_id or "").strip()
+        if required_completion and required_completion not in self._completed_task_ids:
+            return False
         if not self._prerequisites_met(task):
             return False
 
@@ -1485,6 +1509,7 @@ class Supervisor:
             unblocks_arms=[],
             score_token="task:_idle_wait",
             max_score_count=0,
+            enqueue_after_task_id="",
             resource_action="",
             resource="",
             resource_item="",
@@ -1825,6 +1850,17 @@ class Supervisor:
         return str(candidates[0]) if candidates else ""
 
     @staticmethod
+    def _latest_tuned_waypoint_csv(task_cli_id: str) -> str:
+        tid = str(task_cli_id or "").strip()
+        if not tid:
+            return ""
+        tuned_dir = _THIS_DIR / "tuned_waypoints" / tid
+        if not tuned_dir.exists() or not tuned_dir.is_dir():
+            return ""
+        candidates = sorted(tuned_dir.glob("*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+        return str(candidates[0]) if candidates else ""
+
+    @staticmethod
     def _resolve_waypoint_csv(preferred: str, task_slug: str, task_cli_id: str) -> str:
         candidates: List[Path] = []
         if preferred:
@@ -1843,6 +1879,18 @@ class Supervisor:
             return str(any_waypoints[0])
 
         return str(candidates[0]) if candidates else str(_THIS_DIR / "named_waypoints.csv")
+
+    def _resolve_runtime_waypoint_csv(self, task_id: str, fallback_name: str, params: Optional[dict]) -> str:
+        params_dict = params if isinstance(params, dict) else {}
+        task_slug = self._task_slug(task_id, fallback_name=fallback_name)
+        task_cli_id = self._task_cli_id(task_id, fallback_name=fallback_name)
+
+        tuned_csv = self._latest_tuned_waypoint_csv(task_cli_id)
+        if tuned_csv:
+            return tuned_csv
+
+        preferred_csv = str(params_dict.get("named_waypoints_csv") or (_THIS_DIR / f"waypoints_{task_slug}.csv"))
+        return self._resolve_waypoint_csv(preferred_csv, task_slug, task_cli_id)
 
     def _halt_robot_motion_best_effort(self) -> str:
         notes: List[str] = []
@@ -1894,8 +1942,7 @@ class Supervisor:
             return "scheduler resume requested"
 
         if action_name == "start_recording":
-            preferred_csv = str(params.get("named_waypoints_csv") or (_THIS_DIR / f"waypoints_{task_slug}.csv"))
-            named_csv = self._resolve_waypoint_csv(preferred_csv, task_slug, task_cli_id)
+            named_csv = self._resolve_runtime_waypoint_csv(task_id=task_id, fallback_name=task_name, params=params)
 
             live_plot_args = [
                 "julia",
@@ -1963,8 +2010,7 @@ class Supervisor:
                 arm_side = "right"
             default_robot_ip = self.left_ip if arm_side == "left" else self.right_ip
             robot_ip = str(params.get("robot_ip", default_robot_ip)).strip()
-            preferred_csv = str(params.get("named_waypoints_csv") or (_THIS_DIR / f"waypoints_{task_slug}.csv"))
-            named_csv = self._resolve_waypoint_csv(preferred_csv, task_slug, task_cli_id)
+            named_csv = self._resolve_runtime_waypoint_csv(task_id=task_id, fallback_name=task_name, params=params)
             args = [
                 sys.executable,
                 str(_THIS_DIR / "waypoint_tuning_runner.py"),
@@ -1994,38 +2040,18 @@ class Supervisor:
                 if self._manual_control_thread is not None and self._manual_control_thread.is_alive():
                     return "a manual task is already running"
 
-                queued = self._pop_queued_task_by_id(task_id)
+                queued = self._get_queued_task_by_id(task_id)
                 if queued is None:
                     return f"task '{task_id}' is not pending in the autonomy queue"
 
-                if not self._is_task_runnable(queued):
-                    self.queue_task(
-                        queued.name,
-                        points=float(queued.base_points),
-                        params=dict(queued.params or {}),
-                        task_id=queued.task_id,
-                        prerequisites=list(queued.prerequisites),
-                        points_if_completed=dict(queued.points_if_completed or {}),
-                        arm=queued.arm,
-                        blocks_arms=list(queued.blocks_arms),
-                        unblocks_arms=list(queued.unblocks_arms),
-                        score_token=queued.score_token,
-                        max_score_count=int(queued.max_score_count),
-                    )
-                    missing = self._missing_prerequisites(queued)
-                    return (
-                        f"task '{task_id}' is blocked; missing_prerequisites={missing} "
-                        f"blocked_arms={self._blocked_arms}"
-                    )
-
                 self._manual_control_thread = threading.Thread(
-                    target=self._run_manual_control_task,
+                    target=self._run_manual_force_task,
                     args=(queued,),
                     daemon=True,
                 )
                 self._manual_control_thread.start()
 
-            return f"manual task started: {queued.task_id} ({queued.name})"
+            return f"manual force-run started: {queued.task_id} ({queued.name})"
 
         step = ""
         if isinstance(snapshot, dict):
@@ -2044,6 +2070,51 @@ class Supervisor:
         for item in kept:
             heapq.heappush(self._task_heap, item)
         return removed
+
+    def _get_queued_task_by_id(self, task_id: str) -> Optional[QueuedTask]:
+        for candidate in self._task_heap:
+            if candidate.task_id == task_id:
+                return candidate
+        return None
+
+    def _run_manual_force_task(self, task: QueuedTask):
+        """Force-run one selected task without mutating scheduler/queue/resource state."""
+        target_arms = self._task_target_arms(task)
+        if len(target_arms) != 1:
+            target_arms = ["left"]
+        arm_name = target_arms[0]
+
+        self._manual_arm_busy[arm_name] = True
+        self._manual_running_by_arm[arm_name] = task.task_id
+        self._push_visual_snapshot(
+            self._active_visualizer,
+            event="dispatch",
+            arm_busy=self._manual_arm_busy,
+            running_by_arm=self._manual_running_by_arm,
+            message=f"manual force dispatch {task.task_id}",
+        )
+
+        ok = False
+        err = ""
+        try:
+            ok = self.run_subtask(task.name, params=task.params)
+        except Exception as exc:
+            err = str(exc)
+
+        if err:
+            message = f"manual force complete {task.task_id} ok=False err={err}"
+        else:
+            message = f"manual force complete {task.task_id} ok={ok}"
+
+        self._manual_arm_busy[arm_name] = False
+        self._manual_running_by_arm[arm_name] = None
+        self._push_visual_snapshot(
+            self._active_visualizer,
+            event="complete",
+            arm_busy=self._manual_arm_busy,
+            running_by_arm=self._manual_running_by_arm,
+            message=message,
+        )
 
     def _run_manual_control_task(self, task: QueuedTask):
         target_arms = self._task_target_arms(task)
@@ -2148,6 +2219,7 @@ class Supervisor:
         unblocks_arms: Optional[List[str]] = None,
         score_token: Optional[str] = None,
         max_score_count: int = 0,
+        enqueue_after_task_id: Optional[str] = None,
         validate_subtask_exists: bool = True,
     ):
         if name == "total_replay":
@@ -2163,7 +2235,16 @@ class Supervisor:
         resolved_task_id = str(task_id) if task_id else f"{name}#{self._task_sequence}"
         normalized_score_token = self._normalize_score_token(score_token, fallback=f"task:{name}")
         normalized_max_score_count = self._normalize_max_score_count(max_score_count)
-        params_dict = params or {}
+        normalized_enqueue_after = str(enqueue_after_task_id or "").strip()
+        params_dict = dict(params or {})
+        if self._default_open_loop_mode and name != "_idle_wait" and "use_camera_offsets" not in params_dict:
+            params_dict["use_camera_offsets"] = False
+        if name != "_idle_wait":
+            params_dict["named_waypoints_csv"] = self._resolve_runtime_waypoint_csv(
+                str(task_id or ""),
+                fallback_name=name,
+                params=params_dict,
+            )
         resource_action = self._normalize_resource_action(params_dict.get("resource_action"))
         resource_name = str(params_dict.get("resource", "")).strip()
         resource_item = str(params_dict.get("resource_item", "")).strip()
@@ -2182,6 +2263,7 @@ class Supervisor:
             unblocks_arms=unblocks,
             score_token=normalized_score_token,
             max_score_count=normalized_max_score_count,
+            enqueue_after_task_id=normalized_enqueue_after,
             resource_action=resource_action,
             resource=resource_name,
             resource_item=resource_item,
@@ -2308,6 +2390,11 @@ class Supervisor:
         if self._is_microwave_close_task(completed_task):
             return
 
+        # Only tasks that ran while microwave_open was occupied should trigger
+        # close-door enqueue checks.
+        if not self._task_requires_microwave_open(completed_task):
+            return
+
         held = self._resource_state.get("table_area", {})
         if int(held.get("microwave_open", 0)) <= 0:
             return
@@ -2319,6 +2406,8 @@ class Supervisor:
             for running_task_id in running_by_arm.values():
                 if not running_task_id:
                     continue
+                if str(running_task_id) == str(completed_task.task_id):
+                    continue
                 meta = self._task_catalog.get(running_task_id, {})
                 if (
                     meta.get("name") == "close_microwave_door"
@@ -2327,11 +2416,6 @@ class Supervisor:
                     and str(meta.get("resource_item", "")) == "microwave_open"
                 ):
                     return
-
-        # Keep microwave open while loading tasks are still pending.
-        pending_put_ids = {"put_bowl", "put_plate"}
-        if any(task_id not in self._completed_tokens for task_id in pending_put_ids):
-            return
 
         self.queue_task(
             name="close_microwave_door",
@@ -2349,6 +2433,7 @@ class Supervisor:
             unblocks_arms=["left"],
             score_token="close_microwave_door",
             max_score_count=3,
+            enqueue_after_task_id=completed_task.task_id,
             validate_subtask_exists=False,
         )
 
@@ -2403,6 +2488,7 @@ class Supervisor:
             unblocks_arms=[],
             score_token="press_microwave_stop_with_food_inside",
             max_score_count=2,
+            enqueue_after_task_id=completed_task.task_id,
             validate_subtask_exists=False,
         )
 
@@ -2419,6 +2505,7 @@ class Supervisor:
         max_tasks: Optional[int] = None,
         parallel_arms: bool = True,
         visualizer=None,
+        start_paused: bool = False,
     ) -> List[Tuple[str, bool, float, str]]:
         """Run autonomy tasks with optional parallel per-arm execution.
 
@@ -2427,10 +2514,17 @@ class Supervisor:
         """
         self._activate_scheduler_grippers_once()
 
-        if not parallel_arms:
-            return self._run_autonomy_sequential(max_tasks=max_tasks, visualizer=visualizer)
+        # Operational override: force single-lane sequential scheduling.
+        if parallel_arms:
+            print("[Supervisor] Forcing sequential scheduler mode (parallel dispatch disabled).")
+        return self._run_autonomy_sequential(max_tasks=max_tasks, visualizer=visualizer)
 
-        self._autonomy_pause_event.clear()
+        if start_paused:
+            self.pause()
+            self._autonomy_pause_event.set()
+        else:
+            self.play()
+            self._autonomy_pause_event.clear()
         self._completed_tokens = set()
         self._reset_visual_tracking()
         self._reset_microwave_door_completion_flags()
@@ -2452,7 +2546,11 @@ class Supervisor:
             event="start",
             arm_busy=arm_busy,
             running_by_arm=running_by_arm,
-            message="autonomy run started",
+            message=(
+                "autonomy run started in paused state; use Resume Scheduler to begin"
+                if start_paused
+                else "autonomy run started"
+            ),
         )
 
         work_queues = {
@@ -2824,8 +2922,10 @@ class Supervisor:
         When parallel_arms=True, simulation mirrors the coordinated two-lane
         (left/right) dispatcher used by run_autonomy.
         """
-        if not parallel_arms:
-            return self._simulate_autonomy_sequential(max_tasks=max_tasks, visualizer=visualizer)
+        # Operational override: force single-lane sequential simulation.
+        if parallel_arms:
+            print("[Supervisor] Forcing sequential simulation mode (parallel dispatch disabled).")
+        return self._simulate_autonomy_sequential(max_tasks=max_tasks, visualizer=visualizer)
 
         self._completed_tokens = set()
         self._reset_visual_tracking()
@@ -3122,6 +3222,55 @@ class Supervisor:
             "earned_points_total": self._earned_points_total,
         }
 
+    def plan_sequence_via_simulation(
+        self,
+        max_tasks: Optional[int] = None,
+        parallel_arms: bool = True,
+    ) -> dict:
+        """Compute execution order via simulation without mutating live scheduler state."""
+        snapshot = {
+            "task_heap": deepcopy(self._task_heap),
+            "task_sequence": int(self._task_sequence),
+            "task_catalog": deepcopy(self._task_catalog),
+            "completed_tokens": set(self._completed_tokens),
+            "completed_task_ids": set(self._completed_task_ids),
+            "blocked_arms": dict(self._blocked_arms),
+            "resource_state": deepcopy(self._resource_state),
+            "grasped_object_by_arm": dict(self._grasped_object_by_arm),
+            "score_counts": dict(self._score_counts),
+            "earned_points_total": float(self._earned_points_total),
+            "visual_step_counter": int(self._visual_step_counter),
+        }
+
+        try:
+            report = self.simulate_autonomy(
+                max_tasks=max_tasks,
+                parallel_arms=parallel_arms,
+                visualizer=None,
+            )
+        finally:
+            self._task_heap = snapshot["task_heap"]
+            self._task_sequence = snapshot["task_sequence"]
+            self._task_catalog = snapshot["task_catalog"]
+            self._completed_tokens = snapshot["completed_tokens"]
+            self._completed_task_ids = snapshot["completed_task_ids"]
+            self._blocked_arms = snapshot["blocked_arms"]
+            self._resource_state = snapshot["resource_state"]
+            self._grasped_object_by_arm = snapshot["grasped_object_by_arm"]
+            self._score_counts = snapshot["score_counts"]
+            self._earned_points_total = snapshot["earned_points_total"]
+            self._visual_step_counter = snapshot["visual_step_counter"]
+
+        task_ids = [
+            str(step.get("task_id", "")).strip()
+            for step in report.get("executed", [])
+            if str(step.get("name", "")) != "_idle_wait" and str(step.get("task_id", "")).strip()
+        ]
+        return {
+            "task_ids": task_ids,
+            "report": report,
+        }
+
     def pending_autonomy_tasks(self) -> int:
         return len(self._task_heap)
 
@@ -3208,6 +3357,31 @@ def _build_parser() -> argparse.ArgumentParser:
             "'auto' selects simulate/live based on --autonomy-simulate."
         ),
     )
+    run_start_group = run_task.add_mutually_exclusive_group()
+    run_start_group.add_argument(
+        "--autonomy-start-paused",
+        dest="autonomy_start_paused",
+        action="store_true",
+        default=True,
+        help=(
+            "Start autonomy in paused state (default). In live/heap visualizer mode, "
+            "use Resume Scheduler to begin execution."
+        ),
+    )
+    run_start_group.add_argument(
+        "--autonomy-start-running",
+        dest="autonomy_start_paused",
+        action="store_false",
+        help="Start autonomy immediately without initial pause.",
+    )
+    run_task.add_argument(
+        "--autonomy-open-loop-default",
+        action="store_true",
+        help=(
+            "Default task execution to open-loop by setting use_camera_offsets=false "
+            "for queued tasks unless explicitly overridden in params."
+        ),
+    )
 
     return parser
 
@@ -3235,6 +3409,7 @@ def main(argv: Optional[List[str]] = None):
 
     if args.command == "run-subtask":
         params = json.loads(args.params_json)
+        supervisor.set_default_open_loop_mode(bool(args.autonomy_open_loop_default))
         ran_manual_ui_mode = False
         if args.autonomy_mode:
             visualizer = None
@@ -3429,7 +3604,19 @@ def main(argv: Optional[List[str]] = None):
                     f"score_counts={report['score_counts']}"
                 )
             else:
-                results = supervisor.run_autonomy(max_tasks=max_tasks, visualizer=visualizer)
+                should_start_paused = bool(args.autonomy_start_paused)
+                if should_start_paused and visualizer_mode not in {"live", "heap"}:
+                    print(
+                        "autonomy startup pause requested but no live/heap visualizer is active; "
+                        "starting immediately to avoid headless pause deadlock"
+                    )
+                    should_start_paused = False
+
+                results = supervisor.run_autonomy(
+                    max_tasks=max_tasks,
+                    visualizer=visualizer,
+                    start_paused=should_start_paused,
+                )
                 for task_name, ok, points, task_id in results:
                     print(f"autonomy task '{task_name}' (id={task_id}, points={points}) -> {ok}")
                 pending = supervisor.pending_autonomy_tasks()
@@ -3454,6 +3641,8 @@ def main(argv: Optional[List[str]] = None):
                 visualizer.wait_until_closed()
                 supervisor.clear_active_visualizer()
         else:
+            if args.autonomy_open_loop_default and "use_camera_offsets" not in params:
+                params["use_camera_offsets"] = False
             ok = supervisor.run_subtask(args.name, params=params)
             print(f"subtask '{args.name}' -> {ok}")
         return

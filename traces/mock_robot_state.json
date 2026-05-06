@@ -24,7 +24,7 @@
   "source": "julia_mock_robot",
   "sim_note": "offline mock stream",
   "gripper_force_pct": 100,
-  "timestamp": 1778036164.0982556,
+  "timestamp": 1778084380.4075794,
   "gripper_open_pct": 100.0,
   "last_speed": null,
   "last_acceleration": null,

@@ -12,7 +12,12 @@ import queue
 import threading
 import time
 import math
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+
+
+_THIS_DIR = Path(__file__).resolve().parent
+_TUNED_WAYPOINTS_DIR = _THIS_DIR / "tuned_waypoints"
 
 
 class TaskGraphStateVisualizer:
@@ -188,6 +193,46 @@ class TaskGraphStateVisualizer:
         force_velocities: Dict[str, List[float]] = {}
         dragged_task_id: Optional[str] = None
         hovered_task_id: Optional[str] = None
+        tuned_trace_cache: Dict[str, bool] = {}
+        tuned_trace_cache_ts: float = 0.0
+
+        def _refresh_tuned_trace_cache(force: bool = False):
+            nonlocal tuned_trace_cache, tuned_trace_cache_ts
+            now = time.time()
+            # Keep filesystem scanning infrequent while preserving responsiveness.
+            if not force and (now - tuned_trace_cache_ts) < 1.5:
+                return
+
+            tuned_trace_cache = {}
+            if _TUNED_WAYPOINTS_DIR.exists():
+                try:
+                    for child in _TUNED_WAYPOINTS_DIR.iterdir():
+                        if not child.is_dir():
+                            continue
+                        key = child.name.strip()
+                        if not key:
+                            continue
+                        has_csv = any(p.suffix.lower() == ".csv" for p in child.iterdir() if p.is_file())
+                        tuned_trace_cache[key] = bool(has_csv)
+                except Exception:
+                    tuned_trace_cache = {}
+            tuned_trace_cache_ts = now
+
+        def _task_has_tuned_trace(task: Dict[str, Any]) -> bool:
+            _refresh_tuned_trace_cache(force=False)
+            task_id = str(task.get("task_id", "")).strip()
+            if task_id and tuned_trace_cache.get(task_id, False):
+                return True
+
+            params = task.get("params", {}) if isinstance(task.get("params", {}), dict) else {}
+            named_csv = str(params.get("named_waypoints_csv", "")).strip()
+            if named_csv:
+                stem = Path(named_csv).stem
+                if stem.startswith("waypoints_"):
+                    stem = stem[len("waypoints_") :]
+                if stem and tuned_trace_cache.get(stem, False):
+                    return True
+            return False
 
         def _toggle_layout_mode():
             if view_mode_var.get().strip().lower() == "heap":
@@ -294,9 +339,10 @@ class TaskGraphStateVisualizer:
 
             tasks = snap.get("tasks", [])
             for task in tasks:
+                tuned_mark = " ✅" if _task_has_tuned_trace(task) else ""
                 lines.append(
                     f"- {task.get('task_id','')} | {task.get('name','')} | "
-                    f"state={task.get('state','')} | arm={task.get('arm','any')} | "
+                    f"state={task.get('state','')}{tuned_mark} | arm={task.get('arm','any')} | "
                     f"priority={task.get('priority_score',0.0)}"
                 )
 
@@ -566,6 +612,15 @@ class TaskGraphStateVisualizer:
                     text=str(task.get("name", ""))[:30],
                     font=("Segoe UI", 9, "bold"),
                 )
+                if _task_has_tuned_trace(task):
+                    canvas.create_text(
+                        rx1 - 6,
+                        ry0 + 8,
+                        anchor=tk.NE,
+                        fill="#37b24d",
+                        text="✅",
+                        font=("Segoe UI", 11, "bold"),
+                    )
                 canvas.create_text(
                     rx0 + 6,
                     ry0 + 28,

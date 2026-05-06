@@ -1,6 +1,9 @@
 from rtde_receive import RTDEReceiveInterface as RTDEReceive
 from rtde_control import RTDEControlInterface
-from robotiq_gripper_control import RobotiqGripper
+try:
+    from robotiq_gripper_control import RobotiqGripper
+except Exception:
+    RobotiqGripper = None
 from pynput.keyboard import Key, Listener
 import time
 import argparse
@@ -585,7 +588,7 @@ def main(args):
     if use_camera and stream_socket and stream_target:
         vision_params = {
             "task_graph_file": args.task_graph_file,
-            "vision_camera_scan_max_index": max(args.camera_index, 6),
+            "vision_camera_scan_max_index": max(args.camera_index, 12),
         }
         camera_thread = threading.Thread(
             target=run_camera_detection,
@@ -619,24 +622,41 @@ def main(args):
     rtde_r_left = None
     rtde_r_right = None
 
-    # Initialize gripper control interfaces
+    # Initialize gripper control interfaces (best-effort per arm).
+    gripper_L = None
+    gripper_R = None
     try:
         rtde_c_L = RTDEControlInterface(args.ip)
         rtde_c_R = RTDEControlInterface(args.right_ip)
-        
-        gripper_L = RobotiqGripper(rtde_c_L)
-        gripper_R = RobotiqGripper(rtde_c_R)
-        
-        gripper_L.set_force(50)
-        gripper_R.set_force(50)
-        gripper_L.set_speed(100)
-        gripper_R.set_speed(100)
-        gripper_L.open()
-        gripper_R.open()
-        
-        print("Grippers initialized. Use 'l' and 'r' keys to toggle left/right grippers.")
+        if RobotiqGripper is None:
+            print("Warning: gripper module unavailable; recording will continue without gripper control.")
+        else:
+            try:
+                gripper_L = RobotiqGripper(rtde_c_L)
+                gripper_L.set_force(50)
+                gripper_L.set_speed(100)
+                gripper_L.open()
+                print("Left gripper initialized.")
+            except Exception as exc:
+                gripper_L = None
+                print(f"Warning: Left gripper unavailable: {exc}")
+
+            try:
+                gripper_R = RobotiqGripper(rtde_c_R)
+                gripper_R.set_force(50)
+                gripper_R.set_speed(100)
+                gripper_R.open()
+                print("Right gripper initialized.")
+            except Exception as exc:
+                gripper_R = None
+                print(f"Warning: Right gripper unavailable: {exc}")
+
+            if gripper_L is not None or gripper_R is not None:
+                print("Gripper control ready (use 'l' and 'r' keys to toggle).")
+            else:
+                print("Warning: no grippers initialized; recording will continue without gripper control.")
     except Exception as e:
-        print(f"Warning: Could not initialize grippers: {e}")
+        print(f"Warning: Could not initialize RTDE control for grippers: {e}")
         gripper_L = None
         gripper_R = None
 
@@ -847,13 +867,21 @@ def main(args):
             # Update gripper states if they changed
             if gripper_L is not None and curr_gripper_state_L != prev_gripper_state_L:
                 pos_mm_l = curr_gripper_open_pct_L * 85.0 / 100.0
-                gripper_L.move(int(round(pos_mm_l)))
-                prev_gripper_state_L = curr_gripper_state_L
+                try:
+                    gripper_L.move(int(round(pos_mm_l)))
+                    prev_gripper_state_L = curr_gripper_state_L
+                except Exception as exc:
+                    print(f"Warning: Left gripper command failed; disabling left gripper control: {exc}")
+                    gripper_L = None
             
             if gripper_R is not None and curr_gripper_state_R != prev_gripper_state_R:
                 pos_mm_r = curr_gripper_open_pct_R * 85.0 / 100.0
-                gripper_R.move(int(round(pos_mm_r)))
-                prev_gripper_state_R = curr_gripper_state_R
+                try:
+                    gripper_R.move(int(round(pos_mm_r)))
+                    prev_gripper_state_R = curr_gripper_state_R
+                except Exception as exc:
+                    print(f"Warning: Right gripper command failed; disabling right gripper control: {exc}")
+                    gripper_R = None
 
             if i % 10 == 0:
                 sys.stdout.write("\r")

@@ -39,8 +39,8 @@ CAMERA_DEFAULT_MIN_AREA = 500
 CAMERA_DEFAULT_KERNEL_SIZE = 5
 CAMERA_DEFAULT_OPEN_ITER = 3
 CAMERA_DEFAULT_CLOSE_ITER = 3
-VISION_CAMERA_SCAN_MAX_INDEX = 6
-VISION_EXCLUDED_CAMERA_INDICES = {0}
+VISION_CAMERA_SCAN_MAX_INDEX = 12
+VISION_EXCLUDED_CAMERA_INDICES = set()
 VISION_FIRST_FRAME_TIMEOUT_S = 5.0
 
 DEFAULT_XY_CALIBRATION = {
@@ -1080,6 +1080,28 @@ def _decimate_records(records, target_hz):
 
 
 def _load_named_waypoints(csv_path: Path, task_id: str = "", arm_prefix: str = "right"):
+    def _task_id_aliases(raw_task_id):
+        tid = str(raw_task_id or "").strip().lower()
+        if not tid:
+            return {""}
+        aliases = {
+            tid,
+        }
+        legacy_groups = [
+            {"open_microwave_door", "door_open"},
+            {"close_microwave_door", "close_door"},
+            {"press_microwave_stop", "press_stop"},
+            {"place_bowl_in_microwave", "put_bowl"},
+            {"take_bowl_out_to_tray", "bowl_to_tray"},
+            {"place_plate_in_microwave", "put_plate"},
+            {"take_plate_out_to_tray", "plate_to_tray"},
+            {"place_cup_on_tray", "cup_on_tray"},
+        ]
+        for group in legacy_groups:
+            if tid in group:
+                aliases.update(group)
+        return aliases
+
     def _try_float(row, key):
         raw = row.get(key)
         if raw is None:
@@ -1124,12 +1146,13 @@ def _load_named_waypoints(csv_path: Path, task_id: str = "", arm_prefix: str = "
             return None
         return max(0.0, min(100.0, float(val)))
 
+    allowed_task_ids = _task_id_aliases(task_id)
     waypoints = []
     with csv_path.open("r", encoding="utf-8", newline="") as fh:
         reader = csv.DictReader(fh)
         for row in reader:
             row_task_id = str(row.get("task_id", "")).strip()
-            if task_id and row_task_id and row_task_id != task_id:
+            if task_id and row_task_id and str(row_task_id).strip().lower() not in allowed_task_ids:
                 continue
 
             try:

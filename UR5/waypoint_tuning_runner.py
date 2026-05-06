@@ -394,6 +394,16 @@ def _load_waypoints(csv_path, task_id=""):
     return rows, list(rows[0].keys()) if rows else []
 
 
+def _normalize_primitive(value, fallback="move_linear_to_pose"):
+    candidate = str(value or "").strip()
+    if candidate in MOVEMENT_PRIMITIVES:
+        return candidate
+    fb = str(fallback or "").strip()
+    if fb in MOVEMENT_PRIMITIVES:
+        return fb
+    return MOVEMENT_PRIMITIVES[0]
+
+
 class MockUR5Arm:
     """Offline mock that exchanges state with an external process via JSON file."""
 
@@ -546,17 +556,9 @@ class WaypointTuningRunnerUI:
 
         self.vision_feeds = None
         self.vision_lock = threading.Lock()
-        if args.closed_loop_vision and _get_or_start_vision_feeds is not None:
-            try:
-                self.vision_feeds = _get_or_start_vision_feeds(
-                    params={
-                        "task_graph_file": args.task_graph_file,
-                        "vision_camera_scan_max_index": int(args.vision_camera_scan_max_index),
-                    }
-                )
-            except Exception as exc:
-                print(f"[tuner] Warning: vision feeds unavailable: {exc}")
-                self.vision_feeds = None
+        self._vision_start_attempted = False
+        self._vision_start_error = ""
+        self._ensure_vision_feeds(reason="startup")
 
         self.robot = None
         if args.mock_robot:
@@ -635,6 +637,9 @@ class WaypointTuningRunnerUI:
         self._gripper_last_forwarded_pct = None
         self._gripper_last_forward_ts = 0.0
         self._gripper_forward_period_s = 2.0
+        self._mock_last_gripper_open_pct = None
+
+        self._primitive_var_trace_id = self.primitive_var.trace_add("write", self._on_primitive_changed)
 
         self._build_ui()
         self._refresh_object_label_choices()
@@ -646,10 +651,49 @@ class WaypointTuningRunnerUI:
         self._gripper_worker_thread.start()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
+    def _ensure_vision_feeds(self, reason=""):
+        if self.vision_feeds is not None:
+            return True
+        if _get_or_start_vision_feeds is None:
+            self._vision_start_error = "vision module unavailable"
+            return False
+        try:
+            self.vision_feeds = _get_or_start_vision_feeds(
+                params={
+                    "task_graph_file": self.args.task_graph_file,
+                    "vision_camera_scan_max_index": int(self.args.vision_camera_scan_max_index),
+                }
+            )
+            self._vision_start_attempted = True
+            self._vision_start_error = ""
+            print(f"[tuner] Vision feeds ready (reason={reason or 'unspecified'})")
+            return True
+        except Exception as exc:
+            self._vision_start_attempted = True
+            self._vision_start_error = str(exc)
+            self.vision_feeds = None
+            print(f"[tuner] Warning: vision feeds unavailable (reason={reason or 'unspecified'}): {exc}")
+            return False
+
+    def _on_closed_loop_toggle(self):
+        if not bool(self.closed_loop_var.get()):
+            return
+        if self._ensure_vision_feeds(reason="closed_loop_toggle"):
+            self.info_var.set("Closed-loop vision enabled: camera feeds are running")
+        else:
+            msg = self._vision_start_error or "vision feeds unavailable"
+            self.info_var.set(f"Closed-loop vision enabled, but cameras are unavailable: {msg}")
+
     def _load_waypoint_file(self, csv_path, task_id=""):
         src_rows, csv_header = _load_waypoints(str(csv_path), task_id=task_id)
         if not src_rows:
             raise RuntimeError(f"No waypoints found in {csv_path} for task_id='{task_id}'")
+        fallback_primitive = _normalize_primitive(self.args.primitive)
+        for row in src_rows:
+            row["movement_primitive"] = _normalize_primitive(
+                row.get("movement_primitive", ""),
+                fallback=fallback_primitive,
+            )
         self.current_file = Path(csv_path)
         self.csv_header = csv_header
         self.source_rows = src_rows
@@ -799,11 +843,17 @@ class WaypointTuningRunnerUI:
         ttk.Button(controls, text="Next", command=self._next_waypoint).grid(row=4, column=1, pady=4, sticky="ew")
         ttk.Button(controls, text="Exec Current", command=self._execute_current).grid(row=4, column=2, pady=4, sticky="ew")
         ttk.Button(controls, text="Save Tuned CSV", command=self._save_tuned_csv).grid(row=4, column=3, pady=4, sticky="ew")
+        ttk.Button(controls, text="Save Over Current CSV", command=self._save_over_current_csv).grid(row=4, column=4, pady=4, sticky="ew")
 
         ttk.Label(controls, text="Movement Primitive").grid(row=5, column=0, sticky="w", pady=(8, 0))
         ttk.OptionMenu(controls, self.primitive_var, self.primitive_var.get(), *MOVEMENT_PRIMITIVES).grid(row=6, column=0, columnspan=2, sticky="ew")
 
-        ttk.Checkbutton(controls, text="Closed-loop vision playback", variable=self.closed_loop_var).grid(row=7, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        ttk.Checkbutton(
+            controls,
+            text="Closed-loop vision playback",
+            variable=self.closed_loop_var,
+            command=self._on_closed_loop_toggle,
+        ).grid(row=7, column=0, columnspan=4, sticky="w", pady=(6, 0))
         ttk.Checkbutton(controls, text="Real-time tuning mode", variable=self.realtime_mode_var).grid(row=7, column=4, sticky="w", pady=(6, 0))
         ttk.Label(controls, text="Dependent/object label").grid(row=8, column=0, sticky="w")
         self.object_label_combo = ttk.Combobox(
@@ -817,6 +867,9 @@ class WaypointTuningRunnerUI:
         self.object_label_combo.bind("<<ComboboxSelected>>", lambda _ev: self._on_object_label_changed())
         ttk.Button(controls, text="Persist Sensitivity ->", command=self._persist_sensitivity_forward).grid(
             row=8, column=3, columnspan=2, sticky="ew", padx=(4, 0)
+        )
+        ttk.Button(controls, text="Persist Mode ->", command=self._persist_primitive_forward).grid(
+            row=9, column=3, columnspan=2, sticky="ew", padx=(4, 0)
         )
 
         ttk.Label(controls, text="Camera spec family").grid(row=10, column=0, sticky="w", pady=(6, 0))
@@ -961,6 +1014,17 @@ class WaypointTuningRunnerUI:
             ttk.Label(controls, textvariable=n, width=13).grid(row=rr, column=3, sticky="w")
             ttk.Label(controls, textvariable=d, width=13).grid(row=rr, column=4, sticky="w")
 
+        ttk.Button(
+            controls,
+            text="Wrist3 +180deg ->",
+            command=lambda: self._apply_wrist3_offset_forward(math.pi),
+        ).grid(row=joint_row0 + 7, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        ttk.Button(
+            controls,
+            text="Wrist3 -180deg ->",
+            command=lambda: self._apply_wrist3_offset_forward(-math.pi),
+        ).grid(row=joint_row0 + 7, column=2, columnspan=2, sticky="ew", pady=(4, 0), padx=(4, 0))
+
         gr_row = joint_row0 + 8
         ttk.Label(controls, text="Gripper").grid(row=gr_row, column=0, sticky="w", pady=(8, 0))
         ttk.Label(controls, text="Open %").grid(row=gr_row + 1, column=0, sticky="w")
@@ -1104,6 +1168,32 @@ class WaypointTuningRunnerUI:
         self._refresh_plots()
         self._set_waypoint(self.current_idx)
 
+    def _row_primitive(self, row):
+        return _normalize_primitive(row.get("movement_primitive", ""), fallback=self.args.primitive)
+
+    def _on_primitive_changed(self, *_args):
+        if self._building:
+            return
+        if self.current_idx < 0 or self.current_idx >= len(self.edited_rows):
+            return
+        raw_selected = str(self.primitive_var.get() or "").strip()
+        selected = _normalize_primitive(raw_selected, fallback=self.args.primitive)
+        if raw_selected != selected:
+            self.primitive_var.set(selected)
+            return
+        self.edited_rows[self.current_idx]["movement_primitive"] = selected
+
+    def _persist_primitive_forward(self):
+        primitive = _normalize_primitive(self.primitive_var.get(), fallback=self.args.primitive)
+        start_idx = int(self.current_idx)
+        for i in range(start_idx, len(self.edited_rows)):
+            self.edited_rows[i]["movement_primitive"] = primitive
+
+        self._set_waypoint(self.current_idx)
+        self.info_var.set(
+            f"Persisted mode {primitive} from waypoint {start_idx + 1} to {len(self.edited_rows)}"
+        )
+
     def _persist_sensitivity_forward(self):
         selected = str(self.object_label_var.get() or "").strip()
         dep_value = "" if selected == DEPENDENT_ITEM_NA else selected
@@ -1153,15 +1243,24 @@ class WaypointTuningRunnerUI:
         row[legacy_col] = "1" if open_pct >= 50 else "0"
 
         if self.args.mock_robot and self.robot is not None:
-            self.robot.set_gripper_open_pct(open_pct)
-            self.info_var.set(f"Gripper open set to {open_pct}% (mock)")
+            if self._mock_last_gripper_open_pct != int(open_pct):
+                self.robot.set_gripper_open_pct(open_pct)
+                self._mock_last_gripper_open_pct = int(open_pct)
+                self.info_var.set(f"Gripper open set to {open_pct}% (mock)")
             return
         if self.gripper is None:
             reason = self._gripper_status_reason or "connect robot in remote mode and ensure gripper driver is loaded"
             self.info_var.set(f"Gripper unavailable: {reason}")
             return
 
-        self._queue_gripper_open_pct(open_pct)
+        should_queue = True
+        with self._gripper_state_lock:
+            if self._gripper_next_pct is not None and int(self._gripper_next_pct) == int(open_pct):
+                should_queue = False
+            elif self._gripper_last_forwarded_pct is not None and int(self._gripper_last_forwarded_pct) == int(open_pct):
+                should_queue = False
+        if should_queue:
+            self._queue_gripper_open_pct(open_pct)
 
     def _persist_gripper_forward(self):
         open_pct = max(0, min(100, int(round(float(self.gripper_open_pct_var.get())))))
@@ -1180,6 +1279,35 @@ class WaypointTuningRunnerUI:
 
         if self.realtime_mode_var.get():
             self._apply_gripper_for_waypoint(self.current_idx, blocking=False)
+
+    def _apply_wrist3_offset_forward(self, delta_rad):
+        start_idx = int(self.current_idx)
+        joint_idx = 5
+        joint_field = JOINT_FIELDS[joint_idx]
+        low = float(JOINT_LIMITS[joint_idx][0])
+        high = float(JOINT_LIMITS[joint_idx][1])
+
+        clamped = 0
+        for i in range(start_idx, len(self.edited_rows)):
+            row = self.edited_rows[i]
+            q = _q_from_row(row, self.arm_side) or [0.0] * 6
+            target = float(q[joint_idx]) + float(delta_rad)
+            bounded = min(high, max(low, target))
+            if not math.isclose(target, bounded, rel_tol=0.0, abs_tol=1e-12):
+                clamped += 1
+            q[joint_idx] = bounded
+            _set_q_in_row(row, self.arm_side, q)
+
+        self._set_waypoint(self.current_idx)
+        self._schedule_realtime_update()
+
+        sign = "+" if float(delta_rad) >= 0.0 else "-"
+        msg = (
+            f"Persisted wrist_3 {sign}180deg from waypoint {start_idx + 1} to {len(self.edited_rows)}"
+        )
+        if clamped > 0:
+            msg += f" ({clamped} clamped to joint limits for {joint_field})"
+        self.info_var.set(msg)
 
     def _send_gripper_open_pct(self, open_pct):
         # Gripper open percentage maps to 0..85mm.
@@ -1248,7 +1376,7 @@ class WaypointTuningRunnerUI:
         self._realtime_job = None
         try:
             row = self.edited_rows[self.current_idx]
-            primitive = str(self.primitive_var.get() or self.args.primitive)
+            primitive = self._row_primitive(row)
             if primitive == "move_to_joint_position":
                 q = _q_from_row(row, self.arm_side)
                 if q is not None:
@@ -1302,6 +1430,7 @@ class WaypointTuningRunnerUI:
                 self.joint_delta_vars[field].set(f"Δ={cur_qi - nominal_q:+.4f}")
 
             self.gripper_open_pct_var.set(float(self._row_gripper_open_pct(row)))
+            self.primitive_var.set(self._row_primitive(row))
 
             dep_row = str(row.get("dependent_item_label", "")).strip()
             if dep_row:
@@ -1379,12 +1508,21 @@ class WaypointTuningRunnerUI:
             return
         open_pct = self._row_gripper_open_pct(self.edited_rows[idx])
         if self.args.mock_robot and self.robot is not None:
-            self.robot.set_gripper_open_pct(open_pct)
+            if self._mock_last_gripper_open_pct != int(open_pct):
+                self.robot.set_gripper_open_pct(open_pct)
+                self._mock_last_gripper_open_pct = int(open_pct)
             return
         if self.gripper is None:
             return
-        self._queue_gripper_open_pct(open_pct)
-        if blocking:
+        should_queue = True
+        with self._gripper_state_lock:
+            if self._gripper_next_pct is not None and int(self._gripper_next_pct) == int(open_pct):
+                should_queue = False
+            elif self._gripper_last_forwarded_pct is not None and int(self._gripper_last_forwarded_pct) == int(open_pct):
+                should_queue = False
+        if should_queue:
+            self._queue_gripper_open_pct(open_pct)
+        if blocking and (should_queue or self._gripper_next_pct is not None):
             self._wait_for_gripper_forward(open_pct, timeout_s=4.5)
 
     def _add_waypoint_from_trace(self):
@@ -1448,6 +1586,8 @@ class WaypointTuningRunnerUI:
         if not closed_loop:
             return pose
 
+        self._ensure_vision_feeds(reason="closed_loop_execution")
+
         dep = self._current_object_label(row)
         if not dep:
             return pose
@@ -1469,13 +1609,13 @@ class WaypointTuningRunnerUI:
         if recorded_obj is None or live_obj is None:
             return pose
 
+        # Camera-frame correction for tuning only shifts planar XY target.
+        # Keep Z from the waypoint trace unchanged for safer repeatability.
         dx = live_obj[0] - recorded_obj[0]
         dy = live_obj[1] - recorded_obj[1]
-        dz = live_obj[2] - recorded_obj[2]
 
         pose[0] += dx
         pose[1] += dy
-        pose[2] += dz
         return pose
 
     def _execute_current(self):
@@ -1484,15 +1624,17 @@ class WaypointTuningRunnerUI:
             return
 
         try:
+            row = self.edited_rows[self.current_idx]
+            primitive = self._row_primitive(row)
             pose = self._build_execution_pose(self.current_idx, closed_loop=self.closed_loop_var.get())
-            q = _q_from_row(self.edited_rows[self.current_idx], self.arm_side)
-            self._execute_primitive(pose, q)
+            q = _q_from_row(row, self.arm_side)
+            self._execute_primitive(pose, q, primitive=primitive)
             self._apply_gripper_for_waypoint(self.current_idx, blocking=False)
         except Exception as exc:
             messagebox.showerror("Execution Error", str(exc))
 
-    def _execute_primitive(self, pose, q):
-        primitive = self.primitive_var.get().strip()
+    def _execute_primitive(self, pose, q, primitive=None):
+        primitive = _normalize_primitive(primitive, fallback=self.primitive_var.get())
         speed = self.args.speed
         accel = self.args.acceleration
 
@@ -1532,9 +1674,11 @@ class WaypointTuningRunnerUI:
                     if self._stop_play.is_set():
                         break
                     self.root.after(0, lambda i=idx: self._set_waypoint(i))
+                    row = self.edited_rows[idx]
+                    primitive = self._row_primitive(row)
                     pose = self._build_execution_pose(idx, closed_loop=closed_loop)
-                    q = _q_from_row(self.edited_rows[idx], self.arm_side)
-                    self._execute_primitive(pose, q)
+                    q = _q_from_row(row, self.arm_side)
+                    self._execute_primitive(pose, q, primitive=primitive)
                     self._apply_gripper_for_waypoint(idx, blocking=True)
                     time.sleep(max(0.0, float(self.step_sleep_var.get())))
             except Exception as exc:
@@ -1687,6 +1831,8 @@ class WaypointTuningRunnerUI:
         for extra in [gripper_pct_col, gripper_legacy_col]:
             if extra not in header:
                 header.append(extra)
+        if "movement_primitive" not in header:
+            header.append("movement_primitive")
 
         with out_path.open("w", encoding="utf-8", newline="") as fh:
             writer = csv.DictWriter(fh, fieldnames=header, extrasaction="ignore")
@@ -1698,6 +1844,34 @@ class WaypointTuningRunnerUI:
                 writer.writerow(out)
 
         messagebox.showinfo("Saved", f"Tuned CSV written:\n{out_path}")
+
+    def _save_over_current_csv(self):
+        out_path = Path(self.current_file)
+        if not messagebox.askyesno("Confirm Overwrite", f"Overwrite current CSV?\n{out_path}"):
+            return
+
+        header = list(self.csv_header)
+        for extra in ["tune_source_csv", "tune_saved_at_iso"]:
+            if extra not in header:
+                header.append(extra)
+        gripper_pct_col = f"{self.arm_prefix}_gripper_open_pct"
+        gripper_legacy_col = f"{self.arm_prefix}_gripper_open"
+        for extra in [gripper_pct_col, gripper_legacy_col]:
+            if extra not in header:
+                header.append(extra)
+        if "movement_primitive" not in header:
+            header.append("movement_primitive")
+
+        with out_path.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=header, extrasaction="ignore")
+            writer.writeheader()
+            for row in self.edited_rows:
+                out = dict(row)
+                out["tune_source_csv"] = str(out_path)
+                out["tune_saved_at_iso"] = datetime.now().isoformat()
+                writer.writerow(out)
+
+        messagebox.showinfo("Saved", f"Updated current CSV:\n{out_path}")
 
     def _on_close(self):
         self._stop_play.set()
@@ -1735,7 +1909,7 @@ def parse_args():
     parser.add_argument("--default-tool-acceleration", type=float, default=1.0)
     parser.add_argument("--closed-loop-vision", action="store_true", help="Enable closed-loop playback option using live target updates")
     parser.add_argument("--task-graph-file", default="UR5/master_task_graph.json")
-    parser.add_argument("--vision-camera-scan-max-index", type=int, default=6)
+    parser.add_argument("--vision-camera-scan-max-index", type=int, default=12)
     parser.add_argument("--object-label", default="", help="Override dependent object label for distance/closed-loop computations")
     parser.add_argument("--play-step-sleep-s", type=float, default=0.2)
     parser.add_argument("--output-dir", default="UR5/tuned_waypoints")

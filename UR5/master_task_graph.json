@@ -185,59 +185,6 @@
       }
     },
     {
-      "name": "close_microwave_door",
-      "task_id": "close_door",
-      "points": 1,
-      "score_token": "close_microwave_door",
-      "max_score_count": 3,
-      "arm": "left",
-      "blocks_arms": [],
-      "unblocks_arms": [
-        "left"
-      ],
-      "prerequisites": [
-        "right_retract"
-      ],
-      "points_if_completed": {
-        "right_retract": 0
-      },
-      "params": {
-        "close_force": 15,
-        "resource_action": "release",
-        "resource": "table_area",
-        "resource_item": "microwave_open",
-        "pose_trace_csv_left": "trace_close_microwave_door_left.csv",
-        "pose_trace_csv_right": "trace_close_microwave_door_right.csv",
-        "named_waypoints_csv": "UR5/waypoints_close_door.csv"
-      }
-    },
-    {
-      "name": "open_microwave_door",
-      "task_id": "door_open",
-      "points": 1,
-      "score_token": "open_microwave_door",
-      "max_score_count": 3,
-      "arm": "left",
-      "blocks_arms": [],
-      "unblocks_arms": [],
-      "prerequisites": [
-        "press_stop"
-      ],
-      "points_if_completed": {},
-      "params": {
-        "door_handle_pose_source": "vision",
-        "safe_approach_offset_m": 0.1,
-        "requires_resource_occupied_for": "microwave_slot",
-        "requires_resource_available_for": "table_area",
-        "resource_action": "acquire",
-        "resource": "table_area",
-        "resource_item": "microwave_open",
-        "pose_trace_csv_left": "trace_open_microwave_door_left.csv",
-        "pose_trace_csv_right": "trace_open_microwave_door_right.csv",
-        "named_waypoints_csv": "UR5/waypoints_door_open_for_unload.csv"
-      }
-    },
-    {
       "name": "move_tray",
       "task_id": "move_tray",
       "points": 1,
@@ -252,7 +199,9 @@
       ],
       "points_if_completed": {},
       "params": {
-        "named_waypoints_csv": "UR5/waypoints_move_tray.csv"
+        "named_waypoints_csv": "UR5/waypoints_move_tray.csv",
+        "pose_trace_csv_left": "trace_move_tray_left.csv",
+        "pose_trace_csv_right": "trace_move_tray_right.csv"
       }
     },
     {
@@ -283,30 +232,6 @@
     {
       "name": "acquire_bottle",
       "task_id": "acquire_bottle",
-      "points": 0,
-      "arm": "left",
-      "blocks_arms": [],
-      "unblocks_arms": [],
-      "prerequisites": [
-        "move_tray"
-      ],
-      "points_if_completed": {},
-      "params": {
-        "target_label": "bottle_to_fill_cup",
-        "requires_resource_occupied_for": "table_area",
-        "requires_resource_item": "cup_filling",
-        "requires_arms_unblocked": [
-          "left"
-        ],
-        "pose_trace_csv_left": "trace_acquire_bottle_left.csv",
-        "pose_trace_csv_right": "trace_acquire_bottle_right.csv",
-        "named_waypoints_csv": "UR5/waypoints_acquire_bottle.csv",
-        "dependent_item_label": "bottle_to_fill_cup"
-      }
-    },
-    {
-      "name": "pour_drink_into_cup",
-      "task_id": "pour_drink",
       "points": 1,
       "score_token": "pour_drink_from_bottle_into_cup",
       "max_score_count": 1,
@@ -315,33 +240,21 @@
       "unblocks_arms": [],
       "prerequisites": [
         "move_tray",
-        "acquire_cup",
-        "acquire_bottle"
+        "acquire_cup"
       ],
       "points_if_completed": {},
       "params": {
-        "source_label": "bottle_to_fill_cup",
-        "target_label": "cup_for_drink",
+        "target_label": "bottle_to_fill_cup",
         "requires_resource_occupied_for": "table_area",
-        "requires_resource_item": "cup_filling"
-      }
-    },
-    {
-      "name": "return_bottle",
-      "task_id": "return_bottle",
-      "points": 0,
-      "arm": "left",
-      "blocks_arms": [],
-      "unblocks_arms": [],
-      "prerequisites": [
-        "pour_drink"
-      ],
-      "points_if_completed": {},
-      "params": {
-        "object_label": "bottle_to_fill_cup",
-        "destination_label": "table",
-        "requires_grasped_object": "bottle_to_fill_cup",
-        "clear_grasped_object": true
+        "requires_resource_item": "cup_filling",
+        "clear_grasped_object": true,
+        "requires_arms_unblocked": [
+          "left"
+        ],
+        "pose_trace_csv_left": "trace_acquire_bottle_left.csv",
+        "pose_trace_csv_right": "trace_acquire_bottle_right.csv",
+        "named_waypoints_csv": "UR5/waypoints_acquire_bottle.csv",
+        "dependent_item_label": "bottle_to_fill_cup"
       }
     },
     {
@@ -354,8 +267,7 @@
       "blocks_arms": [],
       "unblocks_arms": [],
       "prerequisites": [
-        "pour_drink",
-        "return_bottle",
+        "acquire_bottle",
         "stir_cup"
       ],
       "points_if_completed": {},
@@ -424,23 +336,6 @@
       }
     },
     {
-      "name": "right_arm_safe_retract",
-      "task_id": "right_retract",
-      "points": 0,
-      "arm": "right",
-      "blocks_arms": [],
-      "unblocks_arms": [],
-      "prerequisites": [],
-      "points_if_completed": {},
-      "params": {
-        "target_pose": "right_home",
-        "requires_resource_occupied_for": "microwave_slot",
-        "pose_trace_csv_left": "trace_right_arm_safe_retract_left.csv",
-        "pose_trace_csv_right": "trace_right_arm_safe_retract_right.csv",
-        "named_waypoints_csv": "UR5/waypoints_right_retract.csv"
-      }
-    },
-    {
       "name": "stir_cup",
       "task_id": "stir_cup",
       "points": 1,
@@ -450,7 +345,7 @@
       "blocks_arms": [],
       "unblocks_arms": [],
       "prerequisites": [
-        "pour_drink"
+        "acquire_bottle"
       ],
       "points_if_completed": {},
       "params": {

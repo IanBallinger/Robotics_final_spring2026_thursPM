@@ -1,5 +1,12 @@
 {
   "camera_orientation": {
+    "0": {
+      "axis_pair": [
+        "x",
+        "y"
+      ],
+      "plane": "xy"
+    },
     "1": {
       "axis_pair": [
         "x",
@@ -17,9 +24,9 @@
     "3": {
       "axis_pair": [
         "x",
-        "z"
+        "y"
       ],
-      "plane": "xz"
+      "plane": "xy"
     },
     "4": {
       "axis_pair": [
@@ -30,31 +37,22 @@
     }
   },
   "camera_plane_calibration": {
-    "3": {
-      "target_z_offset_m": {},
-      "x_offset_m": 0.0,
-      "x_scale": 1.0,
-      "xz_cross": 0.0,
-      "y_offset_m": 0.36,
-      "z_offset_m": 0.06,
-      "z_scale": 1.0,
-      "zx_cross": 0.0
-    },
     "4": {
       "target_z_offset_m": {},
       "x_offset_m": 0.0,
       "x_scale": 1.0,
       "xz_cross": 0.0,
-      "y_offset_m": 0.25,
-      "z_offset_m": 0.29,
+      "y_offset_m": 0.0,
+      "z_offset_m": 0.06,
       "z_scale": 1.0,
       "zx_cross": 0.0
     }
   },
   "camera_spec_selection": {
+    "0": 0,
     "1": 0,
     "2": 1,
-    "3": 2,
+    "3": 1,
     "4": 2
   },
   "item_settings": {
@@ -71,16 +69,16 @@
       "v_lo": 139
     },
     "blue plate": {
-      "close_iter": 8,
-      "h_hi": 126,
-      "h_lo": 73,
-      "kernel": 11,
+      "close_iter": 3,
+      "h_hi": 255,
+      "h_lo": 0,
+      "kernel": 5,
       "min_area": 500,
-      "open_iter": 1,
-      "s_hi": 236,
-      "s_lo": 110,
-      "v_hi": 214,
-      "v_lo": 164
+      "open_iter": 3,
+      "s_hi": 255,
+      "s_lo": 0,
+      "v_hi": 255,
+      "v_lo": 0
     },
     "blue plate edge": {
       "close_iter": 9,
