@@ -307,7 +307,7 @@ static void applyWheelCommand(const DesiredWheelVel& cmd) {
 static bool joystickToWheelCommand(const ControllerMessage& controller_msg,
                                   DesiredWheelVel& des_wheel_spd) {
   const float forward_input = controller_msg.joystick1.y;
-  const float turn_input = controller_msg.joystick2.x;
+  const float turn_input = controller_msg.joystick1.x;
 
   const float forward = fabs(forward_input) < JOYSTICK_DEADBAND
                             ? 0.0f
@@ -330,7 +330,7 @@ static bool joystickToWheelCommand(const ControllerMessage& controller_msg,
 
   // Differential/skid-steer mixing:
   //   joystick1.y -> forward/back
-  //   joystick2.y -> turn in place
+  //   joystick1.x -> turn in place
   // Legend:
   // w1 = left_front (MOTOR 2), w2 = right_front (MOTOR 3), w3 = left_rear (MOTOR 1), w4 = right_rear (MOTOR 4).
   const float left = forward + turn;

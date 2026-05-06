@@ -225,8 +225,9 @@ void loop() {
         controllerMessage.millis = now;
 
         // Shared controller packet mapping:
+        // - joystick1.x -> turn for drive MCU
         // - joystick1.y -> forward/back for drive MCU
-        // - joystick2.x -> turn for drive MCU and elevator jog source for elevator MCU
+        // - joystick2.x -> elevator jog source for elevator MCU
         // - joystick2.y -> pinch open/close source for elevator MCU
         controllerMessage.joystick1.x = filteredLeftCommand.x;
         controllerMessage.joystick1.y = filteredLeftCommand.y;
