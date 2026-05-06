@@ -287,6 +287,16 @@ def parse_args(args):
         default=right_arm_ip,
         metavar="<RIGHT robot IP address>")
     parser.add_argument(
+        "--single-arm-robot-ip",
+        dest="single_arm_ip",
+        help=(
+            "Optional test mode: bind both left/right logical lanes to one robot IP "
+            "for consecutive task sequencing on a single arm"
+        ),
+        type=str,
+        default="",
+        metavar="<single robot IP address>")
+    parser.add_argument(
         "-o",
         "--output",
         dest="output",
@@ -321,6 +331,11 @@ def parse_args(args):
         dest="no_robot",
         action="store_true",
         help="run without a robot connection (camera/vision only mode)")
+    parser.add_argument(
+        "--no-gripper",
+        dest="no_gripper",
+        action="store_true",
+        help="disable all gripper activation/control calls")
     parser.add_argument(
         "--camera",
         dest="camera",
@@ -554,6 +569,12 @@ def main(args):
     global recording_active, gripper_state_L, gripper_state_R, pending_waypoint_marks, waypoint_index
     
     args = parse_args(args)
+    if str(args.single_arm_ip or "").strip():
+        single_ip = str(args.single_arm_ip).strip()
+        args.ip = single_ip
+        args.right_ip = single_ip
+        print(f"Single-arm test mode enabled: left/right lanes mapped to {single_ip}")
+
     dt = 1 / args.frequency
     task_context = load_task_context(args.task_graph_file, args.task_id)
     if args.output and args.output != "robot_data.csv":
@@ -625,40 +646,43 @@ def main(args):
     # Initialize gripper control interfaces (best-effort per arm).
     gripper_L = None
     gripper_R = None
-    try:
-        rtde_c_L = RTDEControlInterface(args.ip)
-        rtde_c_R = RTDEControlInterface(args.right_ip)
-        if RobotiqGripper is None:
-            print("Warning: gripper module unavailable; recording will continue without gripper control.")
-        else:
-            try:
-                gripper_L = RobotiqGripper(rtde_c_L)
-                gripper_L.set_force(50)
-                gripper_L.set_speed(100)
-                gripper_L.open()
-                print("Left gripper initialized.")
-            except Exception as exc:
-                gripper_L = None
-                print(f"Warning: Left gripper unavailable: {exc}")
-
-            try:
-                gripper_R = RobotiqGripper(rtde_c_R)
-                gripper_R.set_force(50)
-                gripper_R.set_speed(100)
-                gripper_R.open()
-                print("Right gripper initialized.")
-            except Exception as exc:
-                gripper_R = None
-                print(f"Warning: Right gripper unavailable: {exc}")
-
-            if gripper_L is not None or gripper_R is not None:
-                print("Gripper control ready (use 'l' and 'r' keys to toggle).")
+    if args.no_gripper:
+        print("--no-gripper enabled: recording will run without gripper control.")
+    else:
+        try:
+            rtde_c_L = RTDEControlInterface(args.ip)
+            rtde_c_R = RTDEControlInterface(args.right_ip)
+            if RobotiqGripper is None:
+                print("Warning: gripper module unavailable; recording will continue without gripper control.")
             else:
-                print("Warning: no grippers initialized; recording will continue without gripper control.")
-    except Exception as e:
-        print(f"Warning: Could not initialize RTDE control for grippers: {e}")
-        gripper_L = None
-        gripper_R = None
+                try:
+                    gripper_L = RobotiqGripper(rtde_c_L)
+                    gripper_L.set_force(50)
+                    gripper_L.set_speed(100)
+                    gripper_L.open()
+                    print("Left gripper initialized.")
+                except Exception as exc:
+                    gripper_L = None
+                    print(f"Warning: Left gripper unavailable: {exc}")
+
+                try:
+                    gripper_R = RobotiqGripper(rtde_c_R)
+                    gripper_R.set_force(50)
+                    gripper_R.set_speed(100)
+                    gripper_R.open()
+                    print("Right gripper initialized.")
+                except Exception as exc:
+                    gripper_R = None
+                    print(f"Warning: Right gripper unavailable: {exc}")
+
+                if gripper_L is not None or gripper_R is not None:
+                    print("Gripper control ready (use 'l' and 'r' keys to toggle).")
+                else:
+                    print("Warning: no grippers initialized; recording will continue without gripper control.")
+        except Exception as e:
+            print(f"Warning: Could not initialize RTDE control for grippers: {e}")
+            gripper_L = None
+            gripper_R = None
 
     # Start keyboard listener in background thread
     listener = Listener(on_press=on_press, on_release=on_release)

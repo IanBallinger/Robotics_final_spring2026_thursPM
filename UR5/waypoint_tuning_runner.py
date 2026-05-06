@@ -534,6 +534,7 @@ class WaypointTuningRunnerUI:
         self.args = args
         self.arm_side = args.arm_side
         self.arm_prefix = _arm_prefix(self.arm_side)
+        self._vision_disabled = bool(getattr(args, "no_camera", False))
 
         self.current_file = Path(args.waypoints_csv)
         pattern = str(self.current_file.parent / "*.csv")
@@ -558,7 +559,8 @@ class WaypointTuningRunnerUI:
         self.vision_lock = threading.Lock()
         self._vision_start_attempted = False
         self._vision_start_error = ""
-        self._ensure_vision_feeds(reason="startup")
+        if bool(args.closed_loop_vision) and not self._vision_disabled:
+            self._ensure_vision_feeds(reason="startup")
 
         self.robot = None
         if args.mock_robot:
@@ -652,6 +654,9 @@ class WaypointTuningRunnerUI:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _ensure_vision_feeds(self, reason=""):
+        if self._vision_disabled:
+            self._vision_start_error = "vision disabled by --no-camera"
+            return False
         if self.vision_feeds is not None:
             return True
         if _get_or_start_vision_feeds is None:
@@ -1908,6 +1913,7 @@ def parse_args():
     parser.add_argument("--default-tool-speed", type=float, default=0.1)
     parser.add_argument("--default-tool-acceleration", type=float, default=1.0)
     parser.add_argument("--closed-loop-vision", action="store_true", help="Enable closed-loop playback option using live target updates")
+    parser.add_argument("--no-camera", action="store_true", help="Disable all vision/camera feed startup")
     parser.add_argument("--task-graph-file", default="UR5/master_task_graph.json")
     parser.add_argument("--vision-camera-scan-max-index", type=int, default=12)
     parser.add_argument("--object-label", default="", help="Override dependent object label for distance/closed-loop computations")

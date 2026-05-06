@@ -213,6 +213,9 @@ class Supervisor:
         self._gripper_activation_lock = threading.Lock()
         self._gripper_activation_attempted: Dict[str, bool] = {"left": False, "right": False}
         self._default_open_loop_mode: bool = False
+        self._single_arm_mode: str = ""
+        self._no_gripper: bool = False
+        self._no_camera: bool = False
         self.subtasks_dir = subtasks_dir or (_THIS_DIR / "subtasks")
         self._ensure_subtasks_dir()
         self.reload_subtasks()
@@ -220,13 +223,64 @@ class Supervisor:
     def set_default_open_loop_mode(self, enabled: bool):
         self._default_open_loop_mode = bool(enabled)
 
+    def set_single_arm_mode(self, arm: str):
+        normalized = str(arm or "").strip().lower()
+        if normalized and normalized not in {"left", "right"}:
+            raise ValueError("single_arm_mode must be one of: left, right")
+        self._single_arm_mode = normalized
+
+    def set_no_gripper(self, enabled: bool):
+        self._no_gripper = bool(enabled)
+
+    def set_no_camera(self, enabled: bool):
+        self._no_camera = bool(enabled)
+
+    def _is_mocked_scheduler_arm(self, arm_name: str) -> bool:
+        if self._single_arm_mode == "left":
+            return arm_name == "right"
+        if self._single_arm_mode == "right":
+            return arm_name == "left"
+        return False
+
+    def _task_is_mocked_for_scheduler(self, task: QueuedTask, dispatch_arm: Optional[str] = None) -> bool:
+        if task.name == "_idle_wait":
+            return False
+
+        if dispatch_arm in {"left", "right"}:
+            if self._is_mocked_scheduler_arm(str(dispatch_arm)):
+                return True
+
+        target_arms = self._task_target_arms(task)
+        if not target_arms:
+            # arm=any tasks run on the active physical lane when single-arm mode is enabled.
+            return False
+
+        if task.arm == "both":
+            return bool(self._single_arm_mode)
+
+        return all(self._is_mocked_scheduler_arm(arm) for arm in target_arms)
+
+    def _run_task_or_mock(self, task: QueuedTask, dispatch_arm: Optional[str] = None) -> bool:
+        if self._task_is_mocked_for_scheduler(task, dispatch_arm=dispatch_arm):
+            return True
+        return bool(self.run_subtask(task.name, params=task.params))
+
     def _activate_scheduler_grippers_once(self):
         """Activate each arm gripper once at scheduler startup.
 
         This keeps activation out of per-task execution paths.
         """
+        if self._no_gripper:
+            with self._gripper_activation_lock:
+                self._gripper_activation_attempted = {"left": True, "right": True}
+            print("[Supervisor] --no-gripper enabled: scheduler gripper activation skipped.")
+            return
+
         with self._gripper_activation_lock:
             for arm_name, arm_ip in (("left", self.left_ip), ("right", self.right_ip)):
+                if self._is_mocked_scheduler_arm(arm_name):
+                    self._gripper_activation_attempted[arm_name] = True
+                    continue
                 if self._gripper_activation_attempted.get(arm_name, False):
                     continue
 
@@ -460,6 +514,7 @@ class Supervisor:
         no_robot: bool = False,
         camera_enabled: bool = True,
         camera_index: int = 2,
+        no_gripper: bool = False,
     ):
         """Run synchronized left/right recording with optional UDP + camera stream."""
         dt = 1.0 / frequency
@@ -505,17 +560,20 @@ class Supervisor:
 
         gripper_left = None
         gripper_right = None
-        try:
-            gripper_left = RobotiqGripper(rtde_c_left)
-            gripper_right = RobotiqGripper(rtde_c_right)
-            for g in (gripper_left, gripper_right):
-                g.set_force(100)
-                g.set_speed(100)
-                g.open()
-        except Exception as exc:
-            print(f"[Supervisor] Gripper init warning (should you be in remote mode?): {exc}")
-            gripper_left = None
-            gripper_right = None
+        if no_gripper or self._no_gripper:
+            print("[Supervisor] --no-gripper enabled: recording session gripper control disabled.")
+        else:
+            try:
+                gripper_left = RobotiqGripper(rtde_c_left)
+                gripper_right = RobotiqGripper(rtde_c_right)
+                for g in (gripper_left, gripper_right):
+                    g.set_force(100)
+                    g.set_speed(100)
+                    g.open()
+            except Exception as exc:
+                print(f"[Supervisor] Gripper init warning (should you be in remote mode?): {exc}")
+                gripper_left = None
+                gripper_right = None
 
         output_path = Path(output_base)
         left_output = str(output_path.with_name(f"{output_path.stem}_left.csv"))
@@ -1895,6 +1953,9 @@ class Supervisor:
     def _halt_robot_motion_best_effort(self) -> str:
         notes: List[str] = []
         for arm_name, ip in (("left", self.left_ip), ("right", self.right_ip)):
+            if self._is_mocked_scheduler_arm(arm_name):
+                notes.append(f"{arm_name} stop=mocked")
+                continue
             arm = None
             try:
                 arm = UR5Arm(ip, verbose=False)
@@ -1991,6 +2052,10 @@ class Supervisor:
                 "127.0.0.1",
                 "--stream-udp-port",
                 "9999",
+                "--robot_ip",
+                str(self.left_ip),
+                "--right-robot-ip",
+                str(self.right_ip),
                 "--task-graph-file",
                 "UR5/master_task_graph.json",
                 "--task-id",
@@ -1999,6 +2064,8 @@ class Supervisor:
                 named_csv,
                 "--write-task-graph-labels",
             ]
+            if self._no_gripper:
+                args.append("--no-gripper")
             if offline_mode:
                 args.extend(["--no-robot", "--no-camera"])
             recorder_launch_msg = self._spawn_tool_process(args)
@@ -2023,6 +2090,8 @@ class Supervisor:
             ]
             if robot_ip and not offline_mode:
                 args.extend(["--robot-ip", robot_ip])
+            if self._no_camera:
+                args.append("--no-camera")
             if offline_mode:
                 args.extend([
                     "--mock-robot",
@@ -2097,7 +2166,7 @@ class Supervisor:
         ok = False
         err = ""
         try:
-            ok = self.run_subtask(task.name, params=task.params)
+            ok = self._run_task_or_mock(task, dispatch_arm=arm_name)
         except Exception as exc:
             err = str(exc)
 
@@ -2138,7 +2207,7 @@ class Supervisor:
         ok = False
         err = ""
         try:
-            ok = self.run_subtask(task.name, params=task.params)
+            ok = self._run_task_or_mock(task, dispatch_arm=arm_name)
         except Exception as exc:
             err = str(exc)
 
@@ -2237,6 +2306,9 @@ class Supervisor:
         normalized_max_score_count = self._normalize_max_score_count(max_score_count)
         normalized_enqueue_after = str(enqueue_after_task_id or "").strip()
         params_dict = dict(params or {})
+        if self._no_camera and name != "_idle_wait":
+            params_dict["use_camera_offsets"] = False
+            params_dict["no_camera"] = True
         if self._default_open_loop_mode and name != "_idle_wait" and "use_camera_offsets" not in params_dict:
             params_dict["use_camera_offsets"] = False
         if name != "_idle_wait":
@@ -2517,7 +2589,11 @@ class Supervisor:
         # Operational override: force single-lane sequential scheduling.
         if parallel_arms:
             print("[Supervisor] Forcing sequential scheduler mode (parallel dispatch disabled).")
-        return self._run_autonomy_sequential(max_tasks=max_tasks, visualizer=visualizer)
+        return self._run_autonomy_sequential(
+            max_tasks=max_tasks,
+            visualizer=visualizer,
+            start_paused=start_paused,
+        )
 
         if start_paused:
             self.pause()
@@ -2570,7 +2646,7 @@ class Supervisor:
                 ok = False
                 err = None
                 try:
-                    ok = self.run_subtask(task.name, params=task.params)
+                    ok = self._run_task_or_mock(task, dispatch_arm=arm_name)
                 except Exception as exc:
                     err = exc
 
@@ -2779,12 +2855,22 @@ class Supervisor:
             for t in workers.values():
                 t.join(timeout=1.0)
 
-    def _run_autonomy_sequential(self, max_tasks: Optional[int] = None, visualizer=None) -> List[Tuple[str, bool, float, str]]:
+    def _run_autonomy_sequential(
+        self,
+        max_tasks: Optional[int] = None,
+        visualizer=None,
+        start_paused: bool = False,
+    ) -> List[Tuple[str, bool, float, str]]:
         """Original sequential autonomy loop."""
         self._activate_scheduler_grippers_once()
 
         self._completed_tokens = set()
-        self._autonomy_pause_event.clear()
+        if start_paused:
+            self.pause()
+            self._autonomy_pause_event.set()
+        else:
+            self.play()
+            self._autonomy_pause_event.clear()
         self._reset_visual_tracking()
         self._reset_microwave_door_completion_flags()
         self._blocked_arms = {}
@@ -2802,7 +2888,11 @@ class Supervisor:
             event="start",
             arm_busy=arm_busy,
             running_by_arm=running_by_arm,
-            message="sequential autonomy run started",
+            message=(
+                "sequential autonomy run started in paused state; use Resume Scheduler to begin"
+                if start_paused
+                else "sequential autonomy run started"
+            ),
         )
 
         while self._task_heap:
@@ -2830,7 +2920,15 @@ class Supervisor:
                 break
 
             current_points = self._effective_points(queued)
-            running_by_arm[queued.arm if queued.arm in {"left", "right"} else "left"] = queued.task_id
+            if queued.arm == "right":
+                dispatch_arm = "right"
+            elif queued.arm == "left":
+                dispatch_arm = "left"
+            elif self._single_arm_mode in {"left", "right"}:
+                dispatch_arm = self._single_arm_mode
+            else:
+                dispatch_arm = "left"
+            running_by_arm[dispatch_arm] = queued.task_id
             self._apply_resource_action_on_start(queued)
             self._push_visual_snapshot(
                 visualizer,
@@ -2839,7 +2937,7 @@ class Supervisor:
                 running_by_arm=running_by_arm,
                 message=f"dispatched {queued.task_id}",
             )
-            ok = self.run_subtask(queued.name, params=queued.params)
+            ok = self._run_task_or_mock(queued, dispatch_arm=dispatch_arm)
             if ok:
                 self._record_score_if_applicable(queued, current_points)
                 self._record_completion_bonuses(queued)
@@ -3291,6 +3389,7 @@ def _build_parser() -> argparse.ArgumentParser:
     rec.add_argument("--stream-udp-host", type=str, default="")
     rec.add_argument("--stream-udp-port", type=int, default=9999)
     rec.add_argument("--no-robot", action="store_true")
+    rec.add_argument("--no-gripper", action="store_true")
     rec.add_argument("--no-camera", action="store_true")
     rec.add_argument("--camera-index", type=int, default=2)
 
@@ -3382,13 +3481,64 @@ def _build_parser() -> argparse.ArgumentParser:
             "for queued tasks unless explicitly overridden in params."
         ),
     )
+    run_task.add_argument(
+        "--single-arm-robot-ip",
+        type=str,
+        default="",
+        help=(
+            "Optional test mode: map both logical left/right lanes to one UR robot IP "
+            "for single-arm execution setups"
+        ),
+    )
+    run_task.add_argument(
+        "--single-arm-mode",
+        type=str,
+        default="",
+        choices=["left", "right"],
+        help=(
+            "Optional scheduler mode: only the selected arm runs on hardware; "
+            "the other arm lane is auto-mocked for progression"
+        ),
+    )
+    run_task.add_argument(
+        "--no-gripper",
+        action="store_true",
+        help="disable all gripper activation/control calls",
+    )
+    run_task.add_argument(
+        "--no-camera",
+        action="store_true",
+        help="disable camera/vision-feed usage for scheduler subtasks",
+    )
 
     return parser
 
 
 def main(argv: Optional[List[str]] = None):
     args = _build_parser().parse_args(argv)
-    supervisor = Supervisor()
+    single_arm_ip = str(getattr(args, "single_arm_robot_ip", "") or "").strip()
+    if single_arm_ip:
+        supervisor = Supervisor(left_ip=single_arm_ip, right_ip=single_arm_ip)
+        print(f"[Supervisor] Single-arm override enabled: left/right mapped to {single_arm_ip}")
+    else:
+        supervisor = Supervisor()
+
+    if args.command == "run-subtask":
+        single_arm_mode = str(getattr(args, "single_arm_mode", "") or "").strip().lower()
+        if single_arm_mode:
+            supervisor.set_single_arm_mode(single_arm_mode)
+            mocked_arm = "right" if single_arm_mode == "left" else "left"
+            print(
+                f"[Supervisor] Single-arm mode enabled: active={single_arm_mode}, mocked={mocked_arm}"
+            )
+
+    if bool(getattr(args, "no_gripper", False)):
+        supervisor.set_no_gripper(True)
+        print("[Supervisor] --no-gripper enabled.")
+
+    if bool(getattr(args, "no_camera", False)):
+        supervisor.set_no_camera(True)
+        print("[Supervisor] --no-camera enabled.")
 
     if args.command == "record":
         supervisor.run_recording_session(
@@ -3397,6 +3547,7 @@ def main(argv: Optional[List[str]] = None):
             stream_udp_host=args.stream_udp_host,
             stream_udp_port=args.stream_udp_port,
             no_robot=args.no_robot,
+            no_gripper=args.no_gripper,
             camera_enabled=(not args.no_camera),
             camera_index=args.camera_index,
         )

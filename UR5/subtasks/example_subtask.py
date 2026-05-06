@@ -1224,6 +1224,161 @@ def _load_named_waypoints(csv_path: Path, task_id: str = "", arm_prefix: str = "
 def register_subtasks(registry):
     """Register simple team-editable subtasks."""
 
+    def _gripper_disabled(supervisor, params):
+        if bool(params.get("no_gripper", False)):
+            return True
+        if bool(getattr(supervisor, "_no_gripper", False)):
+            return True
+        return False
+
+    def _call_with_timeout(task_name, label, timeout_s, fn, require_truthy_result=False):
+        state = {"ok": False, "exc": None, "result": None}
+
+        def _worker():
+            try:
+                state["result"] = fn()
+                state["ok"] = True
+            except Exception as exc:
+                state["exc"] = exc
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        t.join(timeout=max(0.01, float(timeout_s)))
+        if t.is_alive():
+            print(f"[{task_name}] Warning: {label} timed out after {float(timeout_s):.2f}s")
+            return False
+        if state["exc"] is not None:
+            print(f"[{task_name}] Warning: {label} failed: {state['exc']}")
+            return False
+        if require_truthy_result and not bool(state["result"]):
+            print(f"[{task_name}] Warning: {label} returned failure")
+            return False
+        return True
+
+    def _init_gripper_best_effort(task_name, rtde_control, force, speed, timeout_s):
+        if RobotiqGripper is None:
+            print(f"[{task_name}] robotiq_gripper_control not available; gripper waypoint safeguards disabled")
+            return None
+
+        holder = {"gripper": None}
+
+        def _setup():
+            g = RobotiqGripper(rtde_control)
+            g.set_force(int(force))
+            g.set_speed(int(speed))
+            holder["gripper"] = g
+
+        ok = _call_with_timeout(
+            task_name,
+            label="gripper initialization",
+            timeout_s=timeout_s,
+            fn=_setup,
+        )
+        if not ok:
+            return None
+
+        print(f"[{task_name}] Gripper controller ready (force={int(force)}, speed={int(speed)})")
+        return holder["gripper"]
+
+    def _connect_arm_with_timeout(task_name, arm_ip, timeout_s):
+        holder = {"arm": None}
+
+        def _connect():
+            holder["arm"] = UR5Arm(arm_ip, verbose=False)
+
+        print(f"[{task_name}] Connecting to arm {arm_ip} (timeout={float(timeout_s):.2f}s)")
+        ok = _call_with_timeout(
+            task_name,
+            label=f"arm connect {arm_ip}",
+            timeout_s=timeout_s,
+            fn=_connect,
+        )
+        if not ok or holder["arm"] is None:
+            raise RuntimeError(f"Failed to connect to arm {arm_ip} within timeout")
+        return holder["arm"]
+
+    def _execute_waypoint_motion(
+        task_name,
+        arm,
+        wp,
+        speed,
+        acceleration,
+        motion_timeout_s,
+        prefer_tcp=True,
+        use_linear=False,
+    ):
+        tcp_position = wp.get("tcp_position")
+        q_position = wp.get("q_position")
+
+        if prefer_tcp and tcp_position is not None:
+            motion_label = (
+                f"move_linear_to_pose wp#{wp['index']}"
+                if use_linear
+                else f"move_to_pose wp#{wp['index']}"
+            )
+            if use_linear:
+                motion_fn = lambda: arm.move_linear_to_pose(
+                    tcp_position,
+                    speed=speed,
+                    acceleration=acceleration,
+                    asynchronous=False,
+                )
+            else:
+                motion_fn = lambda: arm.move_to_pose(
+                    tcp_position,
+                    speed=speed,
+                    acceleration=acceleration,
+                    asynchronous=False,
+                )
+            ok_motion = _call_with_timeout(
+                task_name,
+                label=motion_label,
+                timeout_s=motion_timeout_s,
+                fn=motion_fn,
+                require_truthy_result=True,
+            )
+        elif q_position is not None:
+            motion_label = f"move_to_joint_position wp#{wp['index']}"
+            ok_motion = _call_with_timeout(
+                task_name,
+                label=motion_label,
+                timeout_s=motion_timeout_s,
+                fn=lambda: arm.move_to_joint_position(
+                    q_position,
+                    speed=speed,
+                    acceleration=acceleration,
+                    asynchronous=False,
+                ),
+                require_truthy_result=True,
+            )
+        elif tcp_position is not None:
+            # Fallback to TCP-space when q is missing.
+            motion_label = f"move_to_pose wp#{wp['index']}"
+            ok_motion = _call_with_timeout(
+                task_name,
+                label=motion_label,
+                timeout_s=motion_timeout_s,
+                fn=lambda: arm.move_to_pose(
+                    tcp_position,
+                    speed=speed,
+                    acceleration=acceleration,
+                    asynchronous=False,
+                ),
+                require_truthy_result=True,
+            )
+        else:
+            raise RuntimeError(
+                f"Waypoint missing both tcp_position and q_position at index={wp['index']}"
+            )
+
+        if not ok_motion:
+            try:
+                arm.stop_arm(deceleration=10.0, asynchronous=True, use_linear=False)
+            except Exception:
+                pass
+            return False
+        return True
+
     def _example(supervisor, params):
         print("[example_subtask] params:", params)
         frames = supervisor.compute_task_frames()
@@ -1248,6 +1403,8 @@ def register_subtasks(registry):
         task_id = str(params.get("task_id", default_task_id))
         speed = params.get("speed", None)
         acceleration = params.get("acceleration", None)
+        arm_connect_timeout_s = float(params.get("arm_connect_timeout_s", 5.0))
+        motion_timeout_s = float(params.get("motion_timeout_s", 20.0))
 
         if not waypoints_csv.exists():
             raise FileNotFoundError(f"Named waypoints CSV not found: {waypoints_csv}")
@@ -1259,49 +1416,38 @@ def register_subtasks(registry):
             )
 
         arm_ip = supervisor.right_ip if arm_side == "right" else supervisor.left_ip
-        arm = UR5Arm(arm_ip, verbose=False)
+        arm = None
         gripper = None
         gripper_force = int(params.get("gripper_force", 100))
         gripper_speed = int(params.get("gripper_speed", 100))
         gripper_settle_s = float(params.get("gripper_settle_s", 0.15))
-
-        if RobotiqGripper is None:
-            print(f"[{task_name}] robotiq_gripper_control not available; gripper waypoint safeguards disabled")
-        else:
-            try:
-                gripper = RobotiqGripper(arm.rtde_control)
-                gripper.set_force(gripper_force)
-                gripper.set_speed(gripper_speed)
-                print(f"[{task_name}] Gripper controller ready (force={gripper_force}, speed={gripper_speed})")
-            except Exception as exc:
-                print(f"[{task_name}] Warning: failed to initialize gripper controller: {exc}")
-                gripper = None
+        gripper_call_timeout_s = float(params.get("gripper_call_timeout_s", 1.0))
 
         try:
+            arm = _connect_arm_with_timeout(task_name, arm_ip, timeout_s=arm_connect_timeout_s)
+            if _gripper_disabled(supervisor, params):
+                print(f"[{task_name}] Gripper disabled by runtime flag")
+            else:
+                gripper = _init_gripper_best_effort(
+                    task_name,
+                    arm.rtde_control,
+                    force=gripper_force,
+                    speed=gripper_speed,
+                    timeout_s=gripper_call_timeout_s,
+                )
             print(f"[{task_name}] Replaying {len(waypoints)} waypoints from {waypoints_csv}")
             for wp in waypoints:
                 target_gripper_open_pct = wp.get("gripper_open_pct", None)
-                tcp_position = wp.get("tcp_position")
-                q_position = wp.get("q_position")
-
-                if tcp_position is not None:
-                    ok = arm.move_to_pose(
-                        tcp_position,
-                        speed=speed,
-                        acceleration=acceleration,
-                        asynchronous=False,
-                    )
-                elif q_position is not None:
-                    ok = arm.move_to_joint_position(
-                        q_position,
-                        speed=speed,
-                        acceleration=acceleration,
-                        asynchronous=False,
-                    )
-                else:
-                    raise RuntimeError(
-                        f"Waypoint missing both tcp_position and q_position at index={wp['index']}"
-                    )
+                ok = _execute_waypoint_motion(
+                    task_name,
+                    arm,
+                    wp,
+                    speed=speed,
+                    acceleration=acceleration,
+                    motion_timeout_s=motion_timeout_s,
+                    prefer_tcp=True,
+                    use_linear=False,
+                )
                 if not ok:
                     raise RuntimeError(
                         f"Failed at waypoint index={wp['index']} name={wp['name'] or '<unnamed>'}"
@@ -1311,15 +1457,29 @@ def register_subtasks(registry):
                 if gripper is not None and target_gripper_open_pct is not None:
                     # Gripper open percentage maps to 0..85mm.
                     pos_mm = float(target_gripper_open_pct) * GRIPPER_OPEN_MM_MAX / 100.0
-                    gripper.move(int(round(pos_mm)))
+                    ok_gripper = _call_with_timeout(
+                        task_name,
+                        label=f"gripper move at waypoint {wp['index']}",
+                        timeout_s=gripper_call_timeout_s,
+                        fn=lambda: gripper.move(int(round(pos_mm))),
+                    )
+                    if not ok_gripper:
+                        gripper = None
                     if gripper_settle_s > 0:
                         time.sleep(gripper_settle_s)
 
             arm.stop_arm(use_linear=False)
             print(f"[{task_name}] Waypoint replay complete")
             return True
+        except Exception as exc:
+            print(f"[{task_name}] Waypoint replay aborted: {exc}")
+            return False
         finally:
-            arm.disconnect()
+            try:
+                if arm is not None:
+                    arm.disconnect()
+            except Exception:
+                pass
 
     def _run_named_waypoint_task_camera_aware(
         supervisor,
@@ -1334,11 +1494,17 @@ def register_subtasks(registry):
         task_id = str(params.get("task_id", default_task_id))
         speed = params.get("speed", None)
         acceleration = params.get("acceleration", None)
+        arm_connect_timeout_s = float(params.get("arm_connect_timeout_s", 5.0))
+        motion_timeout_s = float(params.get("motion_timeout_s", 20.0))
         gripper_force = int(params.get("gripper_force", 100))
         gripper_speed = int(params.get("gripper_speed", 100))
         gripper_settle_s = float(params.get("gripper_settle_s", 0.15))
+        gripper_call_timeout_s = float(params.get("gripper_call_timeout_s", 1.0))
         offset_gain = float(params.get("vision_offset_gain", 1.0))
         use_camera_offsets = bool(params.get("use_camera_offsets", True))
+        no_camera = bool(params.get("no_camera", False)) or bool(getattr(supervisor, "_no_camera", False))
+        if no_camera:
+            use_camera_offsets = False
 
         if not waypoints_csv.exists():
             raise FileNotFoundError(f"Named waypoints CSV not found: {waypoints_csv}")
@@ -1360,29 +1526,32 @@ def register_subtasks(registry):
         target_label = _resolve_primary_target_label(raw_target_label)
 
         vision_feeds = _get_or_start_vision_feeds(params=params) if use_camera_offsets else None
+        if no_camera:
+            print(f"[{task_name}] Camera disabled by runtime flag")
         if use_camera_offsets and not target_label:
             print(f"[{task_name}] Vision offsets enabled but no recognizable target label was provided")
 
         arm_ip = supervisor.right_ip if arm_side == "right" else supervisor.left_ip
-        arm = UR5Arm(arm_ip, verbose=False)
+        arm = None
         gripper = None
 
-        if RobotiqGripper is None:
-            print(f"[{task_name}] robotiq_gripper_control not available; gripper waypoint safeguards disabled")
-        else:
-            try:
-                gripper = RobotiqGripper(arm.rtde_control)
-                gripper.set_force(gripper_force)
-                gripper.set_speed(gripper_speed)
-                print(f"[{task_name}] Gripper controller ready (force={gripper_force}, speed={gripper_speed})")
-            except Exception as exc:
-                print(f"[{task_name}] Warning: failed to initialize gripper controller: {exc}")
-                gripper = None
-
         try:
+            arm = _connect_arm_with_timeout(task_name, arm_ip, timeout_s=arm_connect_timeout_s)
+            if _gripper_disabled(supervisor, params):
+                print(f"[{task_name}] Gripper disabled by runtime flag")
+            else:
+                gripper = _init_gripper_best_effort(
+                    task_name,
+                    arm.rtde_control,
+                    force=gripper_force,
+                    speed=gripper_speed,
+                    timeout_s=gripper_call_timeout_s,
+                )
             print(f"[{task_name}] Replaying {len(waypoints)} waypoints from {waypoints_csv}")
             if target_label:
                 print(f"[{task_name}] Camera offset target: {target_label}")
+
+            is_press_stop_task = str(task_name).strip() == "press_microwave_stop" or str(task_id).strip() == "press_stop"
 
             for wp in waypoints:
                 target_gripper_open_pct = wp.get("gripper_open_pct", None)
@@ -1407,20 +1576,16 @@ def register_subtasks(registry):
                                 f"dx={dx:+.4f}, d{secondary_axis}={d_secondary:+.4f}"
                             )
 
-                if move_wp.get("tcp_position") is not None:
-                    ok = arm.move_to_pose(
-                        move_wp["tcp_position"],
-                        speed=speed,
-                        acceleration=acceleration,
-                        asynchronous=False,
-                    )
-                else:
-                    ok = arm.move_to_joint_position(
-                        move_wp.get("q_position"),
-                        speed=speed,
-                        acceleration=acceleration,
-                        asynchronous=False,
-                    )
+                ok = _execute_waypoint_motion(
+                    task_name,
+                    arm,
+                    move_wp,
+                    speed=speed,
+                    acceleration=acceleration,
+                    motion_timeout_s=motion_timeout_s,
+                    prefer_tcp=True if is_press_stop_task else bool(use_camera_offsets and move_wp.get("tcp_position") is not None),
+                    use_linear=True if is_press_stop_task else False,
+                )
 
                 if not ok:
                     raise RuntimeError(
@@ -1431,15 +1596,29 @@ def register_subtasks(registry):
                 if gripper is not None and target_gripper_open_pct is not None:
                     # Gripper open percentage maps to 0..85mm.
                     pos_mm = float(target_gripper_open_pct) * GRIPPER_OPEN_MM_MAX / 100.0
-                    gripper.move(int(round(pos_mm)))
+                    ok_gripper = _call_with_timeout(
+                        task_name,
+                        label=f"gripper move at waypoint {wp['index']}",
+                        timeout_s=gripper_call_timeout_s,
+                        fn=lambda: gripper.move(int(round(pos_mm))),
+                    )
+                    if not ok_gripper:
+                        gripper = None
                     if gripper_settle_s > 0:
                         time.sleep(gripper_settle_s)
 
             arm.stop_arm(use_linear=False)
             print(f"[{task_name}] Camera-aware waypoint replay complete")
             return True
+        except Exception as exc:
+            print(f"[{task_name}] Camera-aware waypoint replay aborted: {exc}")
+            return False
         finally:
-            arm.disconnect()
+            try:
+                if arm is not None:
+                    arm.disconnect()
+            except Exception:
+                pass
 
     def _register_stub_task(task_name, arm_side="right", default_csv=None):
         """Register a lightweight runner for graph tasks not fully implemented yet.
