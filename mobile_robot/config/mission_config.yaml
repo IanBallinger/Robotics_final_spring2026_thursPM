@@ -1,8 +1,7 @@
-# Minimal AprilTag-servo mission configuration.
+# Minimal waypoint-tracking mission configuration.
 #
-# Each task is an ordered list of AprilTag targets. The robot searches for the
-# current tag, keeps it centered in the camera image with proportional guidance,
-# and stops at the requested standoff distance.
+# Each task specifies a goal pose on the map. The robot tracks that goal pose
+# using the onboard localization estimate and waypoint controller.
 
 frame: global
 
@@ -81,20 +80,16 @@ mission_runtime:
 tasks:
   - name: pickup_tray
     desired_elevator_height_m: 0.0
-    tag_targets:
-      - tag_id: 5
-        desired_distance_m: 0.70
-      # - tag_id: 6
-      #   desired_distance_m: 0.60
+    goal:
+      position: {x: 0.315, y: 0.59}
+      heading: 0.0
     completion_conditions:
       - task_elapsed_s >= 2.0
 
   - name: deliver_tray
     desired_elevator_height_m: 0.0
-    tag_targets:
-      - tag_id: 4
-        desired_distance_m: 0.75
-      - tag_id: 3
-        desired_distance_m: 0.65
+    goal:
+      position: {x: 2.0575, y: 2.8525}
+      heading: 0.0
     completion_conditions:
       - task_elapsed_s >= 1.0

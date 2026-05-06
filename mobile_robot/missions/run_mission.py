@@ -1,13 +1,13 @@
 #!/usr/bin/env python
-"""Simple AprilTag-servo mission runner using a finite state machine.
+"""Simple waypoint-tracking mission runner using a finite state machine.
 
 Mission logic:
-- Each task contains one or more AprilTag targets.
-- The robot searches for the current tag.
-- It uses proportional guidance to keep the tag centered in the image while
-  driving to a requested standoff distance.
-- After all tag targets in the task are reached, the task optionally executes a
-  timed manipulator action / completion-condition hold.
+- Each task specifies a goal pose in the map frame.
+- The robot tracks that goal using the localization estimate and waypoint
+  controller.
+- AprilTag detections are used only as localization measurements when enabled.
+- After the goal is reached, the task optionally executes a timed manipulator
+  action / completion-condition hold.
 
 This intentionally avoids global path planning and py_trees.
 """
@@ -36,7 +36,6 @@ if SRC_DIR not in sys.path:
 
 from autonomy.mission_runner import (  # noqa: E402
     Pose2D,
-    TagTarget,
     Task,
     default_camera_path,
     default_localization_path,
@@ -61,7 +60,8 @@ from localization.person_detection import PersonDetector  # noqa: E402
 from serial_connection.elevator_serial_con import ElevatorSerialConnect  # noqa: E402
 from serial_connection.serial_con import SerialConnect  # noqa: E402
 from serial_connection.serialization import EncoderReading, IMUReading  # noqa: E402
-from guidance.waypoint_controller import CascadedWaypointController  # noqa: E402
+from guidance.waypoint_controller import CascadedWaypointController, MapPoseVelocity, wrap_to_pi  # noqa: E402
+from planning.a_star import Waypoint  # noqa: E402
 
 
 DEBUG_WHEEL_ACKS = True
@@ -69,7 +69,7 @@ DEBUG_WHEEL_ACKS = True
 
 class MissionPhase(Enum):
     IDLE = auto()
-    SEEK_TAG = auto()
+    SEEK_GOAL = auto()
     EXECUTE_TASK = auto()
     STOP_FOR_OBSTACLE = auto()
     DONE = auto()
@@ -132,9 +132,11 @@ class TelemetryPacket:
     phase: str
     task_index: int
     current_task: str
-    current_tag_id: Optional[str]
-    tag_distance_m: Optional[float]
-    tag_center_error_px: Optional[float]
+    goal_x: Optional[float]
+    goal_y: Optional[float]
+    goal_heading: Optional[float]
+    goal_distance_error_m: Optional[float]
+    goal_heading_error_rad: Optional[float]
     x: float
     y: float
     yaw: float
@@ -266,9 +268,8 @@ class MissionRuntime:
                 self.person_detector = None
 
         self.phase = MissionPhase.IDLE
-        self._phase_before_obstacle_stop = MissionPhase.SEEK_TAG
+        self._phase_before_obstacle_stop = MissionPhase.SEEK_GOAL
         self.task_index = 0
-        self.tag_target_index = 0
         self.phase_start_time = time.monotonic()
         self.target_reached_since: Optional[float] = None
         self.last_loop_time = time.monotonic()
@@ -385,12 +386,6 @@ class MissionRuntime:
         if self.task_index >= len(self.tasks):
             return None
         return self.tasks[self.task_index]
-
-    def _current_tag_target(self) -> Optional[TagTarget]:
-        task = self._current_task()
-        if task is None or self.tag_target_index >= len(task.tag_targets):
-            return None
-        return task.tag_targets[self.tag_target_index]
 
     def _set_phase(self, phase: MissionPhase) -> None:
         if self.phase != phase:
@@ -631,63 +626,59 @@ class MissionRuntime:
         context = self._task_context(task)
         return all(evaluate_condition(expr, context) for expr in task.completion_conditions)
 
-    def _advance_to_next_target_or_task(self) -> None:
+    def _advance_to_execute_task(self) -> None:
         task = self._current_task()
         if task is None:
             self._set_phase(MissionPhase.DONE)
             return
-        self.tag_target_index += 1
-        if self.tag_target_index < len(task.tag_targets):
-            self.target_reached_since = None
-            return
-        self.tag_target_index = 0
+        self.target_reached_since = None
         self._set_phase(MissionPhase.EXECUTE_TASK)
 
     def _advance_task(self) -> None:
         self.task_index += 1
-        self.tag_target_index = 0
         if self.task_index >= len(self.tasks):
             self._set_phase(MissionPhase.DONE)
         else:
-            self._set_phase(MissionPhase.SEEK_TAG)
+            self._set_phase(MissionPhase.SEEK_GOAL)
 
-    def _seek_tag_command(self, target: TagTarget, detections: dict[str, TagDetection], now: float) -> tuple[tuple[float, float, float, float], Optional[TagDetection], Optional[float], Optional[float]]:
-        det = detections.get(str(target.tag_id))
-        if det is None:
+    def _seek_goal_command(self, task: Task, now: float) -> tuple[tuple[float, float, float, float], Optional[float], Optional[float]]:
+        goal = task.goal
+        if goal is None:
             self.target_reached_since = None
-            return self._body_twist_to_wheels(0.0, self.runtime_config.search_omega_rad_s), None, None, None
+            return self._zero_wheel_rates(), None, None
 
-        if self.apriltag_camera is None:
-            return self._zero_wheel_rates(), None, None, None
-        intr = self.apriltag_camera.color_intrinsics()
-        center_error_px = float(det.center_x_px - intr.cx)
-        distance_error_m = float(det.tz_m - target.desired_distance_m)
-        heading_error_rad = float(np.arctan2(det.tx_m, max(det.tz_m, 1e-6)))
+        state = self.localization_filter.get_state()
+        pose = MapPoseVelocity(
+            x=float(state[0]),
+            y=float(state[1]),
+            heading=float(state[2]),
+            vx=float(state[3] * np.cos(state[2]) - state[4] * np.sin(state[2])),
+            vy=float(state[3] * np.sin(state[2]) + state[4] * np.cos(state[2])),
+            heading_rate=float(state[5]),
+        )
+        command = self.twist_helper.compute(
+            pose,
+            Waypoint(xy=(float(goal.x), float(goal.y)), heading=float(goal.heading)),
+            final_pose_mode=True,
+        )
 
-        vx_cmd = self.runtime_config.tag_distance_kp * distance_error_m
-        vx_cmd = float(np.clip(vx_cmd, -self.runtime_config.controller_v_max, self.runtime_config.controller_v_max))
+        position_error_m = float(np.hypot(goal.x - pose.x, goal.y - pose.y))
+        heading_error_rad = float(wrap_to_pi(goal.heading - pose.heading))
+        distance_tol = float(self.runtime_config.default_distance_tolerance_m)
+        heading_tol = 0.15
+        settle_time = float(self.runtime_config.default_settle_time_s)
 
-        omega_cmd = -self.runtime_config.tag_center_kp * heading_error_rad
-        omega_cmd = float(np.clip(omega_cmd, -self.runtime_config.controller_omega_max, self.runtime_config.controller_omega_max))
-
-        if abs(center_error_px) > self.runtime_config.align_only_center_error_px:
-            vx_cmd = 0.0
-
-        distance_tol = float(target.distance_tolerance_m or self.runtime_config.default_distance_tolerance_m)
-        settle_time = float(target.settle_time_s or self.runtime_config.default_settle_time_s)
-        tag_position_error_m = float(np.hypot(det.tx_m, distance_error_m))
-
-        reached = tag_position_error_m <= distance_tol
+        reached = position_error_m <= distance_tol and abs(heading_error_rad) <= heading_tol
         if reached:
             if self.target_reached_since is None:
                 self.target_reached_since = now
             if (now - self.target_reached_since) >= settle_time:
-                self._advance_to_next_target_or_task()
-                return self._zero_wheel_rates(), det, distance_error_m, center_error_px
+                self._advance_to_execute_task()
+                return self._zero_wheel_rates(), position_error_m, heading_error_rad
         else:
             self.target_reached_since = None
 
-        return self._body_twist_to_wheels(vx_cmd, omega_cmd), det, distance_error_m, center_error_px
+        return command.wheel_rates, position_error_m, heading_error_rad
 
     def _poll_control_socket(self) -> None:
         if self.control_sock is None:
@@ -731,7 +722,7 @@ class MissionRuntime:
         elif raw_line.startswith("ENC,"):
             self._last_debug_enc_line = raw_line
 
-    def _publish_telemetry(self, now: float, current_task: str, current_tag_id: Optional[str], det: Optional[TagDetection], center_error_px: Optional[float]) -> None:
+    def _publish_telemetry(self, now: float, current_task: str, task: Optional[Task], position_error_m: Optional[float], heading_error_rad: Optional[float]) -> None:
         if self.telemetry_sock is None:
             return
         if self.telemetry_period > 0.0 and (now - self.last_telemetry_time) < self.telemetry_period:
@@ -742,9 +733,11 @@ class MissionRuntime:
             phase=self.phase.name,
             task_index=int(self.task_index),
             current_task=current_task,
-            current_tag_id=current_tag_id,
-            tag_distance_m=None if det is None else float(det.tz_m),
-            tag_center_error_px=None if center_error_px is None else float(center_error_px),
+            goal_x=None if task is None or task.goal is None else float(task.goal.x),
+            goal_y=None if task is None or task.goal is None else float(task.goal.y),
+            goal_heading=None if task is None or task.goal is None else float(task.goal.heading),
+            goal_distance_error_m=None if position_error_m is None else float(position_error_m),
+            goal_heading_error_rad=None if heading_error_rad is None else float(heading_error_rad),
             x=float(state[0]),
             y=float(state[1]),
             yaw=float(state[2]),
@@ -780,11 +773,9 @@ class MissionRuntime:
                 self._update_wheel_mode(autonomy_active)
                 task = self._current_task()
                 current_task_name = "DONE" if task is None else task.name
-                target = self._current_tag_target()
-                current_tag_id = None if target is None else str(target.tag_id)
-                det: Optional[TagDetection] = None
-                center_error_px: Optional[float] = None
                 wheel_rates = self._zero_wheel_rates()
+                position_error_m: Optional[float] = None
+                heading_error_rad: Optional[float] = None
                 detections: dict[str, TagDetection] = {}
 
                 if self.apriltag_camera is not None:
@@ -798,18 +789,18 @@ class MissionRuntime:
                 elif not autonomy_active:
                     self._set_phase(MissionPhase.IDLE)
                 elif self.phase == MissionPhase.IDLE:
-                    self._set_phase(MissionPhase.SEEK_TAG)
+                    self._set_phase(MissionPhase.SEEK_GOAL)
 
                 if autonomy_active and self.phase not in (MissionPhase.DONE, MissionPhase.ESTOP):
                     self._update_manipulator_for_task(task, active=(self.phase == MissionPhase.EXECUTE_TASK), now=now)
 
-                    if self.phase == MissionPhase.SEEK_TAG:
+                    if self.phase == MissionPhase.SEEK_GOAL:
                         if self._person_blocking(now):
                             self._phase_before_obstacle_stop = self.phase
                             self._set_phase(MissionPhase.STOP_FOR_OBSTACLE)
                             wheel_rates = self._zero_wheel_rates()
-                        elif target is not None:
-                            wheel_rates, det, _distance_error_m, center_error_px = self._seek_tag_command(target, detections, now)
+                        else:
+                            wheel_rates, position_error_m, heading_error_rad = self._seek_goal_command(task, now)
                     elif self.phase == MissionPhase.STOP_FOR_OBSTACLE:
                         wheel_rates = self._zero_wheel_rates()
                         if not self._person_blocking(now):
@@ -823,13 +814,13 @@ class MissionRuntime:
                     self.serial.send_wheel_cmd(*wheel_rates)
                     self.serial.flush_tx()
 
-                self._publish_telemetry(now, current_task_name, current_tag_id, det, center_error_px)
+                self._publish_telemetry(now, current_task_name, task, position_error_m, heading_error_rad)
 
                 state = self.localization_filter.get_state()
                 print(
-                    f"tick={tick:04d} phase={self.phase.name} task={current_task_name} tag={current_tag_id} "
+                    f"tick={tick:04d} phase={self.phase.name} task={current_task_name} "
                     f"pose=({state[0]:.3f},{state[1]:.3f},{state[2]:.3f}) "
-                    f"tag_z={None if det is None else round(det.tz_m,3)} center_err={None if center_error_px is None else round(center_error_px,1)} "
+                    f"goal_err={None if position_error_m is None else round(position_error_m,3)} heading_err={None if heading_error_rad is None else round(heading_error_rad,3)} "
                     f"obstacle={self._obstacle_blocked} deploy={self.deploy} manual={self.manual_control} allstop={self.allstop} "
                     f"wheel_rates={tuple(round(v,3) for v in wheel_rates)}"
                 )

@@ -1,8 +1,9 @@
-"""Minimal mission/task utilities for AprilTag-seeking FSM missions.
+"""Minimal mission/task utilities for waypoint-tracking FSM missions.
 
-Each task is an ordered sequence of AprilTag approach targets. The hardware
-runtime is responsible for the finite state machine and proportional guidance.
-This module just loads the config into small dataclasses.
+Each task specifies a goal pose in the map frame plus optional manipulator and
+completion-condition metadata. The hardware runtime is responsible for the
+finite state machine and waypoint tracking. This module just loads the config
+into small dataclasses.
 """
 
 from __future__ import annotations
@@ -30,27 +31,16 @@ class ArmWaypoint:
 
 
 @dataclass(frozen=True)
-class TagTarget:
-    tag_id: str
-    desired_distance_m: float
-    distance_tolerance_m: float = 0.08
-    center_tolerance_px: float = 40.0
-    settle_time_s: float = 0.3
-
-
-@dataclass(frozen=True)
 class Task:
     name: str
     start: Optional[Pose2D]
     goal: Optional[Pose2D]
-    tag_targets: List[TagTarget]
     desired_elevator_height_m: float = 0.0
     completion_conditions: List[str] | None = None
     arm_waypoints: List[ArmWaypoint] | None = None
     arm_point_dwell_s: float = 0.5
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "tag_targets", list(self.tag_targets or []))
         object.__setattr__(
             self, "completion_conditions", list(self.completion_conditions or [])
         )
@@ -94,16 +84,6 @@ def _load_arm_waypoint(raw: Mapping[str, Any]) -> ArmWaypoint:
     return ArmWaypoint(x=float(raw["x"]), y=float(raw["y"]))
 
 
-def _load_tag_target(raw: Mapping[str, Any]) -> TagTarget:
-    return TagTarget(
-        tag_id=str(raw["tag_id"]),
-        desired_distance_m=float(raw.get("desired_distance_m", 0.6)),
-        distance_tolerance_m=float(raw.get("distance_tolerance_m", 0.08)),
-        center_tolerance_px=float(raw.get("center_tolerance_px", 40.0)),
-        settle_time_s=float(raw.get("settle_time_s", 0.3)),
-    )
-
-
 def load_map(path: Path | str) -> Map:
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     map_raw = raw.get("map")
@@ -143,31 +123,13 @@ def load_map(path: Path | str) -> Map:
     return map_
 
 
-def _goal_from_last_tag(
-    tag_targets: Sequence[TagTarget],
-    landmarks: Mapping[str, Landmark],
-) -> Optional[Pose2D]:
-    if not tag_targets:
-        return None
-    last = tag_targets[-1]
-    landmark = landmarks.get(str(last.tag_id))
-    if landmark is None:
-        return None
-    return Pose2D(
-        x=float(landmark.point[0]),
-        y=float(landmark.point[1]),
-        heading=float(landmark.heading),
-    )
-
-
 def load_tasks(path: Path | str) -> List[Task]:
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     initial_state_raw = raw.get("initial_state")
     if initial_state_raw is None:
         raise ValueError("mission_config.yaml must define 'initial_state'")
 
-    map_ = load_map(path)
-    landmarks = {str(landmark.id): landmark for landmark in map_.landmarks}
+    load_map(path)
 
     tasks_raw = raw.get("tasks", [])
     if not tasks_raw:
@@ -176,14 +138,14 @@ def load_tasks(path: Path | str) -> List[Task]:
     tasks: List[Task] = []
     current_start: Optional[Pose2D] = _load_pose(initial_state_raw)
     for row in tasks_raw:
-        tag_targets = [_load_tag_target(t) for t in row.get("tag_targets", [])]
         explicit_goal = row.get("goal")
-        goal = _load_pose(explicit_goal) if explicit_goal is not None else _goal_from_last_tag(tag_targets, landmarks)
+        if explicit_goal is None:
+            raise ValueError(f"task '{row.get('name', '<unnamed>')}' must define a goal pose")
+        goal = _load_pose(explicit_goal)
         task = Task(
             name=str(row["name"]),
             start=current_start,
             goal=goal,
-            tag_targets=tag_targets,
             desired_elevator_height_m=float(row.get("desired_elevator_height_m", 0.0)),
             completion_conditions=[
                 str(x) for x in row.get("completion_conditions", [])
@@ -265,7 +227,6 @@ __all__ = [
     "ArmWaypoint",
     "MissionRunner",
     "Pose2D",
-    "TagTarget",
     "Task",
     "default_camera_path",
     "default_localization_path",
