@@ -223,6 +223,16 @@ def _button_style(button: Button, *, active: bool, on_color: str, off_color: str
     button.ax.set_facecolor(button.color)
 
 
+
+def _fmt_optional_float(value: Any, digits: int = 3) -> str:
+    if value is None:
+        return "None"
+    try:
+        return f"{float(value):.{digits}f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def setup_plot(map_: Map, tasks: list[Any]):
     try:
         import matplotlib.pyplot as plt
@@ -312,9 +322,9 @@ def update_visualization(
             f"pose: ({x:.3f}, {y:.3f}, {yaw:.3f})",
             "vehicle_size_m: 0.45 x 0.45",
             "camera_frame_origin: front-middle",
-            f"goal: ({telemetry.get('goal_x')}, {telemetry.get('goal_y')}, {telemetry.get('goal_heading')})",
-            f"goal_distance_error_m: {float(telemetry.get('goal_distance_error_m', float('nan'))):.3f}",
-            f"goal_heading_error_rad: {float(telemetry.get('goal_heading_error_rad', float('nan'))):.3f}",
+            f"goal: ({_fmt_optional_float(telemetry.get('goal_x'))}, {_fmt_optional_float(telemetry.get('goal_y'))}, {_fmt_optional_float(telemetry.get('goal_heading'))})",
+            f"goal_distance_error_m: {_fmt_optional_float(telemetry.get('goal_distance_error_m'))}",
+            f"goal_heading_error_rad: {_fmt_optional_float(telemetry.get('goal_heading_error_rad'))}",
             f"deploy: {telemetry.get('deploy')}",
             f"manual_control: {telemetry.get('manual_control')}",
             f"allstop: {telemetry.get('allstop')}",

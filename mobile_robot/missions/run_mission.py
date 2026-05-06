@@ -303,6 +303,11 @@ class MissionRuntime:
         self._last_debug_cmd_line: Optional[str] = None
         self._last_debug_eff_line: Optional[str] = None
         self._last_debug_enc_line: Optional[str] = None
+        self._last_debug_imu_line: Optional[str] = None
+        self._last_debug_ack_meta_line: Optional[str] = None
+        self._last_debug_applied_cmd_line: Optional[str] = None
+        self._last_debug_rx_cmd_line: Optional[str] = None
+        self._last_debug_imu_meta_line: Optional[str] = None
 
     @staticmethod
     def _load_config(
@@ -721,6 +726,16 @@ class MissionRuntime:
             self._last_debug_eff_line = raw_line
         elif raw_line.startswith("ENC,"):
             self._last_debug_enc_line = raw_line
+        elif raw_line.startswith("IMU,"):
+            self._last_debug_imu_line = raw_line
+        elif raw_line.startswith("DBG,ACK_META,"):
+            self._last_debug_ack_meta_line = raw_line
+        elif raw_line.startswith("DBG,LATEST_APPLIED_CMD,"):
+            self._last_debug_applied_cmd_line = raw_line
+        elif raw_line.startswith("DBG,LATEST_RX_CMD,"):
+            self._last_debug_rx_cmd_line = raw_line
+        elif raw_line.startswith("DBG,IMU_META,"):
+            self._last_debug_imu_meta_line = raw_line
 
     def _publish_telemetry(self, now: float, current_task: str, task: Optional[Task], position_error_m: Optional[float], heading_error_rad: Optional[float]) -> None:
         if self.telemetry_sock is None:
@@ -825,12 +840,22 @@ class MissionRuntime:
                     f"wheel_rates={tuple(round(v,3) for v in wheel_rates)}"
                 )
                 if DEBUG_WHEEL_ACKS:
+                    if self._last_debug_ack_meta_line is not None:
+                        print(f"  wheel_ack_meta: {self._last_debug_ack_meta_line}")
+                    if self._last_debug_rx_cmd_line is not None:
+                        print(f"  wheel_rx_cmd: {self._last_debug_rx_cmd_line}")
+                    if self._last_debug_applied_cmd_line is not None:
+                        print(f"  wheel_applied_cmd: {self._last_debug_applied_cmd_line}")
                     if self._last_debug_cmd_line is not None:
                         print(f"  wheel_ack: {self._last_debug_cmd_line}")
                     if self._last_debug_eff_line is not None:
                         print(f"  wheel_eff: {self._last_debug_eff_line}")
                     if self._last_debug_enc_line is not None:
                         print(f"  wheel_enc: {self._last_debug_enc_line}")
+                    if self._last_debug_imu_meta_line is not None:
+                        print(f"  imu_meta: {self._last_debug_imu_meta_line}")
+                    if self._last_debug_imu_line is not None:
+                        print(f"  imu_raw: {self._last_debug_imu_line}")
 
                 tick += 1
                 sleep_dt = period - (time.monotonic() - now)

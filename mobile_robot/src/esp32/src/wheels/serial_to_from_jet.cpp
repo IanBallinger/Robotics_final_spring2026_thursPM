@@ -60,9 +60,13 @@ constexpr unsigned long CMD_TIMEOUT_MS = 250;       // stop motors if host goes 
 constexpr unsigned long JOYSTICK_APPLY_PERIOD_MS = 50;
 constexpr unsigned long BUTTON_DEBOUNCE_MS = 50;
 constexpr unsigned long CONTROLLER_TIMEOUT_MS = 250;
-constexpr float WHEEL_CMD_FILTER_TAU_S = 0.1f;
+constexpr float WHEEL_CMD_FILTER_TAU_S = 0.02f;
 constexpr float IMU_ACCEL_FILTER_TAU_S = 0.5f;
 constexpr bool SERIAL_DEBUG_TIMING = true;
+
+#ifndef DEBUG_SERIAL_VERBOSE
+#define DEBUG_SERIAL_VERBOSE 0
+#endif
 
 MotorDriver wheels[num_wheels] = {
     {A_DIR1, A_PWM1, 0},
@@ -384,8 +388,33 @@ static void updateRemoteAutonomyToggle() {
 static void printWheelAck(const DesiredWheelVel& cmd) {
   printDebugTiming("ACK", last_ack_debug_ms);
 
+  const unsigned long now = millis();
+#if DEBUG_SERIAL_VERBOSE
   Serial.println("DBG,CMD_IS_APPLIED_ACK");
   Serial.println("DBG,WHEEL_ORDER,w1_left_rear,w2_left_front,w3_right_front,w4_right_rear");
+  Serial.print("DBG,ACK_META,now_ms,");
+  Serial.print(now);
+  Serial.print(",cmd_age_ms,");
+  Serial.print(now - last_cmd_rx_ms);
+  Serial.print(",apply_age_ms,");
+  Serial.println(now - last_cmd_apply_ms);
+  Serial.print("DBG,LATEST_RX_CMD,");
+  Serial.print(latest_rx_cmd.w1);
+  Serial.print(",");
+  Serial.print(latest_rx_cmd.w2);
+  Serial.print(",");
+  Serial.print(latest_rx_cmd.w3);
+  Serial.print(",");
+  Serial.println(latest_rx_cmd.w4);
+  Serial.print("DBG,LATEST_APPLIED_CMD,");
+  Serial.print(latest_applied_cmd.w1);
+  Serial.print(",");
+  Serial.print(latest_applied_cmd.w2);
+  Serial.print(",");
+  Serial.print(latest_applied_cmd.w3);
+  Serial.print(",");
+  Serial.println(latest_applied_cmd.w4);
+#endif
   Serial.print("CMD,");
   Serial.print(cmd.w1);
   Serial.print(",");
@@ -436,6 +465,12 @@ void sendIMU() {
   last_accel_filter_ms = now;
 
   printDebugTiming("IMU", last_imu_debug_ms);
+#if DEBUG_SERIAL_VERBOSE
+  Serial.print("DBG,IMU_META,now_ms,");
+  Serial.print(now);
+  Serial.print(",publish_age_ms,");
+  Serial.println(now - last_imu_publish_ms);
+#endif
   Serial.print("IMU,");
   Serial.print(filtered_ax);
   Serial.print(",");
