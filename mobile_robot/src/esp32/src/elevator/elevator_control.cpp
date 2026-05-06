@@ -827,6 +827,7 @@ void loop() {
     Serial.println(latest_rx_cmd.height_m, 4);
   }
 
+  float jog_dt_debug_s = 0.0f;
   if (!isnan(measured_height_m)) {
     if (!has_valid_elevator_cmd) {
       latest_rx_cmd = DesiredElevatorState(measured_height_m);
@@ -841,6 +842,7 @@ void loop() {
     const float dt_jog_s = (now > last_wireless_elevator_jog_update_ms)
                                ? ((now - last_wireless_elevator_jog_update_ms) * 0.001f)
                                : 0.0f;
+    jog_dt_debug_s = dt_jog_s;
     last_wireless_elevator_jog_update_ms = now;
 
     if (fabsf(wireless_elevator_jog_drive) > 1e-4f) {
@@ -859,7 +861,7 @@ void loop() {
 
   if (has_valid_elevator_cmd && now - last_cmd_apply_ms >= CMD_APPLY_PERIOD_MS) {
     if (!isnan(measured_height_m)) {
-      applyElevatorCommand(latest_rx_cmd, measured_height_m, wireless_elevator_jog_drive, dt_jog_s);
+      applyElevatorCommand(latest_rx_cmd, measured_height_m, wireless_elevator_jog_drive, jog_dt_debug_s);
     } else {
       elevator_driver.drive(0.0);
       Serial.println("ELV_DBG,APPLY_SKIPPED,reason,no_measurement");
