@@ -160,6 +160,20 @@ class SerialConnect:
         """Attempt to send the latest pending buffered command."""
         return self._write_pending_if_due(force=force)
 
+    def send_raw_line(self, line: str, force: bool = True) -> bool:
+        """Write a raw newline-terminated ASCII command to the serial port."""
+        if self._pending_wheel_cmd is not None:
+            self._write_pending_if_due(force=force)
+        now = time.monotonic()
+        payload = line if line.endswith("\n") else f"{line}\n"
+        self.ser.write(payload.encode("ascii"))
+        self.ser.flush()
+        self._debug_dt("TX RAW", now, self._last_tx_time)
+        if self.debug:
+            print(f"[TX RAW] {payload.strip()}")
+        self._last_tx_time = now
+        return True
+
     def readline(self, timeout: Optional[float] = None) -> Optional[str]:
         """
         Compatibility helper for one blocking/non-blocking raw line read.

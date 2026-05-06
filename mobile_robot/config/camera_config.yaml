@@ -1,3 +1,18 @@
+apriltag_camera:
+  # Dedicated RealSense for AprilTag localization.
+  # Prefer fixing this by serial number so the role stays stable across reboots.
+  serial_number: null
+  width: 640
+  height: 480
+  fps: 30
+
+person_camera:
+  # Dedicated RealSense for person detection / depth.
+  serial_number: null
+  width: 640
+  height: 480
+  fps: 15
+
 camera_to_robot:
   # Camera pose expressed in the robot/body frame.
   # Keep this as the single source of truth for mobile-robot camera extrinsics.

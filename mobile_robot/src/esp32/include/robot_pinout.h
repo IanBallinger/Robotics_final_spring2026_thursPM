@@ -27,4 +27,11 @@
 #define BNO08X_INT 42
 #define BNO08X_RESET 13
 
+// Elevator MCU: GPIO 40/41 — pinch grippers (same pins the legacy shoulder/elbow stack used).
+#define ARM_LEFT_SERVO_PIN 40
+#define ARM_RIGHT_SERVO_PIN 41
+// Legacy arm code still uses these names; they alias the pinch servo pins.
+#define ARM_SHOULDER_SERVO_PIN ARM_LEFT_SERVO_PIN
+#define ARM_ELBOW_SERVO_PIN ARM_RIGHT_SERVO_PIN
+
 #endif // ROBOT_PINOUT_H

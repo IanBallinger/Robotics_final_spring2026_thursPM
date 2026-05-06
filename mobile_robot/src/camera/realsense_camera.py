@@ -24,10 +24,12 @@ class RealSenseCamera:
         color_config: StreamConfig = StreamConfig(),
         depth_config: StreamConfig = StreamConfig(),
         align_depth_to_color: bool = True,
+        serial_number: Optional[str] = None,
     ):
         self.color_config = color_config
         self.depth_config = depth_config
         self.align_depth_to_color = align_depth_to_color
+        self.serial_number = serial_number
 
         self._pipeline = None
         self._align = None
@@ -45,6 +47,8 @@ class RealSenseCamera:
 
         pipeline = rs.pipeline()
         config = rs.config()
+        if self.serial_number:
+            config.enable_device(self.serial_number)
         config.enable_stream(
             rs.stream.color,
             self.color_config.width,

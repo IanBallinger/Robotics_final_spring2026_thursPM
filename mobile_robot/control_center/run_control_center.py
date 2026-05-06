@@ -2,7 +2,8 @@
 """Laptop-side control center / visualization for Jetson mission telemetry.
 
 Listens for UDP telemetry from `mobile_robot/missions/run_mission.py`, loads the
-same `tasks.yaml`, and overlays the robot pose + current cell on the map.
+same mission config, and overlays the robot pose, task goals, and obstacle
+status on the map.
 """
 
 from __future__ import annotations
@@ -116,6 +117,93 @@ def _draw_robot_heading_arrow(ax, x: float, y: float, yaw: float, length: float 
     )
 
 
+def _draw_vehicle_footprint(ax, x: float, y: float, yaw: float) -> None:
+    from matplotlib.patches import Polygon
+
+    length_m = 0.45
+    width_m = 0.45
+    half_l = 0.5 * length_m
+    half_w = 0.5 * width_m
+
+    body_corners = np.array(
+        [
+            [half_l, half_w],
+            [half_l, -half_w],
+            [-half_l, -half_w],
+            [-half_l, half_w],
+        ],
+        dtype=float,
+    )
+    c = float(np.cos(yaw))
+    s = float(np.sin(yaw))
+    rot = np.array([[c, -s], [s, c]], dtype=float)
+    world_corners = (body_corners @ rot.T) + np.array([x, y], dtype=float)
+
+    ax.add_patch(
+        Polygon(
+            world_corners,
+            closed=True,
+            fill=False,
+            edgecolor="tab:blue",
+            linewidth=2.0,
+            zorder=7,
+        )
+    )
+
+    camera_body = np.array([half_l, 0.0], dtype=float)
+    camera_world = (rot @ camera_body) + np.array([x, y], dtype=float)
+    ax.scatter(
+        [camera_world[0]],
+        [camera_world[1]],
+        s=55,
+        c="tab:red",
+        marker="x",
+        linewidths=2.0,
+        zorder=9,
+    )
+    ax.text(
+        float(camera_world[0]) + 0.02,
+        float(camera_world[1]) + 0.02,
+        "camera",
+        fontsize=8,
+        color="tab:red",
+        zorder=9,
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.7, edgecolor="tab:red"),
+    )
+
+
+
+def _draw_obstacle_blocked_indicator(ax, x: float, y: float, yaw: float) -> None:
+    from matplotlib.patches import Circle
+
+    ax.add_patch(Circle((x, y), 0.16, fill=False, edgecolor="tab:red", linewidth=2.5, zorder=8))
+    dx = 0.35 * float(np.cos(yaw))
+    dy = 0.35 * float(np.sin(yaw))
+    ax.arrow(
+        x,
+        y,
+        dx,
+        dy,
+        head_width=0.06,
+        head_length=0.06,
+        fc="tab:red",
+        ec="tab:red",
+        linewidth=2.0,
+        alpha=0.9,
+        length_includes_head=True,
+        zorder=8,
+    )
+    ax.text(
+        x + 0.05,
+        y + 0.10,
+        "OBSTACLE",
+        color="tab:red",
+        fontsize=9,
+        weight="bold",
+        zorder=9,
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.75, edgecolor="tab:red"),
+    )
+
 
 def _apply_dynamic_obstacles(map_: Map, telemetry: dict[str, Any]) -> None:
     map_.clear_obstacles_by_prefix("person_")
@@ -133,6 +221,16 @@ def _button_style(button: Button, *, active: bool, on_color: str, off_color: str
     button.color = on_color if active else off_color
     button.hovercolor = button.color
     button.ax.set_facecolor(button.color)
+
+
+
+def _fmt_optional_float(value: Any, digits: int = 3) -> str:
+    if value is None:
+        return "None"
+    try:
+        return f"{float(value):.{digits}f}"
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def setup_plot(map_: Map, tasks: list[Any]):
@@ -158,11 +256,14 @@ def setup_plot(map_: Map, tasks: list[Any]):
     ax.set_aspect("equal", adjustable="box")
     ax.grid(True, alpha=0.25)
     ax.legend(loc="upper left", fontsize=8)
-    deploy_ax = fig.add_axes([0.12, 0.03, 0.18, 0.07])
-    allstop_ax = fig.add_axes([0.34, 0.03, 0.18, 0.07])
+    deploy_ax = fig.add_axes([0.08, 0.03, 0.18, 0.07])
+    manual_ax = fig.add_axes([0.30, 0.03, 0.22, 0.07])
+    allstop_ax = fig.add_axes([0.56, 0.03, 0.18, 0.07])
     deploy_button = Button(deploy_ax, "DEPLOY: OFF")
+    manual_button = Button(manual_ax, "AUTO DRIVE: OFF")
     allstop_button = Button(allstop_ax, "ALLSTOP: OFF")
     _button_style(deploy_button, active=False, on_color="tab:green", off_color="0.85")
+    _button_style(manual_button, active=False, on_color="tab:blue", off_color="0.85")
     _button_style(allstop_button, active=False, on_color="tab:red", off_color="0.85")
 
     fig.tight_layout(rect=(0.0, 0.12, 1.0, 1.0))
@@ -175,6 +276,7 @@ def setup_plot(map_: Map, tasks: list[Any]):
         cell_patch,
         status_text,
         deploy_button,
+        manual_button,
         allstop_button,
     )
 
@@ -201,38 +303,32 @@ def update_visualization(
     _draw_task_goals(ax, tasks)
 
     ax.plot(traj_x, traj_y, color="tab:cyan", linewidth=1.8, label="Jetson estimate", zorder=6)
+    _draw_vehicle_footprint(ax, x, y, yaw)
     ax.plot([x], [y], marker="o", markersize=7, color="black", linestyle="None", zorder=8)
     _draw_robot_heading_arrow(ax, x, y, yaw)
 
-    cell = telemetry.get("cell")
-    if cell is not None and len(cell) == 2:
-        i, j = int(cell[0]), int(cell[1])
-        if map_.is_valid_cell(i, j):
-            x0 = map_._xmin + i * map_.resolution  # noqa: SLF001
-            y0 = map_._ymin + j * map_.resolution  # noqa: SLF001
-            ax.add_patch(
-                plt.Rectangle(
-                    (x0, y0),
-                    map_.resolution,
-                    map_.resolution,
-                    fill=False,
-                    edgecolor="tab:blue",
-                    linewidth=2.0,
-                    zorder=7,
-                )
-            )
+    goal_x = telemetry.get("goal_x")
+    goal_y = telemetry.get("goal_y")
+    if goal_x is not None and goal_y is not None:
+        ax.plot([x, float(goal_x)], [y, float(goal_y)], linestyle="--", color="tab:orange", linewidth=1.2, alpha=0.8, zorder=5)
+
+    if bool(telemetry.get("obstacle_blocked", False)):
+        _draw_obstacle_blocked_indicator(ax, x, y, yaw)
 
     status_text = "\n".join(
         [
             f"task: {telemetry.get('current_task', 'unknown')}",
+            f"phase: {telemetry.get('phase', 'unknown')}",
             f"pose: ({x:.3f}, {y:.3f}, {yaw:.3f})",
-            f"cell: {telemetry.get('cell')}",
-            f"distance_to_goal: {float(telemetry.get('distance_to_goal', float('nan'))):.3f}",
-            f"heading_error: {float(telemetry.get('heading_error', float('nan'))):.3f}",
-            f"localization_ok: {telemetry.get('localization_ok')}",
+            "vehicle_size_m: 0.45 x 0.45",
+            "camera_frame_origin: front-middle",
+            f"goal: ({_fmt_optional_float(telemetry.get('goal_x'))}, {_fmt_optional_float(telemetry.get('goal_y'))}, {_fmt_optional_float(telemetry.get('goal_heading'))})",
+            f"goal_distance_error_m: {_fmt_optional_float(telemetry.get('goal_distance_error_m'))}",
+            f"goal_heading_error_rad: {_fmt_optional_float(telemetry.get('goal_heading_error_rad'))}",
             f"deploy: {telemetry.get('deploy')}",
+            f"manual_control: {telemetry.get('manual_control')}",
             f"allstop: {telemetry.get('allstop')}",
-            f"paused: {telemetry.get('paused')}",
+            f"obstacle_blocked: {telemetry.get('obstacle_blocked')}",
             f"dynamic_obstacles: {len(telemetry.get('dynamic_obstacles', []))}",
         ]
     )
@@ -289,6 +385,7 @@ def main() -> None:
         cell_patch,
         status_text,
         deploy_button,
+        manual_button,
         allstop_button,
     ) = setup_plot(map_, tasks)
     if not args.no_show:
@@ -305,7 +402,7 @@ def main() -> None:
     traj_y: list[float] = []
     latest: Optional[dict[str, Any]] = None
     latest_sender_host: Optional[str] = None
-    control_state = {"deploy": False, "allstop": False}
+    control_state = {"deploy": False, "manual_control": False, "allstop": False}
     t0 = time.monotonic()
 
     def control_target_host() -> Optional[str]:
@@ -319,12 +416,16 @@ def main() -> None:
         payload = json.dumps(control_state).encode("utf-8")
         control_sock.sendto(payload, (host, args.control_port))
         print(
-            f"control tx {host}:{args.control_port} deploy={control_state['deploy']} allstop={control_state['allstop']}"
+            f"control tx {host}:{args.control_port} deploy={control_state['deploy']} "
+            f"manual_control={control_state['manual_control']} allstop={control_state['allstop']}"
         )
 
     def refresh_buttons() -> None:
         deploy_button.label.set_text(
             f"DEPLOY: {'ON' if control_state['deploy'] else 'OFF'}"
+        )
+        manual_button.label.set_text(
+            f"AUTO DRIVE: {'ON' if control_state['manual_control'] else 'OFF'}"
         )
         allstop_button.label.set_text(
             f"ALLSTOP: {'ON' if control_state['allstop'] else 'OFF'}"
@@ -333,6 +434,12 @@ def main() -> None:
             deploy_button,
             active=control_state['deploy'],
             on_color="tab:green",
+            off_color="0.85",
+        )
+        _button_style(
+            manual_button,
+            active=control_state['manual_control'],
+            on_color="tab:blue",
             off_color="0.85",
         )
         _button_style(
@@ -348,12 +455,18 @@ def main() -> None:
         refresh_buttons()
         send_control_state()
 
+    def on_manual_control(_event) -> None:
+        control_state["manual_control"] = not control_state["manual_control"]
+        refresh_buttons()
+        send_control_state()
+
     def on_allstop(_event) -> None:
         control_state["allstop"] = not control_state["allstop"]
         refresh_buttons()
         send_control_state()
 
     deploy_button.on_clicked(on_deploy)
+    manual_button.on_clicked(on_manual_control)
     allstop_button.on_clicked(on_allstop)
     refresh_buttons()
 
@@ -368,6 +481,7 @@ def main() -> None:
                 traj_x.append(float(latest["x"]))
                 traj_y.append(float(latest["y"]))
                 control_state["deploy"] = bool(latest.get("deploy", control_state["deploy"]))
+                control_state["manual_control"] = bool(latest.get("manual_control", control_state["manual_control"]))
                 control_state["allstop"] = bool(latest.get("allstop", control_state["allstop"]))
                 refresh_buttons()
                 print(

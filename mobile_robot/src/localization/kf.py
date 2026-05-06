@@ -4,7 +4,10 @@ This module provides lightweight nonlinear filters for fusing:
 - AprilTag global pose measurements: [x, y, yaw]
 - IMU measurements:
   - body-frame linear accelerations ax, ay (used in prediction)
-  - yaw rate wz (fused as a measurement update)
+  - yaw rate wz (used directly in the process model for yaw propagation)
+- Wheel encoder twist measurements:
+  - body-frame vx, vy only
+  - wheel-derived wz is intentionally not fused
 
 State definition (9D):
     x = [px, py, yaw, vx_body, vy_body, wz, b_ax, b_ay, b_wz]
@@ -13,17 +16,17 @@ where:
 - px, py are global/world position coordinates
 - yaw is global heading
 - vx_body, vy_body are body-frame translational velocities
-- wz is bias-corrected yaw rate
+- wz stores the latest yaw rate supplied to the process model
 - b_ax, b_ay are accelerometer biases
-- b_wz is gyro yaw-rate bias
+- b_wz is retained for backward compatibility but is not used in yaw propagation
 
 The process model is:
     px_{k+1} = px_k + dt * (cos(yaw) * vx_body - sin(yaw) * vy_body)
     py_{k+1} = py_k + dt * (sin(yaw) * vx_body + cos(yaw) * vy_body)
-    yaw_{k+1}= yaw_k + dt * wz
+    yaw_{k+1}= yaw_k + dt * imu.wz
     vx_{k+1} = vx_k + dt * (ax_body - b_ax)
     vy_{k+1} = vy_k + dt * (ay_body - b_ay)
-    wz_{k+1} = wz_k
+    wz_{k+1} = imu.wz
     b_ax_{k+1} = b_ax_k
     b_ay_{k+1} = b_ay_k
     b_wz_{k+1} = b_wz_k
@@ -39,7 +42,7 @@ import numpy as np
 STATE_DIM = 9
 POSE_MEAS_DIM = 3
 GYRO_MEAS_DIM = 1
-WHEEL_TWIST_MEAS_DIM = 3
+WHEEL_TWIST_MEAS_DIM = 2
 
 PX = 0
 PY = 1
@@ -113,18 +116,20 @@ class WheelTwistMeasurement:
         Body-frame lateral velocity [m/s]. For this platform this is expected to
         be zero, but it is kept for filter/state consistency.
     wz : float
-        Body-frame yaw rate [rad/s].
+        Optional wheel-derived yaw rate [rad/s]. This field is accepted for API
+        compatibility but is intentionally ignored by the filter.
     covariance : Optional[np.ndarray]
-        Optional 3x3 measurement covariance for [vx, vy, wz].
+        Optional 2x2 or 3x3 measurement covariance. Only the ``vx, vy`` block is
+        used.
     """
 
     vx: float
     vy: float
-    wz: float
+    wz: float = 0.0
     covariance: Optional[np.ndarray] = None
 
     def as_vector(self) -> np.ndarray:
-        return np.array([self.vx, self.vy, self.wz], dtype=float)
+        return np.array([self.vx, self.vy], dtype=float)
 
 
 class _BaseLocalizationFilter:
@@ -167,13 +172,18 @@ class _BaseLocalizationFilter:
             )
         )
 
-        self.wheel_twist_measurement_noise = (
-            np.diag([2e-2, 2e-2, 8e-2])
-            if wheel_twist_measurement_noise is None
-            else np.asarray(wheel_twist_measurement_noise, dtype=float).reshape(
-                WHEEL_TWIST_MEAS_DIM, WHEEL_TWIST_MEAS_DIM
-            )
-        )
+        if wheel_twist_measurement_noise is None:
+            self.wheel_twist_measurement_noise = np.diag([2e-2, 2e-2])
+        else:
+            wheel_noise = np.asarray(wheel_twist_measurement_noise, dtype=float)
+            if wheel_noise.shape == (WHEEL_TWIST_MEAS_DIM, WHEEL_TWIST_MEAS_DIM):
+                self.wheel_twist_measurement_noise = wheel_noise.copy()
+            elif wheel_noise.shape == (3, 3):
+                self.wheel_twist_measurement_noise = wheel_noise[:2, :2].copy()
+            else:
+                raise ValueError(
+                    "wheel_twist_measurement_noise must have shape (2, 2) or (3, 3)"
+                )
 
     @staticmethod
     def _coerce_initial_state(initial_state: Optional[np.ndarray]) -> np.ndarray:
@@ -210,10 +220,10 @@ class _BaseLocalizationFilter:
         out = x.copy()
         out[PX] = x[PX] + dt * (c * x[VX] - s * x[VY])
         out[PY] = x[PY] + dt * (s * x[VX] + c * x[VY])
-        out[YAW] = wrap_angle(x[YAW] + dt * x[WZ])
+        out[YAW] = wrap_angle(x[YAW] + dt * imu.wz)
         out[VX] = x[VX] + dt * (imu.ax - x[BAX])
         out[VY] = x[VY] + dt * (imu.ay - x[BAY])
-        out[WZ] = x[WZ]
+        out[WZ] = float(imu.wz)
         out[BAX] = x[BAX]
         out[BAY] = x[BAY]
         out[BWZ] = x[BWZ]
@@ -237,7 +247,7 @@ class _BaseLocalizationFilter:
         F[PY, VX] = dt * s
         F[PY, VY] = dt * c
 
-        F[YAW, WZ] = dt
+        F[WZ, WZ] = 0.0
         F[VX, BAX] = -dt
         F[VY, BAY] = -dt
         return F
@@ -252,7 +262,7 @@ class _BaseLocalizationFilter:
 
     @staticmethod
     def _wheel_twist_measurement_model(state: np.ndarray) -> np.ndarray:
-        return np.array([state[VX], state[VY], state[WZ]], dtype=float)
+        return np.array([state[VX], state[VY]], dtype=float)
 
     @staticmethod
     def _pose_measurement_matrix() -> np.ndarray:
@@ -274,8 +284,16 @@ class _BaseLocalizationFilter:
         H = np.zeros((WHEEL_TWIST_MEAS_DIM, STATE_DIM), dtype=float)
         H[0, VX] = 1.0
         H[1, VY] = 1.0
-        H[2, WZ] = 1.0
         return H
+
+    def reset(self, state: np.ndarray, covariance: np.ndarray) -> np.ndarray:
+        self.state = self._coerce_initial_state(state)
+        self.covariance = self._coerce_square_matrix(
+            covariance,
+            default=np.eye(STATE_DIM, dtype=float) * 1e-2,
+        )
+        self.state[YAW] = wrap_angle(self.state[YAW])
+        return self.get_state()
 
     def get_state(self) -> np.ndarray:
         return self.state.copy()
@@ -331,33 +349,29 @@ class ExtendedKalmanFilter2D(_BaseLocalizationFilter):
         return self.get_state()
 
     def update_imu(self, imu: IMUMeasurement) -> np.ndarray:
-        z = np.array([imu.wz], dtype=float)
-        h = self._gyro_measurement_model(self.state)
-        H = self._gyro_measurement_matrix()
-        R = self.gyro_measurement_noise
-
-        innovation = z - h
-        S = H @ self.covariance @ H.T + R
-        K = self.covariance @ H.T @ np.linalg.inv(S)
-
-        self.state = self.state + K @ innovation
+        # IMU yaw rate is consumed directly in predict() for yaw propagation.
+        # Keep the cached wz state in sync for downstream consumers, but do not
+        # run a separate EKF measurement update on yaw rate.
+        self.state[WZ] = float(imu.wz)
         self.state[YAW] = wrap_angle(self.state[YAW])
-
-        I = np.eye(STATE_DIM)
-        self.covariance = (I - K @ H) @ self.covariance
         return self.get_state()
 
     def update_wheel_twist(self, measurement: WheelTwistMeasurement) -> np.ndarray:
         z = measurement.as_vector()
         h = self._wheel_twist_measurement_model(self.state)
         H = self._wheel_twist_measurement_matrix()
-        R = (
-            self.wheel_twist_measurement_noise
-            if measurement.covariance is None
-            else np.asarray(measurement.covariance, dtype=float).reshape(
-                WHEEL_TWIST_MEAS_DIM, WHEEL_TWIST_MEAS_DIM
-            )
-        )
+        if measurement.covariance is None:
+            R = self.wheel_twist_measurement_noise
+        else:
+            wheel_cov = np.asarray(measurement.covariance, dtype=float)
+            if wheel_cov.shape == (WHEEL_TWIST_MEAS_DIM, WHEEL_TWIST_MEAS_DIM):
+                R = wheel_cov
+            elif wheel_cov.shape == (3, 3):
+                R = wheel_cov[:2, :2]
+            else:
+                raise ValueError(
+                    "wheel twist measurement covariance must have shape (2, 2) or (3, 3)"
+                )
 
         innovation = z - h
         S = H @ self.covariance @ H.T + R

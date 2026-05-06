@@ -1,4 +1,6 @@
 localization:
+  # Set to "ekf" to fuse IMU/encoders/AprilTags, or "none" to use direct
+  # AprilTag pose assignment without EKF prediction/update.
   filter: ekf
   initial_state:
     x: 2.15
@@ -46,6 +48,9 @@ localization:
   # Ignore linear accelerometer integration in prediction; let wheel encoders
   # dominate body-velocity estimation.
   use_imu_accel_in_prediction: false
+  # If an AprilTag global pose is this far from the current filter position,
+  # reinitialize the filter pose from the tag measurement.
+  apriltag_reinitialize_distance_m: 1.0
   simulation:
     apriltag_period_s: 0.20
     apriltag_dropout_prob: 0.15

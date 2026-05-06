@@ -1,6 +1,28 @@
 #include <WiFi.h>
+#include <string.h>
 #include "util.h"
 #include "wireless.h"
+
+static bool isZeroMac(const uint8_t* mac) {
+    for (int i = 0; i < 6; ++i) {
+        if (mac[i] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool registerPeerAddress(const uint8_t* mac) {
+    if (mac == nullptr || isZeroMac(mac)) {
+        return true;
+    }
+
+    esp_now_peer_info_t peer = {};
+    memcpy(peer.peer_addr, mac, 6);
+    peer.channel = 0;
+    peer.encrypt = false;
+    return esp_now_add_peer(&peer) == ESP_OK;
+}
 
 void ControllerMessage::print() {
     Serial.print("Controller Message\n");
@@ -52,15 +74,20 @@ void setupWireless() {
 	esp_now_register_send_cb(onSendData);
 	esp_now_register_recv_cb(onRecvData);
     
-    // Register peer
+    // Register primary peer.
     memcpy(peerInfo.peer_addr, peerAddr, 6);
-    peerInfo.channel = 0;  
+    peerInfo.channel = 0;
     peerInfo.encrypt = false;
-  
-    // Add peer        
-    if (esp_now_add_peer(&peerInfo) != ESP_OK){
-    	if (Serial) Serial.println("Failed to add peer");
-    	return;
+    if (!registerPeerAddress(peerAddr)) {
+        if (Serial) Serial.println("Failed to add primary peer");
+        return;
+    }
+
+    // Also register the elevator peer when configured so the controller can
+    // send pinch commands directly.
+    if (!registerPeerAddress(elevatorAddr)) {
+        if (Serial) Serial.println("Failed to add elevator peer");
+        return;
     }
     // ESP-NOW Setup Complete
 }

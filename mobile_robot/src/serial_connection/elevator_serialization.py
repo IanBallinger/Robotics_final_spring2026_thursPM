@@ -4,6 +4,7 @@ Wire format for ``src/esp32/src/elevator/elevator_control.cpp`` on the ESP32.
 Host → MCU (one line, newline-terminated)::
 
     ELV_CMD,<desired_height_m>
+    PINCH_CMD,<theta1_rad>,<theta2_rad>   # pinch finger articulation (see elevator_control.cpp)
 
 MCU → host::
 
@@ -27,6 +28,10 @@ def serialize_elevator_cmd(desired_height_m: float) -> str:
     return f"ELV_CMD,{desired_height_m}\n"
 
 
+def serialize_pinch_cmd(theta1_rad: float, theta2_rad: float) -> str:
+    return f"PINCH_CMD,{theta1_rad},{theta2_rad}\n"
+
+
 def deserialize_elevator_height(line: str) -> Optional[ElevatorHeightReading]:
     s = line.strip()
     if not s.startswith("ELV_MEAS,"):
@@ -48,6 +53,7 @@ def parse_elevator_line(line: str) -> Optional[ElevatorHeightReading]:
 __all__ = [
     "ElevatorHeightReading",
     "serialize_elevator_cmd",
+    "serialize_pinch_cmd",
     "deserialize_elevator_height",
     "parse_elevator_line",
 ]
