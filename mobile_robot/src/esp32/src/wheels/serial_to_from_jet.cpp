@@ -8,6 +8,7 @@
 #include "PID.h"
 #include "util.h"
 #include "wireless.h"
+#include "imu.h"
 
 // Host serial protocol handled here:
 //   MODE,AUTONOMY
@@ -18,7 +19,6 @@
 //   w1 = left_front, w2 = right_front, w3 = left_rear, w4 = right_rear
 //
 // This firmware is intentionally simplified for wheel-only autonomy bring-up:
-// - no IMU publishing
 // - robust serial line handling with overflow protection
 // - explicit command timeout in autonomy mode
 // - conservative command clamping / validation
@@ -57,6 +57,7 @@ constexpr unsigned long CMD_TIMEOUT_MS = 250;       // stop motors if host goes 
 constexpr unsigned long JOYSTICK_APPLY_PERIOD_MS = 50;
 constexpr unsigned long BUTTON_DEBOUNCE_MS = 50;
 constexpr unsigned long CONTROLLER_TIMEOUT_MS = 250;
+constexpr unsigned long IMU_PUBLISH_PERIOD_MS = 50;
 constexpr float WHEEL_CMD_FILTER_TAU_S = 0.1f;
 constexpr bool SERIAL_DEBUG_TIMING = false;
 
@@ -122,6 +123,8 @@ esp_now_peer_info_t peerInfo = {};
 bool freshWirelessData = false;
 ControllerMessage controllerMessage = {};
 RobotMessage robotMessage = {};
+
+IMU imu(BNO08X_RESET, BNO08X_CS, BNO08X_INT);
 
 static void stopMotors();
 
@@ -392,6 +395,24 @@ static void printWheelAck(const DesiredWheelVel& cmd) {
   Serial.println(control_effort[3]);
 }
 
+static void printIMU() {
+  const AccelReadings accel = imu.getAccelReadings();
+  const GyroReadings gyro = imu.getGyroReadings();
+
+  Serial.print("IMU,");
+  Serial.print(accel.ax, 6);
+  Serial.print(",");
+  Serial.print(accel.ay, 6);
+  Serial.print(",");
+  Serial.print(accel.az, 6);
+  Serial.print(",");
+  Serial.print(gyro.rollRate, 6);
+  Serial.print(",");
+  Serial.print(gyro.pitchRate, 6);
+  Serial.print(",");
+  Serial.println(gyro.yawRate, 6);
+}
+
 static void processSerialLine(const String& line) {
   DesiredWheelVel cmd;
   if (line.length() == 0) {
@@ -430,6 +451,7 @@ void setup() {
 
   pinMode(AUTONOMY_TOGGLE_BUTTON_PIN, INPUT_PULLUP);
   setupWireless();
+  imu.setup();
 
   const unsigned long now = millis();
   last_cmd_rx_ms = now;
@@ -444,6 +466,7 @@ void setup() {
 void loop() {
   updateAutonomyToggle();
   updateRemoteAutonomyToggle();
+  imu.update();
 
   while (Serial.available()) {
     char c = static_cast<char>(Serial.read());
@@ -505,6 +528,12 @@ void loop() {
     printWheelAck(latest_applied_cmd);
     ack_dirty = false;
     last_ack_publish_ms = now;
+  }
+
+  static unsigned long last_imu_publish_ms = 0;
+  if (now - last_imu_publish_ms >= IMU_PUBLISH_PERIOD_MS) {
+    printIMU();
+    last_imu_publish_ms = now;
   }
 
 }

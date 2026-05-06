@@ -418,9 +418,7 @@ class MissionRuntime:
             self.localization_filter.predict(IMUMeasurement(ax=0.0, ay=0.0, wz=0.0), dt)
         else:
             imu_msg = imu_packets[-1]
-            ax_meas = imu_msg.ax if self.localization_config.use_imu_accel_in_prediction else 0.0
-            ay_meas = imu_msg.ay if self.localization_config.use_imu_accel_in_prediction else 0.0
-            imu = IMUMeasurement(ax=ax_meas, ay=ay_meas, wz=imu_msg.gz)
+            imu = IMUMeasurement(ax=0.0, ay=0.0, wz=imu_msg.gz)
             self.localization_filter.predict(imu, dt)
             self.localization_filter.update_imu(IMUMeasurement(wz=imu_msg.gz))
 
