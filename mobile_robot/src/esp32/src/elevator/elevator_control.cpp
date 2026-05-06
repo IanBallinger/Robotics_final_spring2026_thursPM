@@ -92,7 +92,7 @@ constexpr unsigned long ARM_UPDATE_PERIOD_MS = 20;
 constexpr float ARM_SHOULDER_RATE_RAD_S = 1.2f;
 constexpr float ARM_ELBOW_RATE_RAD_S = 1.2f;
 constexpr float ARM_JOINT_REACHED_EPS_RAD = 0.01f;
-constexpr bool ELEVATOR_USE_TOF_SENSOR = true;
+constexpr bool ELEVATOR_USE_TOF_SENSOR = false;
 
 DesiredElevatorState latest_rx_cmd;
 DesiredElevatorState latest_applied_cmd;
@@ -164,6 +164,36 @@ double shoulder_ms = 0.0;
 double elbow_ms = 0.0;
 double pinch_left_ms = 0.0;
 double pinch_right_ms = 0.0;
+
+static void printElevatorControlDebug(const char* tag,
+                                      float measured_height_m,
+                                      float target_height_m,
+                                      float jog_drive,
+                                      float dt_jog_s,
+                                      float control_effort) {
+  Serial.print("ELV_DBG,");
+  Serial.print(tag);
+  Serial.print(",meas,");
+  if (isnan(measured_height_m)) {
+    Serial.print("nan");
+  } else {
+    Serial.print(measured_height_m, 4);
+  }
+  Serial.print(",target,");
+  Serial.print(target_height_m, 4);
+  Serial.print(",err,");
+  if (isnan(measured_height_m)) {
+    Serial.print("nan");
+  } else {
+    Serial.print(target_height_m - measured_height_m, 4);
+  }
+  Serial.print(",jog,");
+  Serial.print(jog_drive, 3);
+  Serial.print(",dt_jog_s,");
+  Serial.print(dt_jog_s, 4);
+  Serial.print(",eff,");
+  Serial.println(control_effort, 4);
+}
 
 static bool handlePinchCommand(const String& line, PinchCommand& cmd);
 static bool handleElevatorJogCommand(const String& line, DesiredElevatorJogCommand& cmd);
@@ -390,12 +420,23 @@ static float readElevatorHeightMeters() {
   const unsigned long now_ms = millis();
   const float tof_height_m = readTofElevatorHeightMeters();
   last_tof_height_m = tof_height_m;
+
+  if (!encoder_height_initialized && !ELEVATOR_USE_TOF_SENSOR) {
+    initializeEncoderHeightReference(0.0f);
+    Serial.println("ELV_ENC_INIT,zero_reference");
+  }
+
   maybeInitializeEncoderHeight(tof_height_m);
 
   const float encoder_height_m = readEncoderHeightMeters();
 
   if (!elevator_height_filter_initialized) {
-    if (!isnan(tof_height_m)) {
+    if (!ELEVATOR_USE_TOF_SENSOR && !isnan(encoder_height_m)) {
+      fused_elevator_height_m = encoder_height_m;
+      last_encoder_height_m = encoder_height_m;
+      last_encoder_height_valid = true;
+      elevator_height_filter_initialized = true;
+    } else if (!isnan(tof_height_m)) {
       fused_elevator_height_m = tof_height_m;
       if (!isnan(encoder_height_m)) {
         last_encoder_height_m = encoder_height_m;
@@ -437,7 +478,7 @@ static float readElevatorHeightMeters() {
     last_encoder_height_valid = false;
   }
 
-  if (!isnan(tof_height_m)) {
+  if (ELEVATOR_USE_TOF_SENSOR && !isnan(tof_height_m)) {
     if (isnan(estimated_height_m)) {
       estimated_height_m = tof_height_m;
     } else {
@@ -458,13 +499,16 @@ static float readElevatorHeightMeters() {
 }
 
 static void applyElevatorCommand(const DesiredElevatorState& cmd,
-                                 float measured_height_m) {
+                                 float measured_height_m,
+                                 float jog_drive = 0.0f,
+                                 float dt_jog_s = 0.0f) {
   latest_applied_cmd = cmd;
 
   double control_effort = pid.calculateParallel(measured_height_m, cmd.height_m);
   elevator_driver.drive(control_effort);
   Serial.print("ELV_CTRL_EFF,");
   Serial.println(control_effort, 4);
+  printElevatorControlDebug("APPLY", measured_height_m, cmd.height_m, jog_drive, dt_jog_s, control_effort);
 }
 
 static void printElevatorAck(const DesiredElevatorState& cmd) {
@@ -712,6 +756,8 @@ void loop() {
           latest_rx_cmd = cmd;
           has_valid_elevator_cmd = true;
           last_cmd_rx_ms = millis();
+          Serial.print("ELV_CMD_RX,target,");
+          Serial.println(latest_rx_cmd.height_m, 4);
         } else if (handleEncoderHeightInitCommand(rx_line, measured_initial_height_m)) {
           initializeEncoderHeightReference(measured_initial_height_m);
           Serial.print("ELV_ENC_INIT_ACK,");
@@ -759,23 +805,34 @@ void loop() {
     }
     Serial.print("ELV_JOG_ACK,");
     Serial.println(wireless_elevator_jog_drive, 3);
+    Serial.print("ELV_JOG_DBG,drive,");
+    Serial.print(wireless_elevator_jog_drive, 3);
+    Serial.print(",target_before,");
+    Serial.println(latest_rx_cmd.height_m, 4);
   }
   updateArmMotion(now);
   const float measured_height_m = readElevatorHeightMeters();
 
   if (now - last_wireless_elevator_jog_ms > CMD_TIMEOUT_MS) {
+    if (fabsf(wireless_elevator_jog_drive) > 1e-4f) {
+      Serial.println("ELV_JOG_TIMEOUT");
+    }
     wireless_elevator_jog_drive = 0.0f;
   }
 
   if (now - last_cmd_rx_ms > CMD_TIMEOUT_MS && !has_valid_elevator_cmd && !isnan(measured_height_m)) {
     latest_rx_cmd = DesiredElevatorState(measured_height_m);
     has_valid_elevator_cmd = true;
+    Serial.print("ELV_HOLD_INIT,timeout_hold_target,");
+    Serial.println(latest_rx_cmd.height_m, 4);
   }
 
   if (!isnan(measured_height_m)) {
     if (!has_valid_elevator_cmd) {
       latest_rx_cmd = DesiredElevatorState(measured_height_m);
       has_valid_elevator_cmd = true;
+      Serial.print("ELV_HOLD_INIT,measured_hold_target,");
+      Serial.println(latest_rx_cmd.height_m, 4);
     }
 
     if (last_wireless_elevator_jog_update_ms == 0) {
@@ -787,15 +844,25 @@ void loop() {
     last_wireless_elevator_jog_update_ms = now;
 
     if (fabsf(wireless_elevator_jog_drive) > 1e-4f) {
+      const float target_before = latest_rx_cmd.height_m;
       latest_rx_cmd.height_m += wireless_elevator_jog_drive * ELEVATOR_JOG_RATE_MPS * dt_jog_s;
+      Serial.print("ELV_JOG_STEP,before,");
+      Serial.print(target_before, 4);
+      Serial.print(",after,");
+      Serial.print(latest_rx_cmd.height_m, 4);
+      Serial.print(",drive,");
+      Serial.print(wireless_elevator_jog_drive, 3);
+      Serial.print(",dt_s,");
+      Serial.println(dt_jog_s, 4);
     }
   }
 
   if (has_valid_elevator_cmd && now - last_cmd_apply_ms >= CMD_APPLY_PERIOD_MS) {
     if (!isnan(measured_height_m)) {
-      applyElevatorCommand(latest_rx_cmd, measured_height_m);
+      applyElevatorCommand(latest_rx_cmd, measured_height_m, wireless_elevator_jog_drive, dt_jog_s);
     } else {
       elevator_driver.drive(0.0);
+      Serial.println("ELV_DBG,APPLY_SKIPPED,reason,no_measurement");
     }
     ack_dirty = true;
     last_cmd_apply_ms = now;
