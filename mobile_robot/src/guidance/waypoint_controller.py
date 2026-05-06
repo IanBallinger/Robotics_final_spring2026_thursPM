@@ -75,7 +75,7 @@ class CascadedWaypointController:
         komega_inner: float = 0.9,
         wheel_radius: float = 0.06,
         track_width: float = 0.4,
-        max_wheel_rate_rad_s: float = 3.0,
+        max_wheel_rate_rad_s: float = 0.5,
     ):
         self.k_rho = k_rho
         self.k_alpha = k_alpha
@@ -117,8 +117,12 @@ class CascadedWaypointController:
         w_right = (vx_body + omega) / r
 
         # clamp wheel rates to match wheel ESP32 firmware
-        w_left = np.clip(float(w_left), -self.max_wheel_rate_rad_s, self.max_wheel_rate_rad_s)
-        w_right = np.clip(float(w_right), -self.max_wheel_rate_rad_s, self.max_wheel_rate_rad_s)
+        w_left = np.clip(
+            float(w_left), -self.max_wheel_rate_rad_s, self.max_wheel_rate_rad_s
+        )
+        w_right = np.clip(
+            float(w_right), -self.max_wheel_rate_rad_s, self.max_wheel_rate_rad_s
+        )
         return w_left, w_left, w_right, w_right
 
     def wheel_rates_to_body_twist(
