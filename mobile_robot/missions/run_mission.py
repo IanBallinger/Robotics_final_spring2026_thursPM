@@ -346,7 +346,7 @@ class MissionRuntime:
         runtime_cfg = RuntimeConfig(
             control_rate_hz=float(runtime.get("control_rate_hz", 15.0)),
             controller_v_max=float(runtime.get("controller_v_max", 0.18)),
-            controller_omega_max=float(runtime.get("controller_omega_max", 0.75)),
+            controller_omega_max=float(runtime.get("controller_omega_max", 0.18)),
             tag_distance_kp=float(runtime.get("tag_distance_kp", 0.8)),
             tag_center_kp=float(runtime.get("tag_center_kp", 1.2)),
             search_omega_rad_s=float(runtime.get("search_omega_rad_s", 0.35)),

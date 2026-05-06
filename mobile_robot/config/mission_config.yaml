@@ -62,8 +62,10 @@ initial_state:
 
 mission_runtime:
   control_rate_hz: 15.0
+  # Match the 3 rad/s wheel-command limit with 0.06 m wheel radius:
+  # max feasible side command magnitude is 0.18 m/s.
   controller_v_max: 0.18
-  controller_omega_max: 0.75
+  controller_omega_max: 0.18
   tag_distance_kp: 0.8
   tag_center_kp: 1.2
   search_omega_rad_s: 0.35
