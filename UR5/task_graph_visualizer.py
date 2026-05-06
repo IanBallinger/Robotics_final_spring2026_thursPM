@@ -25,8 +25,8 @@ class TaskGraphStateVisualizer:
         control_callback: Optional[Callable[[str, Optional[Dict[str, Any]], Dict[str, Any]], str]] = None,
     ):
         mode_norm = str(mode).strip().lower()
-        if mode_norm not in {"simulate", "live"}:
-            raise ValueError("mode must be one of: simulate, live")
+        if mode_norm not in {"simulate", "live", "heap"}:
+            raise ValueError("mode must be one of: simulate, live, heap")
 
         self.mode = mode_norm
         self.title = title
@@ -74,8 +74,8 @@ class TaskGraphStateVisualizer:
         mode_label = ttk.Label(top_frame, text=f"mode: {self.mode}")
         mode_label.pack(side=tk.LEFT)
 
-        live_follow_var = tk.BooleanVar(value=(self.mode == "live"))
-        if self.mode == "live":
+        live_follow_var = tk.BooleanVar(value=(self.mode in {"live", "heap"}))
+        if self.mode in {"live", "heap"}:
             ttk.Checkbutton(
                 top_frame,
                 text="follow latest (live priority)",
@@ -92,6 +92,7 @@ class TaskGraphStateVisualizer:
         selected_task_var = tk.StringVar(value="")
         action_status_var = tk.StringVar(value="Controls ready.")
         layout_mode_var = tk.StringVar(value="grid")
+        view_mode_var = tk.StringVar(value=("heap" if self.mode == "heap" else "graph"))
         bimanual_attempt_var = tk.BooleanVar(value=False)
 
         ttk.Label(controls_frame, text="Selected task id:").pack(side=tk.LEFT)
@@ -159,6 +160,8 @@ class TaskGraphStateVisualizer:
         ).pack(side=tk.LEFT, padx=(0, 6))
         layout_button = ttk.Button(controls_frame, text="Layout: Grid")
         layout_button.pack(side=tk.LEFT, padx=(0, 6))
+        view_button = ttk.Button(controls_frame, text="View: Heap" if view_mode_var.get() == "heap" else "View: Graph")
+        view_button.pack(side=tk.LEFT, padx=(0, 6))
         ttk.Label(controls_frame, textvariable=action_status_var).pack(side=tk.LEFT, padx=(10, 0))
 
         slider_var = tk.IntVar(value=0)
@@ -187,6 +190,9 @@ class TaskGraphStateVisualizer:
         hovered_task_id: Optional[str] = None
 
         def _toggle_layout_mode():
+            if view_mode_var.get().strip().lower() == "heap":
+                action_status_var.set("Layout toggle is disabled in heap view.")
+                return
             cur = layout_mode_var.get().strip().lower()
             if cur == "grid":
                 layout_mode_var.set("force")
@@ -198,7 +204,20 @@ class TaskGraphStateVisualizer:
                 action_status_var.set("Grid layout enabled.")
             render_snapshot(selected_index)
 
+        def _toggle_view_mode():
+            cur = view_mode_var.get().strip().lower()
+            if cur == "heap":
+                view_mode_var.set("graph")
+                view_button.configure(text="View: Graph")
+                action_status_var.set("Graph view enabled.")
+            else:
+                view_mode_var.set("heap")
+                view_button.configure(text="View: Heap")
+                action_status_var.set("Heap view enabled.")
+            render_snapshot(selected_index)
+
         layout_button.configure(command=_toggle_layout_mode)
+        view_button.configure(command=_toggle_view_mode)
 
         def clamp_index(idx: int) -> int:
             if not self._history:
@@ -281,12 +300,101 @@ class TaskGraphStateVisualizer:
                     f"priority={task.get('priority_score',0.0)}"
                 )
 
+            heap_internal = snap.get("heap_internal", [])
+            lines.extend(["", f"heap_internal_size: {len(heap_internal)}", "heap_internal:"])
+            for node in heap_internal:
+                lines.append(
+                    f"- [{node.get('index', '?')}] {node.get('task_id','')} "
+                    f"w={node.get('queue_weight', 0.0):.3f} "
+                    f"p={node.get('priority_score', 0.0):.3f} "
+                    f"runnable={node.get('runnable', False)}"
+                )
+
             summary_text.delete("1.0", tk.END)
             summary_text.insert(tk.END, "\n".join(lines))
 
             canvas.delete("all")
             width = max(240, canvas.winfo_width())
             height = max(220, canvas.winfo_height())
+            if view_mode_var.get().strip().lower() == "heap":
+                heap_nodes = snap.get("heap_internal", [])
+                if not heap_nodes:
+                    canvas.create_text(
+                        width // 2,
+                        height // 2,
+                        text="heap is empty",
+                        fill="#adb5bd",
+                        font=("Consolas", 12),
+                    )
+                    return
+
+                node_w = 220
+                node_h = 48
+                top_margin = 20
+                level_gap = 82
+
+                positions: Dict[int, tuple[int, int, int, int]] = {}
+                for node in heap_nodes:
+                    i = int(node.get("index", 0))
+                    level = int(math.floor(math.log2(i + 1))) if i >= 0 else 0
+                    first_idx = (1 << level) - 1
+                    pos_in_level = i - first_idx
+                    nodes_in_level = 1 << level
+                    usable_w = max(40, width - 40)
+                    gap = usable_w / float(nodes_in_level + 1)
+                    cx = int(20 + (pos_in_level + 1) * gap)
+                    cy = top_margin + level * level_gap
+                    x0n = cx - node_w // 2
+                    y0n = cy
+                    positions[i] = (x0n, y0n, x0n + node_w, y0n + node_h)
+
+                for node in heap_nodes:
+                    i = int(node.get("index", 0))
+                    child_l = 2 * i + 1
+                    child_r = 2 * i + 2
+                    src = positions.get(i)
+                    if src is None:
+                        continue
+                    sx = (src[0] + src[2]) // 2
+                    sy = src[3]
+                    for child in (child_l, child_r):
+                        dst = positions.get(child)
+                        if dst is None:
+                            continue
+                        dx = (dst[0] + dst[2]) // 2
+                        dy = dst[1]
+                        canvas.create_line(sx, sy, dx, dy, fill="#495057", width=2)
+
+                for node in heap_nodes:
+                    i = int(node.get("index", 0))
+                    rect = positions.get(i)
+                    if rect is None:
+                        continue
+                    x0n, y0n, x1n, y1n = rect
+                    runnable = bool(node.get("runnable", False))
+                    fill = "#2b8a3e" if runnable else "#364fc7"
+                    canvas.create_rectangle(x0n, y0n, x1n, y1n, fill=fill, outline="#ced4da", width=1)
+                    canvas.create_text(
+                        x0n + 6,
+                        y0n + 7,
+                        anchor=tk.NW,
+                        fill="#ffffff",
+                        text=f"[{i}] {str(node.get('task_id', ''))[:22]}",
+                        font=("Consolas", 9, "bold"),
+                    )
+                    canvas.create_text(
+                        x0n + 6,
+                        y0n + 25,
+                        anchor=tk.NW,
+                        fill="#f1f3f5",
+                        text=(
+                            f"w={float(node.get('queue_weight', 0.0)):.2f} "
+                            f"p={float(node.get('priority_score', 0.0)):.2f}"
+                        ),
+                        font=("Consolas", 8),
+                    )
+                return
+
             col_count = 4
             node_w = max(190, int((width - 40) / col_count) - 10)
             node_h = 56

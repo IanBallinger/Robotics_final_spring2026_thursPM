@@ -250,6 +250,37 @@ def _tracked_item_position(row, label):
     return None
 
 
+def _task_graph_default_dependent_label(task_graph_file, task_id):
+    graph_path = Path(task_graph_file)
+    if not task_id or not graph_path.exists():
+        return ""
+    try:
+        payload = json.loads(graph_path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    tasks = payload.get("tasks", []) if isinstance(payload, dict) else []
+    if not isinstance(tasks, list):
+        return ""
+
+    tid = str(task_id).strip().lower()
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        if str(task.get("task_id", "")).strip().lower() != tid:
+            continue
+        params = task.get("params", {})
+        if not isinstance(params, dict):
+            return ""
+        preferred = str(params.get("dependent_item_label", "")).strip()
+        if preferred:
+            return preferred
+        fallback = str(params.get("target_label", "")).strip()
+        if fallback:
+            return fallback
+        return ""
+    return ""
+
+
 def _load_waypoints(csv_path, task_id=""):
     rows = []
     with open(csv_path, "r", encoding="utf-8", newline="") as fh:
@@ -411,6 +442,10 @@ class WaypointTuningRunnerUI:
         self._load_waypoint_file(self.current_file, task_id=args.task_id)
 
         self.current_idx = 0
+        self._task_graph_default_label = _task_graph_default_dependent_label(
+            args.task_graph_file,
+            args.task_id,
+        )
 
         self.vision_feeds = None
         self.vision_lock = threading.Lock()
@@ -468,6 +503,7 @@ class WaypointTuningRunnerUI:
         self.closed_loop_var = tk.BooleanVar(value=bool(args.closed_loop_vision))
         self.realtime_mode_var = tk.BooleanVar(value=False)
         self.object_label_var = tk.StringVar(value=args.object_label or "")
+        self.object_label_combo = None
         self.step_sleep_var = tk.DoubleVar(value=float(args.play_step_sleep_s))
         self.file_label_var = tk.StringVar(value=str(self.current_file.name))
         self.gripper_open_pct_var = tk.DoubleVar(value=100.0)
@@ -483,6 +519,7 @@ class WaypointTuningRunnerUI:
         self.joint_delta_vars = {}
         self.joint_nominal_vars = {}
         self.info_var = tk.StringVar(value="")
+        self.distance_zero_wp_idx = None
 
         self._building = False
         self._play_thread = None
@@ -497,6 +534,7 @@ class WaypointTuningRunnerUI:
         self._gripper_forward_period_s = 2.0
 
         self._build_ui()
+        self._refresh_object_label_choices()
         self._set_waypoint(0)
 
         self._gripper_io_lock = threading.Lock()
@@ -526,7 +564,46 @@ class WaypointTuningRunnerUI:
         self.file_index = new_idx
         self.file_label_var.set(str(new_file.name))
         self.waypoint_slider.configure(to=max(0, len(self.edited_rows) - 1))
+        self._refresh_object_label_choices()
         self._set_waypoint(0)
+
+    def _refresh_object_label_choices(self):
+        labels = set()
+
+        if self._task_graph_default_label:
+            labels.add(self._task_graph_default_label)
+        if self.args.object_label:
+            labels.add(str(self.args.object_label).strip())
+
+        for row in self.edited_rows:
+            dep = str(row.get("dependent_item_label", "")).strip()
+            if dep:
+                labels.add(dep)
+            for item in _safe_json_list(row.get("tracked_items_json", "")):
+                if not isinstance(item, dict):
+                    continue
+                label = str(item.get("label", "")).strip()
+                if label:
+                    labels.add(label)
+
+        ordered = sorted(labels, key=lambda x: x.lower())
+        if self.object_label_combo is not None:
+            self.object_label_combo["values"] = ordered
+
+        current = str(self.object_label_var.get() or "").strip()
+        if current and current in labels:
+            return
+
+        if self.args.object_label and str(self.args.object_label).strip() in labels:
+            self.object_label_var.set(str(self.args.object_label).strip())
+            return
+
+        if self._task_graph_default_label and self._task_graph_default_label in labels:
+            self.object_label_var.set(self._task_graph_default_label)
+            return
+
+        if ordered:
+            self.object_label_var.set(ordered[0])
 
     def _build_ui(self):
         self.root.columnconfigure(0, weight=0)
@@ -570,7 +647,15 @@ class WaypointTuningRunnerUI:
         ttk.Checkbutton(controls, text="Closed-loop vision playback", variable=self.closed_loop_var).grid(row=7, column=0, columnspan=4, sticky="w", pady=(6, 0))
         ttk.Checkbutton(controls, text="Real-time tuning mode", variable=self.realtime_mode_var).grid(row=7, column=4, sticky="w", pady=(6, 0))
         ttk.Label(controls, text="Dependent/object label").grid(row=8, column=0, sticky="w")
-        ttk.Entry(controls, textvariable=self.object_label_var, width=28).grid(row=9, column=0, columnspan=5, sticky="ew")
+        self.object_label_combo = ttk.Combobox(
+            controls,
+            textvariable=self.object_label_var,
+            width=28,
+            state="readonly",
+            values=[],
+        )
+        self.object_label_combo.grid(row=9, column=0, columnspan=5, sticky="ew")
+        self.object_label_combo.bind("<<ComboboxSelected>>", lambda _ev: self._on_object_label_changed())
 
         ttk.Label(controls, text="Play step sleep [s]").grid(row=10, column=0, sticky="w", pady=(6, 0))
         ttk.Entry(controls, textvariable=self.step_sleep_var, width=8).grid(row=10, column=1, sticky="w")
@@ -582,7 +667,11 @@ class WaypointTuningRunnerUI:
         ttk.Button(controls, text="Add WP From Trace", command=self._add_waypoint_from_trace).grid(row=12, column=0, columnspan=2, sticky="ew", pady=2)
         ttk.Button(controls, text="Add WP From Robot", command=self._add_waypoint_from_robot).grid(row=12, column=2, columnspan=2, sticky="ew", pady=2)
 
-        row0 = 13
+        ttk.Button(controls, text="Set Dist Zero Here", command=self._set_distance_zero_here).grid(
+            row=13, column=0, columnspan=4, sticky="ew", pady=2
+        )
+
+        row0 = 14
         ttk.Label(controls, text="Edit Pose (slider + text)", font=("Segoe UI", 10, "bold")).grid(row=row0, column=0, columnspan=5, sticky="w", pady=(10, 2))
 
         for i, field in enumerate(EDIT_FIELDS):
@@ -792,6 +881,15 @@ class WaypointTuningRunnerUI:
         self._apply_joint_field_to_row(field, v)
         self._schedule_realtime_update()
 
+    def _on_object_label_changed(self):
+        self._refresh_plots()
+        self._set_waypoint(self.current_idx)
+
+    def _set_distance_zero_here(self):
+        self.distance_zero_wp_idx = int(self.current_idx)
+        self._refresh_plots()
+        self._set_waypoint(self.current_idx)
+
     def _on_gripper_open_change(self):
         if self._building:
             return
@@ -938,7 +1036,18 @@ class WaypointTuningRunnerUI:
             wp_idx = int(_try_float(row.get("waypoint_index", idx + 1), idx + 1))
             wp_name = str(row.get("waypoint_name", "")).strip() or f"wp_{wp_idx}"
             dep = self._current_object_label(row)
-            self.info_var.set(f"Waypoint {idx + 1}/{len(self.edited_rows)} : index={wp_idx} name={wp_name} dependent={dep or '-'}")
+            dist_msg = "dist=-"
+            if dep:
+                obj = _tracked_item_position(row, dep)
+                if obj is not None:
+                    row_xyz = _row_global_xyz(row, self.arm_side)
+                    dist_msg = f"dist={_distance3(row_xyz, obj):.4f} m"
+            zero_msg = ""
+            if self.distance_zero_wp_idx is not None:
+                zero_msg = f" zero_ref_wp={int(self.distance_zero_wp_idx) + 1}"
+            self.info_var.set(
+                f"Waypoint {idx + 1}/{len(self.edited_rows)} : index={wp_idx} name={wp_name} dependent={dep or '-'} {dist_msg}{zero_msg}"
+            )
         finally:
             self._building = False
 
@@ -1164,8 +1273,9 @@ class WaypointTuningRunnerUI:
         nominal = []
         tuned = []
         idxs = []
+        row_idxs = []
 
-        for i, (src, row) in enumerate(zip(self.source_rows, self.edited_rows), start=1):
+        for i, (src, row) in enumerate(zip(self.source_rows, self.edited_rows)):
             dep = self._current_object_label(row)
             obj = _tracked_item_position(row, dep)
             if obj is None:
@@ -1174,9 +1284,19 @@ class WaypointTuningRunnerUI:
             src_xyz = _row_global_xyz(src, self.arm_side)
             row_xyz = _row_global_xyz(row, self.arm_side)
 
-            idxs.append(i)
+            idxs.append(i + 1)
+            row_idxs.append(i)
             nominal.append(_distance3(src_xyz, obj))
             tuned.append(_distance3(row_xyz, obj))
+
+        if self.distance_zero_wp_idx is not None:
+            baseline_row = int(self.distance_zero_wp_idx)
+            if baseline_row in row_idxs:
+                b = row_idxs.index(baseline_row)
+                nominal_zero = nominal[b]
+                tuned_zero = tuned[b]
+                nominal = [d - nominal_zero for d in nominal]
+                tuned = [d - tuned_zero for d in tuned]
 
         return idxs, nominal, tuned
 

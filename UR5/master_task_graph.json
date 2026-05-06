@@ -137,10 +137,10 @@
       "unblocks_arms": [],
       "prerequisites": [
         "acquire_bowl",
-        "door_open_for_unload"
+        "door_open"
       ],
       "points_if_completed": {
-        "door_open_for_unload": 0,
+        "door_open": 0,
         "acquire_bowl": 0
       },
       "params": {
@@ -166,10 +166,10 @@
       "unblocks_arms": [],
       "prerequisites": [
         "acquire_plate",
-        "door_open_for_unload"
+        "door_open"
       ],
       "points_if_completed": {
-        "door_open_for_unload": 0,
+        "door_open": 0,
         "acquire_plate": 0
       },
       "params": {
@@ -213,7 +213,7 @@
     },
     {
       "name": "open_microwave_door",
-      "task_id": "door_open_for_unload",
+      "task_id": "door_open",
       "points": 1,
       "score_token": "open_microwave_door",
       "max_score_count": 3,
@@ -380,7 +380,7 @@
       "unblocks_arms": [],
       "prerequisites": [
         "press_stop_for_plate",
-        "door_open_for_unload",
+        "door_open",
         "put_plate"
       ],
       "points_if_completed": {},
@@ -409,7 +409,7 @@
       "unblocks_arms": [],
       "prerequisites": [
         "press_stop_for_bowl",
-        "door_open_for_unload",
+        "door_open",
         "put_bowl"
       ],
       "points_if_completed": {},

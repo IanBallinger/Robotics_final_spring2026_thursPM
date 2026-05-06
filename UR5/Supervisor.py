@@ -166,7 +166,7 @@ OPEN_MICROWAVE_TASK_TEMPLATE = {
 }
 
 # Unified canonical open-door task identity for both load/unload contexts.
-DOOR_OPEN_FOR_LOAD_TASK_ID = "door_open_for_unload"
+DOOR_OPEN_FOR_LOAD_TASK_ID = "door_open"
 CLOSE_MICROWAVE_TASK_ID = "close_door"
 PRESS_STOP_FOR_BOWL_TASK_ID = "press_stop_for_bowl"
 PRESS_STOP_FOR_PLATE_TASK_ID = "press_stop_for_plate"
@@ -1702,6 +1702,21 @@ class Supervisor:
                 }
             )
 
+        heap_internal = []
+        for idx, queued in enumerate(self._task_heap):
+            heap_internal.append(
+                {
+                    "index": idx,
+                    "task_id": queued.task_id,
+                    "name": queued.name,
+                    "arm": queued.arm,
+                    "queue_weight": float(queued.queue_weight),
+                    "priority_score": float(self._priority_score(queued)),
+                    "effective_points": float(self._effective_points(queued)),
+                    "runnable": bool(self._is_task_runnable(queued)),
+                }
+            )
+
         return {
             "step": self._visual_step_counter,
             "event": event,
@@ -1727,6 +1742,7 @@ class Supervisor:
             "earned_points_total": self._earned_points_total,
             "score_counts": dict(self._score_counts),
             "tasks": tasks,
+            "heap_internal": heap_internal,
             "visualizer_mode": self._active_visualizer_mode,
         }
 
@@ -3170,10 +3186,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--autonomy-visualizer",
         type=str,
         default="off",
-        choices=["off", "auto", "simulate", "live"],
+        choices=["off", "auto", "simulate", "live", "heap"],
         help=(
             "Task-graph visualizer mode. 'simulate' records scheduler simulation timeline, "
-            "'live' tracks real scheduler state with optional live-follow playback toggle. "
+            "'live' tracks real scheduler state with optional live-follow playback toggle, "
+            "and 'heap' shows underlying scheduler heapq structure over time. "
             "'auto' selects simulate/live based on --autonomy-simulate."
         ),
     )
@@ -3223,7 +3240,11 @@ def main(argv: Optional[List[str]] = None):
                             title=(
                                 "UR5 Task Graph Visualizer (simulation)"
                                 if visualizer_mode == "simulate"
-                                else "UR5 Task Graph Visualizer (live scheduler)"
+                                else (
+                                    "UR5 Task Graph Visualizer (heap view)"
+                                    if visualizer_mode == "heap"
+                                    else "UR5 Task Graph Visualizer (live scheduler)"
+                                )
                             ),
                             control_callback=supervisor.handle_visualizer_control,
                         )
