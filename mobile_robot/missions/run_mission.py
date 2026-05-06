@@ -60,11 +60,16 @@ from localization.person_detection import PersonDetector  # noqa: E402
 from serial_connection.elevator_serial_con import ElevatorSerialConnect  # noqa: E402
 from serial_connection.serial_con import SerialConnect  # noqa: E402
 from serial_connection.serialization import EncoderReading, IMUReading  # noqa: E402
-from guidance.waypoint_controller import CascadedWaypointController, MapPoseVelocity, wrap_to_pi  # noqa: E402
+from guidance.waypoint_controller import (
+    CascadedWaypointController,
+    MapPoseVelocity,
+    wrap_to_pi,
+)  # noqa: E402
 from planning.a_star import Waypoint  # noqa: E402
 
 
 DEBUG_WHEEL_ACKS = True
+TURN_GYRO_ONLY_WZ_THRESHOLD_RAD_S = 0.05
 
 
 class MissionPhase(Enum):
@@ -170,8 +175,12 @@ class MissionRuntime:
         self.camera_cfg_path = Path(camera_cfg_path)
         self.tasks = load_tasks(self.tasks_path)
         self.map = load_map(self.tasks_path)
-        self.landmarks_by_id = {str(landmark.id): landmark for landmark in self.map.landmarks}
-        self.camera_to_robot_extrinsics = load_camera_to_robot_extrinsics(self.camera_cfg_path)
+        self.landmarks_by_id = {
+            str(landmark.id): landmark for landmark in self.map.landmarks
+        }
+        self.camera_to_robot_extrinsics = load_camera_to_robot_extrinsics(
+            self.camera_cfg_path
+        )
         if not self.tasks:
             raise ValueError("mission config must define at least one task")
 
@@ -274,7 +283,9 @@ class MissionRuntime:
         self.target_reached_since: Optional[float] = None
         self.last_loop_time = time.monotonic()
         self.last_telemetry_time = 0.0
-        self.telemetry_period = 0.0 if telemetry_rate_hz <= 0.0 else 1.0 / telemetry_rate_hz
+        self.telemetry_period = (
+            0.0 if telemetry_rate_hz <= 0.0 else 1.0 / telemetry_rate_hz
+        )
         self.telemetry_host = telemetry_host
         self.telemetry_port = telemetry_port
         self.telemetry_sock: Optional[socket.socket] = None
@@ -314,7 +325,9 @@ class MissionRuntime:
         tasks_path: Path,
         localization_path: Path,
         camera_path: Path,
-    ) -> tuple[LocalizationConfig, RuntimeConfig, RealSenseDeviceConfig, RealSenseDeviceConfig]:
+    ) -> tuple[
+        LocalizationConfig, RuntimeConfig, RealSenseDeviceConfig, RealSenseDeviceConfig
+    ]:
         with open(tasks_path, "r", encoding="utf-8") as f:
             mission_raw = yaml.safe_load(f)
         with open(localization_path, "r", encoding="utf-8") as f:
@@ -346,14 +359,29 @@ class MissionRuntime:
             ),
             initial_covariance=np.asarray(loc.get("initial_covariance"), dtype=float),
             process_noise=np.asarray(loc.get("process_noise"), dtype=float),
-            apriltag_measurement_noise=np.asarray(loc.get("apriltag_measurement_noise", [[0.025, 0.0, 0.0], [0.0, 0.025, 0.0], [0.0, 0.0, 0.04]]), dtype=float),
-            gyro_measurement_noise=np.asarray(loc.get("gyro_measurement_noise", [[0.15]]), dtype=float),
-            wheel_twist_measurement_noise=np.asarray(
-                loc.get("wheel_twist_measurement_noise", [[0.02, 0.0, 0.0], [0.0, 0.02, 0.0], [0.0, 0.0, 0.08]]),
+            apriltag_measurement_noise=np.asarray(
+                loc.get(
+                    "apriltag_measurement_noise",
+                    [[0.025, 0.0, 0.0], [0.0, 0.025, 0.0], [0.0, 0.0, 0.04]],
+                ),
                 dtype=float,
             ),
-            use_imu_accel_in_prediction=bool(loc.get("use_imu_accel_in_prediction", False)),
-            apriltag_reinitialize_distance_m=float(loc.get("apriltag_reinitialize_distance_m", 0.0)),
+            gyro_measurement_noise=np.asarray(
+                loc.get("gyro_measurement_noise", [[0.15]]), dtype=float
+            ),
+            wheel_twist_measurement_noise=np.asarray(
+                loc.get(
+                    "wheel_twist_measurement_noise",
+                    [[0.02, 0.0, 0.0], [0.0, 0.02, 0.0], [0.0, 0.0, 0.08]],
+                ),
+                dtype=float,
+            ),
+            use_imu_accel_in_prediction=bool(
+                loc.get("use_imu_accel_in_prediction", False)
+            ),
+            apriltag_reinitialize_distance_m=float(
+                loc.get("apriltag_reinitialize_distance_m", 0.0)
+            ),
         )
         runtime_cfg = RuntimeConfig(
             control_rate_hz=float(runtime.get("control_rate_hz", 15.0)),
@@ -362,11 +390,19 @@ class MissionRuntime:
             tag_distance_kp=float(runtime.get("tag_distance_kp", 0.8)),
             tag_center_kp=float(runtime.get("tag_center_kp", 1.2)),
             search_omega_rad_s=float(runtime.get("search_omega_rad_s", 0.35)),
-            align_only_center_error_px=float(runtime.get("align_only_center_error_px", 120.0)),
-            default_distance_tolerance_m=float(runtime.get("default_distance_tolerance_m", 0.08)),
-            default_center_tolerance_px=float(runtime.get("default_center_tolerance_px", 40.0)),
+            align_only_center_error_px=float(
+                runtime.get("align_only_center_error_px", 120.0)
+            ),
+            default_distance_tolerance_m=float(
+                runtime.get("default_distance_tolerance_m", 0.08)
+            ),
+            default_center_tolerance_px=float(
+                runtime.get("default_center_tolerance_px", 40.0)
+            ),
             default_settle_time_s=float(runtime.get("default_settle_time_s", 0.3)),
-            person_detection_period_s=float(runtime.get("person_detection_period_s", 0.5)),
+            person_detection_period_s=float(
+                runtime.get("person_detection_period_s", 0.5)
+            ),
             obstacle_stop_forward_m=float(runtime.get("obstacle_stop_forward_m", 1.2)),
             obstacle_stop_lateral_m=float(runtime.get("obstacle_stop_lateral_m", 0.5)),
         )
@@ -374,13 +410,17 @@ class MissionRuntime:
         apriltag_camera_raw = camera_raw.get("apriltag_camera", {})
         person_camera_raw = camera_raw.get("person_camera", {})
         apriltag_camera = RealSenseDeviceConfig(
-            serial_number=os.environ.get("APRILTAG_REALSENSE_SERIAL", apriltag_camera_raw.get("serial_number")),
+            serial_number=os.environ.get(
+                "APRILTAG_REALSENSE_SERIAL", apriltag_camera_raw.get("serial_number")
+            ),
             width=int(apriltag_camera_raw.get("width", 640)),
             height=int(apriltag_camera_raw.get("height", 480)),
             fps=int(apriltag_camera_raw.get("fps", 15)),
         )
         person_camera = RealSenseDeviceConfig(
-            serial_number=os.environ.get("PERSON_REALSENSE_SERIAL", person_camera_raw.get("serial_number")),
+            serial_number=os.environ.get(
+                "PERSON_REALSENSE_SERIAL", person_camera_raw.get("serial_number")
+            ),
             width=int(person_camera_raw.get("width", 640)),
             height=int(person_camera_raw.get("height", 480)),
             fps=int(person_camera_raw.get("fps", 15)),
@@ -403,7 +443,9 @@ class MissionRuntime:
     def _zero_wheel_rates(self) -> tuple[float, float, float, float]:
         return (0.0, 0.0, 0.0, 0.0)
 
-    def _body_twist_to_wheels(self, vx: float, omega: float) -> tuple[float, float, float, float]:
+    def _body_twist_to_wheels(
+        self, vx: float, omega: float
+    ) -> tuple[float, float, float, float]:
         return self.twist_helper.body_twist_to_wheel_rates(vx, omega)
 
     def _update_localization_from_imu(self, dt: float) -> None:
@@ -422,10 +464,13 @@ class MissionRuntime:
             self.localization_filter.predict(imu, dt)
             self.localization_filter.update_imu(IMUMeasurement(wz=imu_msg.gz))
 
-        if encoder_packets:
-            enc = encoder_packets[-1]
-            vx_body, vy_body, omega = self.twist_helper.wheel_rates_to_body_twist((enc.w1, enc.w2, enc.w3, enc.w4))
-            self.localization_filter.update_wheel_twist(WheelTwistMeasurement(vx=vx_body, vy=vy_body, wz=omega))
+        # if encoder_packets:
+        #     enc = encoder_packets[-1]
+        #     vx_body, vy_body, omega = self.twist_helper.wheel_rates_to_body_twist((enc.w1, enc.w2, enc.w3, enc.w4))
+        #     imu_wz = 0.0 if not imu_packets else float(imu_packets[-1].gz)
+        #     turning = abs(imu_wz) >= TURN_GYRO_ONLY_WZ_THRESHOLD_RAD_S
+        #     if not turning:
+        #         self.localization_filter.update_wheel_twist(WheelTwistMeasurement(vx=vx_body, vy=vy_body, wz=omega))
 
     def _detect_tags(self) -> dict[str, TagDetection]:
         if self.apriltag_camera is None:
@@ -437,7 +482,12 @@ class MissionRuntime:
         results = self.apriltag_detector.detect(
             gray,
             estimate_tag_pose=True,
-            camera_params=[frame.intrinsics.fx, frame.intrinsics.fy, frame.intrinsics.cx, frame.intrinsics.cy],
+            camera_params=[
+                frame.intrinsics.fx,
+                frame.intrinsics.fy,
+                frame.intrinsics.cx,
+                frame.intrinsics.cy,
+            ],
             tag_size=0.09,
         )
         detections: dict[str, TagDetection] = {}
@@ -484,21 +534,29 @@ class MissionRuntime:
         return np.column_stack((x_world, y_world, z_world))
 
     @staticmethod
-    def _invert_transform(rotation: np.ndarray, translation: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _invert_transform(
+        rotation: np.ndarray, translation: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
         r_inv = rotation.T
         t_inv = -r_inv @ translation.reshape(3)
         return r_inv, t_inv
 
-    def _apriltag_measurement_from_detection(self, det: TagDetection) -> Optional[AprilTagMeasurement]:
+    def _apriltag_measurement_from_detection(
+        self, det: TagDetection
+    ) -> Optional[AprilTagMeasurement]:
         landmark = self.landmarks_by_id.get(det.tag_id)
         if landmark is None:
             return None
 
         r_robot_camera = (
-            np.asarray(self.camera_to_robot_extrinsics.rotation_camera_to_world, dtype=float).reshape(3, 3)
+            np.asarray(
+                self.camera_to_robot_extrinsics.rotation_camera_to_world, dtype=float
+            ).reshape(3, 3)
             @ self._optical_to_nominal_rotation()
         )
-        t_robot_camera = np.asarray(self.camera_to_robot_extrinsics.translation_camera_to_world, dtype=float).reshape(3)
+        t_robot_camera = np.asarray(
+            self.camera_to_robot_extrinsics.translation_camera_to_world, dtype=float
+        ).reshape(3)
 
         r_camera_tag = np.asarray(det.pose_R, dtype=float).reshape(3, 3)
         t_camera_tag = np.array([det.tx_m, det.ty_m, det.tz_m], dtype=float)
@@ -508,7 +566,9 @@ class MissionRuntime:
         r_tag_robot, t_tag_robot = self._invert_transform(r_robot_tag, t_robot_tag)
 
         r_world_tag = self._tag_world_rotation(float(landmark.heading))
-        t_world_tag = np.array([float(landmark.point[0]), float(landmark.point[1]), 0.0], dtype=float)
+        t_world_tag = np.array(
+            [float(landmark.point[0]), float(landmark.point[1]), 0.0], dtype=float
+        )
 
         r_world_robot = r_world_tag @ r_tag_robot
         t_world_robot = r_world_tag @ t_tag_robot + t_world_tag
@@ -521,7 +581,9 @@ class MissionRuntime:
             covariance=self.localization_config.apriltag_measurement_noise,
         )
 
-    def _update_localization_from_apriltags(self, detections: dict[str, TagDetection]) -> None:
+    def _update_localization_from_apriltags(
+        self, detections: dict[str, TagDetection]
+    ) -> None:
         if not detections:
             return
 
@@ -563,7 +625,9 @@ class MissionRuntime:
         if self.person_detector is None:
             self._obstacle_blocked = False
             return False
-        if (now - self._last_person_detection_time) < self.runtime_config.person_detection_period_s:
+        if (
+            now - self._last_person_detection_time
+        ) < self.runtime_config.person_detection_period_s:
             return self._obstacle_blocked
         try:
             detections = self.person_detector.detect(robot_pose=None)
@@ -577,13 +641,18 @@ class MissionRuntime:
             if det.position_robot_m is None:
                 continue
             x_r, y_r, _ = det.position_robot_m.tolist()
-            if 0.0 < x_r <= self.runtime_config.obstacle_stop_forward_m and abs(y_r) <= self.runtime_config.obstacle_stop_lateral_m:
+            if (
+                0.0 < x_r <= self.runtime_config.obstacle_stop_forward_m
+                and abs(y_r) <= self.runtime_config.obstacle_stop_lateral_m
+            ):
                 blocked = True
                 break
         self._obstacle_blocked = blocked
         return blocked
 
-    def _update_manipulator_for_task(self, task: Task, active: bool, now: float) -> None:
+    def _update_manipulator_for_task(
+        self, task: Task, active: bool, now: float
+    ) -> None:
         if self.elevator_serial is None:
             return
         if self._active_arm_task_name != task.name:
@@ -593,8 +662,13 @@ class MissionRuntime:
         if not active:
             return
         self.elevator_serial.send_height_cmd(task.desired_elevator_height_m)
-        if task.arm_waypoints and ((now - self._last_arm_waypoint_send_time) >= max(0.0, task.arm_point_dwell_s)):
-            waypoint = task.arm_waypoints[min(self._active_arm_waypoint_index, len(task.arm_waypoints) - 1)]
+        if task.arm_waypoints and (
+            (now - self._last_arm_waypoint_send_time)
+            >= max(0.0, task.arm_point_dwell_s)
+        ):
+            waypoint = task.arm_waypoints[
+                min(self._active_arm_waypoint_index, len(task.arm_waypoints) - 1)
+            ]
             self.elevator_serial.send_arm_cmd(waypoint.x, waypoint.y)
             self._last_arm_waypoint_send_time = now
             if self._active_arm_waypoint_index < len(task.arm_waypoints) - 1:
@@ -629,7 +703,9 @@ class MissionRuntime:
         if not task.completion_conditions:
             return True
         context = self._task_context(task)
-        return all(evaluate_condition(expr, context) for expr in task.completion_conditions)
+        return all(
+            evaluate_condition(expr, context) for expr in task.completion_conditions
+        )
 
     def _advance_to_execute_task(self) -> None:
         task = self._current_task()
@@ -646,7 +722,9 @@ class MissionRuntime:
         else:
             self._set_phase(MissionPhase.SEEK_GOAL)
 
-    def _seek_goal_command(self, task: Task, now: float) -> tuple[tuple[float, float, float, float], Optional[float], Optional[float]]:
+    def _seek_goal_command(
+        self, task: Task, now: float
+    ) -> tuple[tuple[float, float, float, float], Optional[float], Optional[float]]:
         goal = task.goal
         if goal is None:
             self.target_reached_since = None
@@ -673,7 +751,9 @@ class MissionRuntime:
         heading_tol = 0.15
         settle_time = float(self.runtime_config.default_settle_time_s)
 
-        reached = position_error_m <= distance_tol and abs(heading_error_rad) <= heading_tol
+        reached = (
+            position_error_m <= distance_tol and abs(heading_error_rad) <= heading_tol
+        )
         if reached:
             if self.target_reached_since is None:
                 self.target_reached_since = now
@@ -737,10 +817,20 @@ class MissionRuntime:
         elif raw_line.startswith("DBG,IMU_META,"):
             self._last_debug_imu_meta_line = raw_line
 
-    def _publish_telemetry(self, now: float, current_task: str, task: Optional[Task], position_error_m: Optional[float], heading_error_rad: Optional[float]) -> None:
+    def _publish_telemetry(
+        self,
+        now: float,
+        current_task: str,
+        task: Optional[Task],
+        position_error_m: Optional[float],
+        heading_error_rad: Optional[float],
+    ) -> None:
         if self.telemetry_sock is None:
             return
-        if self.telemetry_period > 0.0 and (now - self.last_telemetry_time) < self.telemetry_period:
+        if (
+            self.telemetry_period > 0.0
+            and (now - self.last_telemetry_time) < self.telemetry_period
+        ):
             return
         state = self.localization_filter.get_state()
         packet = TelemetryPacket(
@@ -750,9 +840,15 @@ class MissionRuntime:
             current_task=current_task,
             goal_x=None if task is None or task.goal is None else float(task.goal.x),
             goal_y=None if task is None or task.goal is None else float(task.goal.y),
-            goal_heading=None if task is None or task.goal is None else float(task.goal.heading),
-            goal_distance_error_m=None if position_error_m is None else float(position_error_m),
-            goal_heading_error_rad=None if heading_error_rad is None else float(heading_error_rad),
+            goal_heading=(
+                None if task is None or task.goal is None else float(task.goal.heading)
+            ),
+            goal_distance_error_m=(
+                None if position_error_m is None else float(position_error_m)
+            ),
+            goal_heading_error_rad=(
+                None if heading_error_rad is None else float(heading_error_rad)
+            ),
             x=float(state[0]),
             y=float(state[1]),
             yaw=float(state[2]),
@@ -764,7 +860,10 @@ class MissionRuntime:
             allstop=bool(self.allstop),
             obstacle_blocked=bool(self._obstacle_blocked),
         )
-        self.telemetry_sock.sendto(json.dumps(asdict(packet)).encode("utf-8"), (self.telemetry_host, self.telemetry_port))
+        self.telemetry_sock.sendto(
+            json.dumps(asdict(packet)).encode("utf-8"),
+            (self.telemetry_host, self.telemetry_port),
+        )
         self.last_telemetry_time = now
 
     def run(self, max_ticks: Optional[int] = None) -> None:
@@ -784,7 +883,9 @@ class MissionRuntime:
                 self._maybe_capture_wheel_debug_lines()
                 self._poll_control_socket()
 
-                autonomy_active = self.deploy and self.manual_control and not self.allstop
+                autonomy_active = (
+                    self.deploy and self.manual_control and not self.allstop
+                )
                 self._update_wheel_mode(autonomy_active)
                 task = self._current_task()
                 current_task_name = "DONE" if task is None else task.name
@@ -806,8 +907,13 @@ class MissionRuntime:
                 elif self.phase == MissionPhase.IDLE:
                     self._set_phase(MissionPhase.SEEK_GOAL)
 
-                if autonomy_active and self.phase not in (MissionPhase.DONE, MissionPhase.ESTOP):
-                    self._update_manipulator_for_task(task, active=(self.phase == MissionPhase.EXECUTE_TASK), now=now)
+                if autonomy_active and self.phase not in (
+                    MissionPhase.DONE,
+                    MissionPhase.ESTOP,
+                ):
+                    self._update_manipulator_for_task(
+                        task, active=(self.phase == MissionPhase.EXECUTE_TASK), now=now
+                    )
 
                     if self.phase == MissionPhase.SEEK_GOAL:
                         if self._person_blocking(now):
@@ -815,7 +921,9 @@ class MissionRuntime:
                             self._set_phase(MissionPhase.STOP_FOR_OBSTACLE)
                             wheel_rates = self._zero_wheel_rates()
                         else:
-                            wheel_rates, position_error_m, heading_error_rad = self._seek_goal_command(task, now)
+                            wheel_rates, position_error_m, heading_error_rad = (
+                                self._seek_goal_command(task, now)
+                            )
                     elif self.phase == MissionPhase.STOP_FOR_OBSTACLE:
                         wheel_rates = self._zero_wheel_rates()
                         if not self._person_blocking(now):
@@ -829,7 +937,9 @@ class MissionRuntime:
                     self.serial.send_wheel_cmd(*wheel_rates)
                     self.serial.flush_tx()
 
-                self._publish_telemetry(now, current_task_name, task, position_error_m, heading_error_rad)
+                self._publish_telemetry(
+                    now, current_task_name, task, position_error_m, heading_error_rad
+                )
 
                 state = self.localization_filter.get_state()
                 print(
@@ -845,7 +955,9 @@ class MissionRuntime:
                     if self._last_debug_rx_cmd_line is not None:
                         print(f"  wheel_rx_cmd: {self._last_debug_rx_cmd_line}")
                     if self._last_debug_applied_cmd_line is not None:
-                        print(f"  wheel_applied_cmd: {self._last_debug_applied_cmd_line}")
+                        print(
+                            f"  wheel_applied_cmd: {self._last_debug_applied_cmd_line}"
+                        )
                     if self._last_debug_cmd_line is not None:
                         print(f"  wheel_ack: {self._last_debug_cmd_line}")
                     if self._last_debug_eff_line is not None:
@@ -882,18 +994,40 @@ class MissionRuntime:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tasks", default=str(default_tasks_path()), help="Path to mission_config.yaml")
-    parser.add_argument("--camera", default=str(default_camera_path()), help="Path to camera_config.yaml")
-    parser.add_argument("--localization", default=str(default_localization_path()), help="Path to localization_config.yaml")
-    parser.add_argument("--port", default=None, help="Serial port for wheel controller ESP32")
-    parser.add_argument("--elevator-port", default=None, help="Serial port for elevator controller ESP32")
+    parser.add_argument(
+        "--tasks", default=str(default_tasks_path()), help="Path to mission_config.yaml"
+    )
+    parser.add_argument(
+        "--camera",
+        default=str(default_camera_path()),
+        help="Path to camera_config.yaml",
+    )
+    parser.add_argument(
+        "--localization",
+        default=str(default_localization_path()),
+        help="Path to localization_config.yaml",
+    )
+    parser.add_argument(
+        "--port", default=None, help="Serial port for wheel controller ESP32"
+    )
+    parser.add_argument(
+        "--elevator-port",
+        default=None,
+        help="Serial port for elevator controller ESP32",
+    )
     parser.add_argument("--disable-camera", action="store_true")
     parser.add_argument("--max-ticks", type=int, default=None)
     parser.add_argument("--debug-serial", action="store_true")
-    parser.add_argument("--telemetry-host", default=None, help="UDP host/IP for visualization telemetry")
+    parser.add_argument(
+        "--telemetry-host", default=None, help="UDP host/IP for visualization telemetry"
+    )
     parser.add_argument("--telemetry-port", type=int, default=8765)
     parser.add_argument("--telemetry-rate-hz", type=float, default=10.0)
-    parser.add_argument("--control-host", default="0.0.0.0", help="UDP bind host/IP for deploy/allstop control packets")
+    parser.add_argument(
+        "--control-host",
+        default="0.0.0.0",
+        help="UDP bind host/IP for deploy/allstop control packets",
+    )
     parser.add_argument("--control-port", type=int, default=8766)
     args = parser.parse_args()
 
