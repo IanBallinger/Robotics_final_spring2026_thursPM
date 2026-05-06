@@ -60,6 +60,14 @@ function clamp01(x)
     return min(1.0, max(0.0, x))
 end
 
+function safe_float(x, default::Float64)
+    try
+        return Float64(x)
+    catch
+        return default
+    end
+end
+
 function main()
     state_path = arg_value("--state", joinpath("traces", "mock_robot_state.json"))
     hz = max(1.0, arg_float("--hz", 20.0))
@@ -80,8 +88,8 @@ function main()
 
         pose = get(data, "pose", Any[0.45, -0.20, 0.45, 2.20, -2.20, 0.00])
         q = get(data, "q", Any[0.00, -1.57, 1.57, -1.57, -1.57, 0.00])
-        open_pct = Float64(get(data, "gripper_open_pct", 100.0))
-        force_pct = Float64(get(data, "gripper_force_pct", 100.0))
+        open_pct = safe_float(get(data, "gripper_open_pct", get(data, "right_gripper_open_pct", 100.0)), 100.0)
+        force_pct = safe_float(get(data, "gripper_force_pct", get(data, "right_gripper_force_pct", 100.0)), 100.0)
         last_cmd = String(get(data, "last_command", "none"))
 
         p = [Float64(pose[min(i, length(pose))]) for i in 1:6]
@@ -98,17 +106,26 @@ function main()
         q_live[1] += 0.01 * sin(2pi * 0.25 * t)
         q_live[6] += 0.015 * cos(2pi * 0.18 * t)
 
-        payload = Dict{String, Any}(
-            "timestamp" => time(),
-            "iso_time" => Dates.format(now(), dateformat"yyyy-mm-ddTHH:MM:SS.sss"),
-            "source" => "julia_mock_robot",
-            "pose" => p_live,
-            "q" => q_live,
-            "gripper_open_pct" => clamp01(open_pct / 100.0) * 100.0,
-            "gripper_force_pct" => clamp01(force_pct / 100.0) * 100.0,
-            "last_command" => last_cmd,
-            "sim_note" => "offline mock stream",
-        )
+        # Preserve existing keys and mirror gripper state into both generic and
+        # left/right fields so Julia-side tools can observe gripper changes.
+        payload = copy(data)
+        open_pct_clamped = clamp01(open_pct / 100.0) * 100.0
+        force_pct_clamped = clamp01(force_pct / 100.0) * 100.0
+
+        payload["timestamp"] = time()
+        payload["iso_time"] = Dates.format(now(), dateformat"yyyy-mm-ddTHH:MM:SS.sss")
+        payload["source"] = "julia_mock_robot"
+        payload["pose"] = p_live
+        payload["q"] = q_live
+        payload["gripper_open_pct"] = open_pct_clamped
+        payload["gripper_force_pct"] = force_pct_clamped
+        payload["left_gripper_open_pct"] = open_pct_clamped
+        payload["right_gripper_open_pct"] = open_pct_clamped
+        payload["left_gripper_open"] = open_pct_clamped >= 50.0
+        payload["right_gripper_open"] = open_pct_clamped >= 50.0
+        payload["last_command"] = last_cmd
+        payload["sim_note"] = "offline mock stream"
+
         write_json_atomic(state_path, payload)
 
         sleep(dt)

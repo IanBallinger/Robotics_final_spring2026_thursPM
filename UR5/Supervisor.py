@@ -168,8 +168,8 @@ OPEN_MICROWAVE_TASK_TEMPLATE = {
 # Unified canonical open-door task identity for both load/unload contexts.
 DOOR_OPEN_FOR_LOAD_TASK_ID = "door_open"
 CLOSE_MICROWAVE_TASK_ID = "close_door"
-PRESS_STOP_FOR_BOWL_TASK_ID = "press_stop_for_bowl"
-PRESS_STOP_FOR_PLATE_TASK_ID = "press_stop_for_plate"
+PRESS_STOP_TASK_ID = "press_stop"
+FOOD_REMOVAL_TASK_IDS = {"bowl_to_tray", "plate_to_tray"}
 
 
 class Supervisor:
@@ -1630,9 +1630,23 @@ class Supervisor:
             self._completed_tokens.discard(DOOR_OPEN_FOR_LOAD_TASK_ID)
             self._completed_task_ids.discard(DOOR_OPEN_FOR_LOAD_TASK_ID)
 
+    def _clear_press_stop_tokens_after_food_removed(self, task: QueuedTask):
+        """Invalidate press-stop completion once food has been removed.
+
+        This models press-stop as stateful per heating cycle: after a removal task
+        consumes the heated item, a new press-stop completion is required for the
+        next item cycle.
+        """
+        if task.task_id not in FOOD_REMOVAL_TASK_IDS:
+            return
+        self._completed_tokens.discard(PRESS_STOP_TASK_ID)
+        self._completed_tokens.discard("press_microwave_stop")
+        self._completed_task_ids.discard(PRESS_STOP_TASK_ID)
+
     def _mark_task_completed(self, task: QueuedTask):
         """Record task completion tokens with microwave open/close invalidation."""
         self._clear_mutually_exclusive_microwave_door_tokens(task)
+        self._clear_press_stop_tokens_after_food_removed(task)
         self._completed_tokens.add(task.task_id)
         self._completed_tokens.add(task.name)
         self._completed_task_ids.add(task.task_id)
@@ -2352,12 +2366,12 @@ class Supervisor:
         """
         by_put_task = {
             "put_bowl": {
-                "task_id": PRESS_STOP_FOR_BOWL_TASK_ID,
+                "task_id": PRESS_STOP_TASK_ID,
                 "target_food": "microwavable_bowl",
                 "prerequisites": ["close_door", "put_bowl"],
             },
             "put_plate": {
-                "task_id": PRESS_STOP_FOR_PLATE_TASK_ID,
+                "task_id": PRESS_STOP_TASK_ID,
                 "target_food": "microwavable_plate",
                 "prerequisites": ["put_plate"],
             },

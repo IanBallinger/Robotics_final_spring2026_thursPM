@@ -221,7 +221,7 @@
       "blocks_arms": [],
       "unblocks_arms": [],
       "prerequisites": [
-        "press_stop_for_bowl"
+        "press_stop"
       ],
       "points_if_completed": {},
       "params": {
@@ -379,7 +379,7 @@
       "blocks_arms": [],
       "unblocks_arms": [],
       "prerequisites": [
-        "press_stop_for_plate",
+        "press_stop",
         "door_open",
         "put_plate"
       ],
@@ -408,7 +408,7 @@
       "blocks_arms": [],
       "unblocks_arms": [],
       "prerequisites": [
-        "press_stop_for_bowl",
+        "press_stop",
         "door_open",
         "put_bowl"
       ],

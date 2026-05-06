@@ -228,6 +228,9 @@ def run_camera_detection(stream_socket, stream_target, stop_event, stream_send_l
                             ],
                             "timestamp": point_ts,
                             "color": det["color"],
+                            "spec_key": int(det.get("spec_key", -1)),
+                            "camera_index": int(det.get("camera_index", -1)),
+                            "axis_pair": list(det.get("axis_pair", ["x", "y"])),
                         }
 
             with vision_targets_lock:
@@ -795,6 +798,9 @@ def main(args):
                                 ],
                                 "timestamp": float(data.get("timestamp", 0.0)),
                                 "color": str(data.get("color", "")),
+                                "spec_key": int(data.get("spec_key", -1)),
+                                "camera_index": int(data.get("camera_index", -1)),
+                                "axis_pair": list(data.get("axis_pair", ["x", "y"])),
                             }
                         )
 

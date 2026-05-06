@@ -85,6 +85,7 @@ FIELD_RESOLUTION = {
 POSITION_SLIDER_HALF_RANGE_M = 0.05
 ROTATION_SLIDER_HALF_RANGE_RAD = 0.1
 GRIPPER_OPEN_MM_MAX = 85.0
+DEPENDENT_ITEM_NA = "N/A"
 
 
 def _mat_vec_mul_row(v, m):
@@ -219,6 +220,17 @@ def _pose_from_row(row, arm_side):
     ]
 
 
+def _row_has_arm_pose_data(row, arm_side):
+    p = _arm_prefix(arm_side)
+    keys = [f"{p}_x", f"{p}_y", f"{p}_z"]
+    for k in keys:
+        raw = row.get(k)
+        txt = str(raw if raw is not None else "").strip().lower()
+        if txt not in {"", "nothing"}:
+            return True
+    return False
+
+
 def _q_from_row(row, arm_side):
     p = _arm_prefix(arm_side)
     keys = [f"{p}_q_{i}" for i in range(6)]
@@ -248,6 +260,91 @@ def _tracked_item_position(row, label):
         if isinstance(pos, list) and len(pos) >= 3:
             return [_try_float(pos[0]), _try_float(pos[1]), _try_float(pos[2])]
     return None
+
+
+def _tracked_item_family_key(item):
+    if not isinstance(item, dict):
+        return "spec:-1"
+    spec_raw = item.get("spec_key", None)
+    if spec_raw is not None:
+        try:
+            return f"spec:{int(spec_raw)}"
+        except Exception:
+            pass
+    cam_raw = item.get("camera_index", None)
+    if cam_raw is not None:
+        try:
+            return f"cam:{int(cam_raw)}"
+        except Exception:
+            pass
+    return "spec:-1"
+
+
+def _tracked_item_with_label(row, label):
+    if not label:
+        return None
+    for item in _safe_json_list(row.get("tracked_items_json", "")):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("label", "")).strip().lower() != str(label).strip().lower():
+            continue
+        return item
+    return None
+
+
+def _tracked_item_position_with_offsets(row, label, family_offsets):
+    item = _tracked_item_with_label(row, label)
+    if not isinstance(item, dict):
+        return None
+    pos = item.get("position")
+    if not (isinstance(pos, list) and len(pos) >= 3):
+        return None
+    base = [_try_float(pos[0]), _try_float(pos[1]), _try_float(pos[2])]
+    fam = _tracked_item_family_key(item)
+    dx, dy, dz = family_offsets.get(fam, (0.0, 0.0, 0.0))
+    return [base[0] + float(dx), base[1] + float(dy), base[2] + float(dz)]
+
+
+def _sensitivity_domain_key(row):
+    label = str(row.get("dependent_item_label", "")).strip()
+    if not label or label == DEPENDENT_ITEM_NA:
+        return DEPENDENT_ITEM_NA
+    return label.lower()
+
+
+def _tracked_item_rgba(item, is_active):
+    alpha = 1.0 if is_active else 0.4
+    raw_color = str(item.get("color", "")).strip().lower()
+    raw_label = str(item.get("label", "")).strip().lower()
+    probe = f"{raw_color} {raw_label}"
+
+    named = {
+        "red": (0.85, 0.12, 0.12),
+        "yellow": (0.92, 0.82, 0.12),
+        "green": (0.14, 0.68, 0.24),
+        "blue": (0.12, 0.36, 0.86),
+        "purple": (0.56, 0.24, 0.76),
+        "tan": (0.78, 0.64, 0.46),
+        "orange": (0.95, 0.52, 0.12),
+    }
+    for key, rgb in named.items():
+        if key in probe:
+            return (rgb[0], rgb[1], rgb[2], alpha)
+
+    # Try matplotlib-native color parsing (named color, hex, etc.).
+    try:
+        parsed = matplotlib.colors.to_rgba(raw_color if raw_color else raw_label)
+        return (float(parsed[0]), float(parsed[1]), float(parsed[2]), alpha)
+    except Exception:
+        pass
+
+    return (0.5, 0.5, 0.5, alpha)
+
+
+def _tracked_item_is_red(item):
+    raw_color = str(item.get("color", "")).strip().lower()
+    raw_label = str(item.get("label", "")).strip().lower()
+    return "red" in raw_color or "red" in raw_label
 
 
 def _task_graph_default_dependent_label(task_graph_file, task_id):
@@ -504,6 +601,12 @@ class WaypointTuningRunnerUI:
         self.realtime_mode_var = tk.BooleanVar(value=False)
         self.object_label_var = tk.StringVar(value=args.object_label or "")
         self.object_label_combo = None
+        self.family_var = tk.StringVar(value="spec:-1")
+        self.family_combo = None
+        self.family_offset_x_var = tk.DoubleVar(value=0.0)
+        self.family_offset_y_var = tk.DoubleVar(value=0.0)
+        self.family_offset_z_var = tk.DoubleVar(value=0.0)
+        self.family_offset_map_by_arm = {"left": {}, "right": {}}
         self.step_sleep_var = tk.DoubleVar(value=float(args.play_step_sleep_s))
         self.file_label_var = tk.StringVar(value=str(self.current_file.name))
         self.gripper_open_pct_var = tk.DoubleVar(value=100.0)
@@ -519,7 +622,7 @@ class WaypointTuningRunnerUI:
         self.joint_delta_vars = {}
         self.joint_nominal_vars = {}
         self.info_var = tk.StringVar(value="")
-        self.distance_zero_wp_idx = None
+        self.distance_zero_wp_idx_by_domain = {}
 
         self._building = False
         self._play_thread = None
@@ -535,6 +638,7 @@ class WaypointTuningRunnerUI:
 
         self._build_ui()
         self._refresh_object_label_choices()
+        self._refresh_family_choices()
         self._set_waypoint(0)
 
         self._gripper_io_lock = threading.Lock()
@@ -565,7 +669,56 @@ class WaypointTuningRunnerUI:
         self.file_label_var.set(str(new_file.name))
         self.waypoint_slider.configure(to=max(0, len(self.edited_rows) - 1))
         self._refresh_object_label_choices()
+        self._refresh_family_choices()
         self._set_waypoint(0)
+
+    def _refresh_family_choices(self):
+        families = set(self._active_family_offset_map().keys())
+        for row in self.edited_rows:
+            for item in _safe_json_list(row.get("tracked_items_json", "")):
+                if not isinstance(item, dict):
+                    continue
+                families.add(_tracked_item_family_key(item))
+
+        ordered = sorted(families)
+        if not ordered:
+            ordered = ["spec:-1"]
+
+        if self.family_combo is not None:
+            self.family_combo["values"] = ordered
+
+        cur = str(self.family_var.get() or "").strip()
+        if cur not in ordered:
+            self.family_var.set(ordered[0])
+        self._sync_family_offset_controls_from_selection()
+
+    def _sync_family_offset_controls_from_selection(self):
+        fam = str(self.family_var.get() or "").strip()
+        off = self._active_family_offset_map().get(fam, (0.0, 0.0, 0.0))
+        self.family_offset_x_var.set(float(off[0]))
+        self.family_offset_y_var.set(float(off[1]))
+        self.family_offset_z_var.set(float(off[2]))
+
+    def _active_family_offset_map(self):
+        arm = str(self.arm_side).strip().lower()
+        if arm not in self.family_offset_map_by_arm:
+            self.family_offset_map_by_arm[arm] = {}
+        return self.family_offset_map_by_arm[arm]
+
+    def _on_family_changed(self):
+        self._sync_family_offset_controls_from_selection()
+        self._refresh_plots()
+        self._set_waypoint(self.current_idx)
+
+    def _on_family_offset_changed(self):
+        fam = str(self.family_var.get() or "").strip() or "spec:-1"
+        self._active_family_offset_map()[fam] = (
+            float(self.family_offset_x_var.get()),
+            float(self.family_offset_y_var.get()),
+            float(self.family_offset_z_var.get()),
+        )
+        self._refresh_plots()
+        self._set_waypoint(self.current_idx)
 
     def _refresh_object_label_choices(self):
         labels = set()
@@ -587,10 +740,13 @@ class WaypointTuningRunnerUI:
                     labels.add(label)
 
         ordered = sorted(labels, key=lambda x: x.lower())
+        values = [DEPENDENT_ITEM_NA] + ordered
         if self.object_label_combo is not None:
-            self.object_label_combo["values"] = ordered
+            self.object_label_combo["values"] = values
 
         current = str(self.object_label_var.get() or "").strip()
+        if current == DEPENDENT_ITEM_NA:
+            return
         if current and current in labels:
             return
 
@@ -604,6 +760,9 @@ class WaypointTuningRunnerUI:
 
         if ordered:
             self.object_label_var.set(ordered[0])
+            return
+
+        self.object_label_var.set(DEPENDENT_ITEM_NA)
 
     def _build_ui(self):
         self.root.columnconfigure(0, weight=0)
@@ -656,22 +815,71 @@ class WaypointTuningRunnerUI:
         )
         self.object_label_combo.grid(row=9, column=0, columnspan=5, sticky="ew")
         self.object_label_combo.bind("<<ComboboxSelected>>", lambda _ev: self._on_object_label_changed())
-
-        ttk.Label(controls, text="Play step sleep [s]").grid(row=10, column=0, sticky="w", pady=(6, 0))
-        ttk.Entry(controls, textvariable=self.step_sleep_var, width=8).grid(row=10, column=1, sticky="w")
-
-        ttk.Button(controls, text="Play Open Loop", command=lambda: self._play_sequence(False)).grid(row=11, column=0, columnspan=2, sticky="ew", pady=4)
-        ttk.Button(controls, text="Play Closed Loop", command=lambda: self._play_sequence(True)).grid(row=11, column=2, columnspan=2, sticky="ew", pady=4)
-        ttk.Button(controls, text="Stop Play", command=self._stop_playback).grid(row=11, column=4, sticky="ew", pady=4)
-
-        ttk.Button(controls, text="Add WP From Trace", command=self._add_waypoint_from_trace).grid(row=12, column=0, columnspan=2, sticky="ew", pady=2)
-        ttk.Button(controls, text="Add WP From Robot", command=self._add_waypoint_from_robot).grid(row=12, column=2, columnspan=2, sticky="ew", pady=2)
-
-        ttk.Button(controls, text="Set Dist Zero Here", command=self._set_distance_zero_here).grid(
-            row=13, column=0, columnspan=4, sticky="ew", pady=2
+        ttk.Button(controls, text="Persist Sensitivity ->", command=self._persist_sensitivity_forward).grid(
+            row=8, column=3, columnspan=2, sticky="ew", padx=(4, 0)
         )
 
-        row0 = 14
+        ttk.Label(controls, text="Camera spec family").grid(row=10, column=0, sticky="w", pady=(6, 0))
+        self.family_combo = ttk.Combobox(
+            controls,
+            textvariable=self.family_var,
+            width=18,
+            state="readonly",
+            values=["spec:-1"],
+        )
+        self.family_combo.grid(row=10, column=1, columnspan=2, sticky="ew")
+        self.family_combo.bind("<<ComboboxSelected>>", lambda _ev: self._on_family_changed())
+
+        ttk.Label(controls, text="Family XYZ offset [m]").grid(row=11, column=0, sticky="w")
+        tk.Scale(
+            controls,
+            from_=-0.3,
+            to=0.3,
+            orient=tk.HORIZONTAL,
+            resolution=0.001,
+            length=120,
+            variable=self.family_offset_x_var,
+            command=lambda _v: self._on_family_offset_changed(),
+            label="dx",
+        ).grid(row=11, column=1, sticky="ew")
+        tk.Scale(
+            controls,
+            from_=-0.3,
+            to=0.3,
+            orient=tk.HORIZONTAL,
+            resolution=0.001,
+            length=120,
+            variable=self.family_offset_y_var,
+            command=lambda _v: self._on_family_offset_changed(),
+            label="dy",
+        ).grid(row=11, column=2, sticky="ew")
+        tk.Scale(
+            controls,
+            from_=-0.3,
+            to=0.3,
+            orient=tk.HORIZONTAL,
+            resolution=0.001,
+            length=120,
+            variable=self.family_offset_z_var,
+            command=lambda _v: self._on_family_offset_changed(),
+            label="dz",
+        ).grid(row=11, column=3, sticky="ew")
+
+        ttk.Label(controls, text="Play step sleep [s]").grid(row=12, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(controls, textvariable=self.step_sleep_var, width=8).grid(row=12, column=1, sticky="w")
+
+        ttk.Button(controls, text="Play Open Loop", command=lambda: self._play_sequence(False)).grid(row=13, column=0, columnspan=2, sticky="ew", pady=4)
+        ttk.Button(controls, text="Play Closed Loop", command=lambda: self._play_sequence(True)).grid(row=13, column=2, columnspan=2, sticky="ew", pady=4)
+        ttk.Button(controls, text="Stop Play", command=self._stop_playback).grid(row=13, column=4, sticky="ew", pady=4)
+
+        ttk.Button(controls, text="Add WP From Trace", command=self._add_waypoint_from_trace).grid(row=14, column=0, columnspan=2, sticky="ew", pady=2)
+        ttk.Button(controls, text="Add WP From Robot", command=self._add_waypoint_from_robot).grid(row=14, column=2, columnspan=2, sticky="ew", pady=2)
+
+        ttk.Button(controls, text="Set Dist Zero Here", command=self._set_distance_zero_here).grid(
+            row=15, column=0, columnspan=4, sticky="ew", pady=2
+        )
+
+        row0 = 16
         ttk.Label(controls, text="Edit Pose (slider + text)", font=("Segoe UI", 10, "bold")).grid(row=row0, column=0, columnspan=5, sticky="w", pady=(10, 2))
 
         for i, field in enumerate(EDIT_FIELDS):
@@ -766,6 +974,9 @@ class WaypointTuningRunnerUI:
             variable=self.gripper_open_pct_var,
             command=lambda _v: self._on_gripper_open_change(),
         ).grid(row=gr_row + 1, column=1, sticky="ew")
+        ttk.Button(controls, text="Persist Gripper ->", command=self._persist_gripper_forward).grid(
+            row=gr_row + 1, column=2, columnspan=2, sticky="ew", padx=(4, 0)
+        )
 
         ttk.Label(controls, textvariable=self.info_var, wraplength=420, foreground="#003f5c").grid(row=gr_row + 2, column=0, columnspan=5, sticky="w", pady=(8, 2))
 
@@ -776,6 +987,7 @@ class WaypointTuningRunnerUI:
         self.canvas.get_tk_widget().grid(row=0, column=0, rowspan=2, sticky="nsew")
 
     def _queue_gripper_open_pct(self, open_pct):
+        # Single-slot overwrite queue: keep only the latest pending target.
         with self._gripper_state_lock:
             self._gripper_next_pct = int(max(0, min(100, int(open_pct))))
         self._gripper_worker_wakeup.set()
@@ -786,7 +998,7 @@ class WaypointTuningRunnerUI:
             with self._gripper_state_lock:
                 last = self._gripper_last_forwarded_pct
                 pending = self._gripper_next_pct
-            if int(last) == int(target_pct) and pending is None:
+            if last is not None and int(last) == int(target_pct) and pending is None:
                 return True
             time.sleep(0.01)
         return False
@@ -801,6 +1013,7 @@ class WaypointTuningRunnerUI:
             while not self._gripper_worker_stop.is_set():
                 with self._gripper_state_lock:
                     target_pct = self._gripper_next_pct
+                    self._gripper_next_pct = None
                 if target_pct is None:
                     break
 
@@ -810,12 +1023,15 @@ class WaypointTuningRunnerUI:
                     if self._gripper_worker_stop.wait(timeout=wait_s):
                         break
 
-                with self._gripper_state_lock:
-                    target_pct = self._gripper_next_pct
-                    self._gripper_next_pct = None
-
-                if target_pct is None:
-                    continue
+                # Coalesce: if newer pushes arrived during the throttle wait,
+                # overwrite with the latest single pending item.
+                while not self._gripper_worker_stop.is_set():
+                    with self._gripper_state_lock:
+                        newer = self._gripper_next_pct
+                        if newer is None:
+                            break
+                        target_pct = newer
+                        self._gripper_next_pct = None
 
                 self._send_gripper_open_pct(int(target_pct))
                 with self._gripper_state_lock:
@@ -882,11 +1098,47 @@ class WaypointTuningRunnerUI:
         self._schedule_realtime_update()
 
     def _on_object_label_changed(self):
+        row = self.edited_rows[self.current_idx]
+        selected = str(self.object_label_var.get() or "").strip()
+        row["dependent_item_label"] = "" if selected == DEPENDENT_ITEM_NA else selected
         self._refresh_plots()
         self._set_waypoint(self.current_idx)
 
+    def _persist_sensitivity_forward(self):
+        selected = str(self.object_label_var.get() or "").strip()
+        dep_value = "" if selected == DEPENDENT_ITEM_NA else selected
+        start_idx = int(self.current_idx)
+        for i in range(start_idx, len(self.edited_rows)):
+            self.edited_rows[i]["dependent_item_label"] = dep_value
+
+        self._set_waypoint(self.current_idx)
+        shown = DEPENDENT_ITEM_NA if dep_value == "" else dep_value
+        self.info_var.set(
+            f"Persisted sensitivity {shown} from waypoint {start_idx + 1} to {len(self.edited_rows)}"
+        )
+
     def _set_distance_zero_here(self):
-        self.distance_zero_wp_idx = int(self.current_idx)
+        row = self.edited_rows[self.current_idx]
+        dep = self._current_object_label(row)
+        domain = _sensitivity_domain_key(row)
+        item = _tracked_item_with_label(row, dep)
+        if isinstance(item, dict):
+            fam = _tracked_item_family_key(item)
+            active_offsets = self._active_family_offset_map()
+            off = active_offsets.get(fam, (0.0, 0.0, 0.0))
+            pos = item.get("position")
+            if isinstance(pos, list) and len(pos) >= 3:
+                raw = [_try_float(pos[0]), _try_float(pos[1]), _try_float(pos[2])]
+                adj = [raw[0] + off[0], raw[1] + off[1], raw[2] + off[2]]
+                wp = _row_global_xyz(row, self.arm_side)
+                correction = [wp[0] - adj[0], wp[1] - adj[1], wp[2] - adj[2]]
+                new_off = (off[0] + correction[0], off[1] + correction[1], off[2] + correction[2])
+                active_offsets[fam] = new_off
+                self.family_var.set(fam)
+                self._sync_family_offset_controls_from_selection()
+
+        if domain != DEPENDENT_ITEM_NA:
+            self.distance_zero_wp_idx_by_domain[domain] = int(self.current_idx)
         self._refresh_plots()
         self._set_waypoint(self.current_idx)
 
@@ -910,6 +1162,24 @@ class WaypointTuningRunnerUI:
             return
 
         self._queue_gripper_open_pct(open_pct)
+
+    def _persist_gripper_forward(self):
+        open_pct = max(0, min(100, int(round(float(self.gripper_open_pct_var.get())))))
+        pct_col = f"{self.arm_prefix}_gripper_open_pct"
+        legacy_col = f"{self.arm_prefix}_gripper_open"
+        start_idx = int(self.current_idx)
+        for i in range(start_idx, len(self.edited_rows)):
+            row = self.edited_rows[i]
+            row[pct_col] = f"{float(open_pct):.1f}"
+            row[legacy_col] = "1" if open_pct >= 50 else "0"
+
+        self._set_waypoint(self.current_idx)
+        self.info_var.set(
+            f"Persisted gripper {open_pct}% from waypoint {start_idx + 1} to {len(self.edited_rows)}"
+        )
+
+        if self.realtime_mode_var.get():
+            self._apply_gripper_for_waypoint(self.current_idx, blocking=False)
 
     def _send_gripper_open_pct(self, open_pct):
         # Gripper open percentage maps to 0..85mm.
@@ -1033,18 +1303,25 @@ class WaypointTuningRunnerUI:
 
             self.gripper_open_pct_var.set(float(self._row_gripper_open_pct(row)))
 
+            dep_row = str(row.get("dependent_item_label", "")).strip()
+            if dep_row:
+                self.object_label_var.set(dep_row)
+            else:
+                self.object_label_var.set(DEPENDENT_ITEM_NA)
+
             wp_idx = int(_try_float(row.get("waypoint_index", idx + 1), idx + 1))
             wp_name = str(row.get("waypoint_name", "")).strip() or f"wp_{wp_idx}"
             dep = self._current_object_label(row)
             dist_msg = "dist=-"
             if dep:
-                obj = _tracked_item_position(row, dep)
+                obj = _tracked_item_position_with_offsets(row, dep, self._active_family_offset_map())
                 if obj is not None:
                     row_xyz = _row_global_xyz(row, self.arm_side)
                     dist_msg = f"dist={_distance3(row_xyz, obj):.4f} m"
             zero_msg = ""
-            if self.distance_zero_wp_idx is not None:
-                zero_msg = f" zero_ref_wp={int(self.distance_zero_wp_idx) + 1}"
+            domain = _sensitivity_domain_key(row)
+            if domain != DEPENDENT_ITEM_NA and domain in self.distance_zero_wp_idx_by_domain:
+                zero_msg = f" zero_ref_wp={int(self.distance_zero_wp_idx_by_domain[domain]) + 1}"
             self.info_var.set(
                 f"Waypoint {idx + 1}/{len(self.edited_rows)} : index={wp_idx} name={wp_name} dependent={dep or '-'} {dist_msg}{zero_msg}"
             )
@@ -1083,10 +1360,10 @@ class WaypointTuningRunnerUI:
         self.joint_delta_vars[field].set(f"Δ={float(value) - float(nominal_q):+.4f}")
 
     def _current_object_label(self, row):
-        label = str(self.object_label_var.get() or "").strip()
-        if label:
-            return label
-        return str(row.get("dependent_item_label", "")).strip()
+        label = str(row.get("dependent_item_label", "")).strip()
+        if not label or label == DEPENDENT_ITEM_NA:
+            return ""
+        return label
 
     def _row_gripper_open_pct(self, row):
         gripper_pct_col = f"{self.arm_prefix}_gripper_open_pct"
@@ -1274,10 +1551,11 @@ class WaypointTuningRunnerUI:
         tuned = []
         idxs = []
         row_idxs = []
+        domains = []
 
         for i, (src, row) in enumerate(zip(self.source_rows, self.edited_rows)):
             dep = self._current_object_label(row)
-            obj = _tracked_item_position(row, dep)
+            obj = _tracked_item_position_with_offsets(row, dep, self._active_family_offset_map())
             if obj is None:
                 continue
 
@@ -1286,17 +1564,26 @@ class WaypointTuningRunnerUI:
 
             idxs.append(i + 1)
             row_idxs.append(i)
+            domains.append(_sensitivity_domain_key(row))
             nominal.append(_distance3(src_xyz, obj))
             tuned.append(_distance3(row_xyz, obj))
 
-        if self.distance_zero_wp_idx is not None:
-            baseline_row = int(self.distance_zero_wp_idx)
-            if baseline_row in row_idxs:
-                b = row_idxs.index(baseline_row)
-                nominal_zero = nominal[b]
-                tuned_zero = tuned[b]
-                nominal = [d - nominal_zero for d in nominal]
-                tuned = [d - tuned_zero for d in tuned]
+        if self.distance_zero_wp_idx_by_domain:
+            row_pos = {row_i: pos for pos, row_i in enumerate(row_idxs)}
+            baseline_by_domain = {}
+            for domain, baseline_row in self.distance_zero_wp_idx_by_domain.items():
+                bpos = row_pos.get(int(baseline_row), None)
+                if bpos is None:
+                    continue
+                baseline_by_domain[domain] = (nominal[bpos], tuned[bpos])
+
+            if baseline_by_domain:
+                for i, domain in enumerate(domains):
+                    base = baseline_by_domain.get(domain, None)
+                    if base is None:
+                        continue
+                    nominal[i] -= base[0]
+                    tuned[i] -= base[1]
 
         return idxs, nominal, tuned
 
@@ -1306,22 +1593,39 @@ class WaypointTuningRunnerUI:
 
         left_xyz = [_row_global_xyz(r, "left") for r in self.edited_rows]
         right_xyz = [_row_global_xyz(r, "right") for r in self.edited_rows]
-        lx = [p[0] for p in left_xyz]
-        ly = [p[1] for p in left_xyz]
-        lz = [p[2] for p in left_xyz]
-        rx = [p[0] for p in right_xyz]
-        ry = [p[1] for p in right_xyz]
-        rz = [p[2] for p in right_xyz]
 
-        self.ax_trace.plot(lx, ly, lz, color="#1f77b4", linewidth=1.4, label="left trace")
-        self.ax_trace.plot(rx, ry, rz, color="#ff7f0e", linewidth=1.4, label="right trace")
+        left_valid = [_row_has_arm_pose_data(r, "left") for r in self.edited_rows]
+        right_valid = [_row_has_arm_pose_data(r, "right") for r in self.edited_rows]
 
+        legend_handles = []
         ci = self.current_idx
-        self.ax_trace.scatter([lx[ci]], [ly[ci]], [lz[ci]], color="#1f77b4", s=65)
-        self.ax_trace.scatter([rx[ci]], [ry[ci]], [rz[ci]], color="#ff7f0e", s=65)
+
+        if any(left_valid):
+            lx = [p[0] if v else float("nan") for p, v in zip(left_xyz, left_valid)]
+            ly = [p[1] if v else float("nan") for p, v in zip(left_xyz, left_valid)]
+            lz = [p[2] if v else float("nan") for p, v in zip(left_xyz, left_valid)]
+            left_line = self.ax_trace.plot(
+                lx, ly, lz, color="#1f77b4", linewidth=1.4, label="left trace"
+            )[0]
+            legend_handles.append(left_line)
+            if 0 <= ci < len(left_xyz) and left_valid[ci]:
+                self.ax_trace.scatter([left_xyz[ci][0]], [left_xyz[ci][1]], [left_xyz[ci][2]], color="#1f77b4", s=65)
+
+        if any(right_valid):
+            rx = [p[0] if v else float("nan") for p, v in zip(right_xyz, right_valid)]
+            ry = [p[1] if v else float("nan") for p, v in zip(right_xyz, right_valid)]
+            rz = [p[2] if v else float("nan") for p, v in zip(right_xyz, right_valid)]
+            right_line = self.ax_trace.plot(
+                rx, ry, rz, color="#ff7f0e", linewidth=1.4, label="right trace"
+            )[0]
+            legend_handles.append(right_line)
+            if 0 <= ci < len(right_xyz) and right_valid[ci]:
+                self.ax_trace.scatter([right_xyz[ci][0]], [right_xyz[ci][1]], [right_xyz[ci][2]], color="#ff7f0e", s=65)
 
         row = self.edited_rows[ci]
         dep = self._current_object_label(row)
+        red_item_counter = 0
+        active_offsets = self._active_family_offset_map()
         for item in _safe_json_list(row.get("tracked_items_json", "")):
             if not isinstance(item, dict):
                 continue
@@ -1329,16 +1633,26 @@ class WaypointTuningRunnerUI:
             if not isinstance(pos, list) or len(pos) < 3:
                 continue
             label = str(item.get("label", "obj"))
-            col = "#7f7f7f"
-            if label.strip().lower() == dep.strip().lower() and dep:
-                col = "#d62728"
-            self.ax_trace.scatter([_try_float(pos[0])], [_try_float(pos[1])], [_try_float(pos[2])], color=col, s=40)
+            is_active = bool(dep) and label.strip().lower() == dep.strip().lower()
+            col = _tracked_item_rgba(item, is_active)
+            fam = _tracked_item_family_key(item)
+            dx, dy, dz = active_offsets.get(fam, (0.0, 0.0, 0.0))
+            px = _try_float(pos[0]) + float(dx)
+            py = _try_float(pos[1]) + float(dy)
+            pz = _try_float(pos[2]) + float(dz)
+            self.ax_trace.scatter([px], [py], [pz], color=col, s=40)
+
+            if _tracked_item_is_red(item):
+                red_item_counter += 1
+                text_label = f"{label} [red#{red_item_counter}]"
+                self.ax_trace.text(px, py, pz + 0.015, text_label, color="#ffdddd", fontsize=8)
 
         self.ax_trace.set_title("Arm Traces + Current Keypoint + Tracked Objects")
         self.ax_trace.set_xlabel("X [m]")
         self.ax_trace.set_ylabel("Y [m]")
         self.ax_trace.set_zlabel("Z [m]")
-        self.ax_trace.legend(loc="upper left")
+        if legend_handles:
+            self.ax_trace.legend(handles=legend_handles, loc="upper left")
 
         idxs, nominal, tuned = self._distance_series()
         if idxs:

@@ -1,25 +1,32 @@
 {
-    "iso_time": "2026-05-05T20:56:47.089",
-    "source": "julia_mock_robot",
-    "sim_note": "offline mock stream",
-    "gripper_force_pct": 100,
-    "last_command": "none",
-    "timestamp": 1.778029007089e9,
-    "pose": [
-        0.45156310684543327,
-        -0.19850391407091153,
-        0.45,
-        2.2,
-        -2.2,
-        -0.005063347582642521
-    ],
-    "q": [
-        0.007604059169552026,
-        -1.57,
-        1.57,
-        -1.57,
-        -1.57,
-        -0.008116819462174968
-    ],
-    "gripper_open_pct": 100
+  "last_command": "set_gripper_open_pct",
+  "left_gripper_open": true,
+  "q": [
+    -0.007843433767042966,
+    -1.57,
+    1.57,
+    -1.57,
+    -1.57,
+    0.003117444212442362
+  ],
+  "right_gripper_open_pct": 100,
+  "iso_time": "2026-05-05T21:51:23.942",
+  "pose": [
+    -0.412,
+    -0.389,
+    0.296224433,
+    -0.269704082,
+    -0.788593005,
+    -0.125855107
+  ],
+  "left_gripper_open_pct": 100,
+  "right_gripper_open": true,
+  "source": "julia_mock_robot",
+  "sim_note": "offline mock stream",
+  "gripper_force_pct": 100,
+  "timestamp": 1778036164.0982556,
+  "gripper_open_pct": 100.0,
+  "last_speed": null,
+  "last_acceleration": null,
+  "last_async": false
 }
